@@ -336,7 +336,7 @@ class TrackingVideo():
         import sys
         sys.path.append("..\\holocube")
         from camera import Camera
-        cam = Camera(plot_stimulus=False, kalman=True, config_fn="..\\video_player.config", camera=self.filename, video_player_fn="..\\video_player_server.py")
+        cam = Camera(plot_stimulus=False, kalman=True, config_fn="..\\video_player.config", camera=self.filename, video_player_fn="..\\video_player_server.py", com_correction=True)
         # cam.arm()
         cam.displaying = True
         # cam.capture_dummy()
@@ -394,17 +394,20 @@ class TrackingVideo():
         # get indices of the two ring masks
         # inner ring and angles:
         include_inner = (dists >= inner_radius - thickness/2) * (dists <= inner_radius + thickness/2)
+        self.inner_inds = include_inner
         ys_inner, xs_inner = np.where(include_inner)
         self.inner_ring_coords = np.array([xs_inner, ys_inner]).T
         self.inner_ring_angles = angles[include_inner]
         # outer ring and angles:
         include_outer = (dists >= outer_radius - thickness/2) * (dists <= outer_radius + thickness/2)
+        self.outer_inds = include_outer
         ys_outer, xs_outer = np.where(include_outer)
         self.outer_ring_coords = np.array([xs_outer, ys_outer]).T
         self.outer_ring_angles = angles[include_outer]
         # wing ring and angles:
         wing_radius = 2 * outer_radius
         include_wing = (dists >= wing_radius - thickness/2) * (dists <= wing_radius + thickness/2)
+        self.wing_inds = include_wing
         ys_outer, xs_outer = np.where(include_wing)
         self.wing_ring_coords = np.array([xs_outer, ys_outer]).T
         self.wing_ring_angles = angles[include_wing]
@@ -430,10 +433,88 @@ class TrackingVideo():
         """
         self.heading = []
         self.wing_vals = []
-        self.headings = {}
+        if 'headings' not in dir(self):
+            self.headings = {}
         print('processing individual frames:')
         for num, frame in enumerate(self.video):
-            if method == 'rings':
+            if method == 'combined':
+                # get the thresholded frame accounting for inversions
+                if floor == 0 and ceiling > 0:
+                    thresh = ceiling
+                    invert = False
+                elif ceiling >= 255 and floor > 0:
+                    thresh = floor
+                    invert = True
+                # get the ring coordinates
+                outer_inds, outer_angs = np.where(self.outer_inds), self.outer_ring_angles
+                inner_inds, inner_angs = np.where(self.inner_inds), self.inner_ring_angles
+                # 1. get outer ring, which should include just the tail
+                if frame.ndim > 2:
+                    frame = frame.mean(-1).astype('uint8')
+                # get thresholded frame                
+                if invert:
+                    frame_mask = frame < thresh
+                else:
+                    frame_mask = frame > thresh
+                # account for shifts in the center of mass
+                com = scipy.ndimage.measurements.center_of_mass(frame_mask)
+                diff = np.array(com) - np.array([self.height/2, self.width/2])
+                # get the outer ring values
+                outer_ring = frame[outer_inds[0], outer_inds[1]]
+                heading = np.nan
+                # 2. find the tail and head orientation by thresholding the outer ring
+                # values and calculate the tail heading as the circular mean
+                if invert:
+                    tail = outer_ring < thresh
+                else:
+                    tail = outer_ring > thresh
+                tail_angs = outer_angs[tail]
+                tail_dir = scipy.stats.circmean(tail_angs.flatten(), low=-np.pi, high=np.pi)
+                # the head direction is the polar opposite of the tail
+                head_dir = tail_dir + np.pi
+                if head_dir > np.pi:
+                    head_dir -= 2 * np.pi
+                # 3. get bounds of head angles, ignoring angles within +/- 90 degrees of the tail
+                lower_bounds, upper_bounds = [head_dir - np.pi / 2], [head_dir + np.pi / 2]
+                # wrap bounds if they go outside of [-pi, pi]
+                if lower_bounds[0] < -np.pi:
+                    lb = np.copy(lower_bounds[0])
+                    lower_bounds[0] = -np.pi
+                    lower_bounds += [lb + 2 * np.pi]
+                    upper_bounds += [np.pi]
+                elif upper_bounds[0] > np.pi:
+                    ub = np.copy(upper_bounds[0])
+                    upper_bounds[0] = np.pi
+                    upper_bounds += [ub - 2 * np.pi]
+                    lower_bounds += [-np.pi]
+                lower_bounds, upper_bounds = np.array(lower_bounds), np.array(upper_bounds)
+                # 4. calculate the heading within the lower and upper bounds
+                include = np.zeros(len(inner_angs), dtype=bool)
+                for lower, upper in zip(lower_bounds, upper_bounds):
+                    include += (inner_angs > lower) * (inner_angs < upper)
+                if np.any(include):
+                    inner_vals = frame[inner_inds[0], inner_inds[1]][include]
+                    if invert:
+                        head = inner_vals < thresh
+                    else:
+                        head = inner_vals > thresh
+                    heading = scipy.stats.circmean(
+                        inner_angs[include][head],
+                        low=-np.pi, high=np.pi)
+                # convert from heading angle to head position
+                heading_pos = self.inner_radius * np.array([np.sin(heading), np.cos(heading)])
+                # calculate direction vector between the center of the fly and the head
+                direction = heading_pos - diff
+                heading = np.arctan2(direction[0], direction[1])
+                # store the shift in the center of mass for plotting
+                self.com_shift = np.round(-diff).astype(int)
+                # center and wrap the heading
+                heading -= np.pi/2
+                if heading < -np.pi:
+                    heading += 2 * np.pi
+                # store
+                self.heading += [heading]
+            elif method == 'rings':
                 if frame.ndim > 2:
                     frame = frame.mean(-1).astype('uint8')
                 # 1. get angles of the outside ring corresponding to the fly's tail end
@@ -708,7 +789,6 @@ class TrackingVideo():
         # format
         plt.tight_layout()
         plt.show()
-        breakpoint()
 
 class OfflineTracker():
     def __init__(self, folder="./", vid_extension='.mp4'):
@@ -740,15 +820,14 @@ class OfflineTracker():
         self.vid_fns = new_vid_fns
         self.h5_fns = new_h5_fns
 
-    def process_vids(self, start_over=False, method='rings', wings=False, gui=False, display=False):
+    def process_vids(self, start_over=False, method='combined', wings=False, gui=False, display=False):
         """For each video and h5 file, track and store the heading data.
 
         Parameters
         ----------
         start_over : bool, default=False
             Whether to check if the offline dataset has already been saved.
-        
-        method : str, options=['rings', 'svd', 'fourier_mellin']
+        method : str, options=['combined', 'rings', 'svd', 'fourier_mellin']
             The method of measuring the
         wings : bool, default=False
             Whether to measure the left and right wingbeat amplitudes.
@@ -761,69 +840,81 @@ class OfflineTracker():
             # load the dataset, which specifies the inner and outer radii for
             # tracking
             data = TrackingTrial(h5_fn)
-            # online continue if 1) this hasn't been run before or start_over
+            # only continue if 1) this hasn't been run before or start_over
             # is set to True, 2) 'end_test' times were specified, and 3) the
             # dataset loaded successfully
-            # success = 'camera_heading_offline' not in dir(data)
-            # success = success or start_over
-            # success = success and 'stop_test' in dir(data)
-            # success = success and data.load_success
-            # todo: fix this 
             already_processed = 'camera_heading_offline' in dir(data)
             stop_specified = 'stop_test' in dir(data)
-            success = (not already_processed or start_over) and stop_specified and data.load_success
+            success = not already_processed and stop_specified and data.load_success
             if success or start_over:
                 # load the video and process the fly's heading
                 track = TrackingVideo(vid_fn)
-                if method == 'rings':
-                    # reset the rings 
+                if method == 'combined':
+                    # reset the rings and store in the database
                     if gui:
                         track.ring_gui()
                         inner_r, outer_r, threshold = track.inner_radius, track.outer_radius, track.threshold
                         for val, lbl in zip([inner_r, outer_r, threshold], ['inner_r', 'outer_r', 'thresh']):
-                            try:
-                                data.add_attr(lbl, val)
-                            except:
-                                breakpoint()
+                            data.add_attr(lbl, val)
         for vid_fn, h5_fn in zip(self.vid_fns, self.h5_fns):
             # load the dataset, which specifies the inner and outer radii for
             # tracking
             data = TrackingTrial(h5_fn)
-            # online continue if 1) this hasn't been run before or start_over
+            # continue if 1) this hasn't been run before or start_over
             # is set to True, 2) 'end_test' times were specified, and 3) the
             # dataset loaded successfully
-            # success = 'camera_heading_offline' not in dir(data)
-            # success = success or start_over
-            # success = success and 'stop_test' in dir(data)
-            # success = success and data.load_success
-            # todo: fix this 
             already_processed = 'camera_heading_offline' in dir(data)
             stop_specified = 'stop_test' in dir(data)
             success = (not already_processed or start_over) and stop_specified and data.load_success
             if success or start_over:
                 # load the video and process the fly's heading
                 track = TrackingVideo(vid_fn)
-                if method == 'rings':
+                if method == 'combined':
                     # reset the rings 
                     inner_r, outer_r, threshold = data.inner_r, data.outer_r, data.thresh
                     # set the ring parameters from our dataset
                     center = (track.width/2, track.height/2)
                     track.set_rings(center, inner_radius=inner_r, outer_radius=outer_r, thickness=5)
-                    track.get_heading(floor=0, ceiling=threshold, wings=wings)
-                    breakpoint()
+                    track.get_heading(floor=0, ceiling=threshold, wings=wings, method='combined')
+                    # why is the offline tracking so much longer than the online tracking?
+                    # note: I figured out why. the framerate of online tracking is determined by the 
+                    # framerate of the stimulus. this must have been limited to 60 Hz, for some reason, and
+                    # the camera must have been set to 120 Hz, so there was a 2-fold difference in the time 
+                    # course of the responses. Also, NaNs resulted in a lot of missing data due to the unwrap 
+                    # function, not actually missing data. The online tracking can be re-calculated almost 
+                    # perfectly by placing both on a regular timeline using the start_test and start_exp 
+                    # attributes. So, we can pretty safely split up the offline heading data via the 
+                    # following algorithm:
+                    # 1) apply a timestamp to each frame of the offline heading
+                    # 2) figure out the frame ratio between the duration of offline (k) and the online heading (j; k/j should be an integer)
+                    # 3) based on the length of the online heading tests, calculate the length of the offline tests, k
+                    # 4) generate a new dataset by grabbing the k values before each keyframe
+                    # plot the offline tracking with timing based on the start and stop of the experiment
+                    # heading_offline
+                    # time_offline = np.linspace(data.start_exp, data.stop_exp, len(heading_offline))
+                    # note: offline and online headings are off by about pi
+                    # plt.plot(time_offline, np.unwrap((heading_offline-np.pi)%2*np.pi - np.pi))
+                    # for kf, heading in zip(data.stop_test, data.camera_heading): plt.axvline(kf); ts = np.arange(len(heading)) / 120.; plt.plot(kf-2*ts[::-1], np.unwrap(heading))
                     if display:
                         track.graph_preview()
+                    # the method below assumes that the recorded framerates for the offline and online
+                    # heading are correct, but it looks like sometimes the holocube framerate says 120 
+                    # but was actually 60 Hz
                     # get times associated with each frame
-                    time = track.times / data.framerate
+                    # time = track.times / data.framerate
                     # the total duration is the same between the two
                     # time_offline = np.linspace(0, data.time.max(), len(track.times))
-                    heading_offline = track.heading
+                    heading_offline = track.headings['combined']
                     # time_online = data.query('time', sort_by='time')
                     # heading_online = data.query('camera_heading', sort_by='time')
                     heading_online = data.camera_heading
                     num_tests, num_frames = heading_online.shape
-                    frame_ratio = data.framerate / data.holocube_framerate
-                    num_frames_offline = int(math.ceil(frame_ratio * num_frames))
+                    duration = data.stop_exp - data.start_exp
+                    fps_offline = heading_offline.size / duration
+                    fps_online = heading_online.size / duration
+                    frame_ratio = fps_offline / fps_online
+                    # frame_ratio = np.round(data.framerate / data.holocube_framerate)
+                    num_frames_offline = int(round(frame_ratio * num_frames))
                     heading_offline_arr = np.zeros((num_tests, num_frames_offline), dtype=float)
                     total_frames = num_tests * frame_ratio * num_frames
                     extra_frames = heading_offline.shape[0] - total_frames
@@ -831,17 +922,17 @@ class OfflineTracker():
                     start, stop = data.start_exp, data.stop_exp
                     stops = data.stop_test
                     times_offline = np.linspace(start, stop, len(heading_offline) + 1)[:-1]
-                    intervals = np.diff(stops)
                     for num, (storage, stop) in enumerate(
                             zip(heading_offline_arr, stops)):
                         # 1. find the nearest frame to the stop point
-                        frame = np.argmin(abs(times_offline - stop))
+                        frame_num = np.argmin(abs(times_offline - stop))
                         # 2. get the clip before this stop point
-                        storage[:] = heading_offline[frame - num_frames_offline:frame]
-                    # todo: store the new headings in the dataset
-                    heading_offline_arr -= np.pi/2
-                    # heading_offline_arr[heading_offline_arr < -np.pi] += 2* np.pi
-                    # heading_offline_arr[heading_offline_arr > np.pi] -= 2* np.pi
+                        # account for slight differences in the length of each array
+                        max_x = min(frame_num, storage.shape[0])
+                        storage[- max_x:] = heading_offline[frame_num - max_x:frame_num]
+                    heading_offline_arr -= np.pi
+                    heading_offline_arr[heading_offline_arr < -np.pi] += 2* np.pi
+                    heading_offline_arr[heading_offline_arr > np.pi] -= 2* np.pi
                 elif method == 'svd':
                     # get the principle component of the above-threshold pixel coordinates
                     breakpoint()
@@ -851,13 +942,20 @@ class OfflineTracker():
                 time_offline = np.linspace(
                     0, time_online.max(), heading_offline_arr.size).reshape(
                     heading_offline_arr.shape)
-                breakpoint()
                 data.add_dataset('time_offline', time_offline)
                 print(f"updated {h5_fn}")
                 # test: plot the two flattened traces
-                # plt.plot(np.repeat((heading_online).flatten(), int(round(frame_ratio))), color='k', zorder=2)
-                # plt.plot(heading_offline_arr.flatten(), linestyle="", marker='.', color=red, zorder=3)
+                # plt.plot(np.repeat(np.unwrap(heading_online).flatten(), int(round(frame_ratio))), color='k', zorder=2)
+                # plt.plot(np.unwrap(heading_offline_arr.flatten()), linestyle="", marker='.', color=red, zorder=3)
                 # plt.show()
+                # check if the online and offline headings are close
+                # fig, ax = plt.subplots()
+                # times_online = np.linspace(0, data.stop_exp - data.start_exp, heading_online.size)
+                # times_offline = np.linspace(0, data.stop_exp - data.start_exp, heading_offline_arr.size)
+                # ax.plot(times_online, heading_online.flatten(), color='k', zorder=2)
+                # ax.plot(times_offline, heading_offline_arr.flatten(), linestyle="", marker='.', color=red, zorder=3)
+                # plt.show()
+                # breakpoint()
 
     def offline_comparison(self, smooth_offline=False):
         """Compare the offline from the online heading measurements.
@@ -1041,7 +1139,10 @@ class TrackingExperiment():
             # if 'dirname' in kwargs.values:
             #     breakpoint()
             # res = trial.query(output=kwargs['output'], subset=kwargs['subset'])
-            res = trial.query(**kwargs)
+            try:
+                res = trial.query(**kwargs)
+            except:
+                breakpoint()
             ret += [res]
         # check if all the results have the same shape
         try:
@@ -1602,11 +1703,11 @@ class TrackingExperiment():
         # add the sample size to the first subplot
         self.display.fig.suptitle(f"N={sample_size}")
 
-    def plot_saccade_dynamics(self, col_var, row_var, heading_var='camera_heading', row_cmap=None, col_cmap=None,
+    def plot_saccade_dynamics(self, col_var, row_var, row_cmap=None, col_cmap=None,
                               fig=None, right_margin=True, bottom_margin=True, scale=1.5, 
                               reversal_split=False, output='start', 
-                              min_speed=350, max_speed=np.inf, reference_var=None, bins=21,
-                              **query_kwargs):
+                              heading_var='camera_heading', reference_var=None, bins=21,
+                              min_speed=350, max_speed=np.inf, **query_kwargs):
         """Plot saccade position (x) and amplitude (y) in a grid as in the plot summary below.
         
         These plots will allow us to measure the 
@@ -1615,8 +1716,6 @@ class TrackingExperiment():
         ----------
         col_var, row_var : str
             The variable names to paramaterize along columns and rows of the grid.
-        heading_var : str, default='camera_heading'
-            The variable to use for the saccade heading.
         time_var : str, default='time'
             The time variable to use. So far there are two options: 1) time from the start 
             of the saccade or 2) time from the peak velocity.
@@ -1628,14 +1727,15 @@ class TrackingExperiment():
             Whether to use the start or stop position of the saccade.
         min_speed, max_speed : float, default=350, np.inf
             The minimum and maximum peak speed to include in the saccades here.
+        heading_var : str, default='camera_heading'
+            The variable to use for the saccade heading.
         reference_var : str, default=None
             If provided, the saccades will be aligned to the value of this variable.
         bins : int, default=21
-            The bins to use for the 2D histogram.
         **query_kwargs
             These get passed to the query 
         """
-        # force the bottom and right margins to be off
+        # for now, no bottom or right margins
         bottom_margin, right_margin = False, False
         assert output in ['start', 'stop'], "output parameter must be either 'start' or 'stop'"
         if 'subset' not in query_kwargs:
@@ -1654,14 +1754,8 @@ class TrackingExperiment():
             col_vals = [None]
         assert len(col_vals) > 0 or len(row_vals) > 0, "The subset is empty!"
         # todo: what's up with the number of axes?
-        if len(row_vals) > 0:
-            row_vals = np.unique(row_vals)
-        else:
-            row_vals = np.unique(row_vals)
-        if len(col_vals) > 0:
-            col_vals = np.unique(col_vals)
-        else:
-            col_vals = np.unique(col_vals)
+        row_vals = np.unique(row_vals)
+        col_vals = np.unique(col_vals)
         num_rows, num_cols = len(row_vals), len(col_vals)
         # get the colors from the specified colormaps
         # get the colors from the specified colormaps
@@ -1765,6 +1859,23 @@ class TrackingExperiment():
                 # collect the saccade starting positions and amplitudes for making a 2D plot 
                 for trial in self.trials:
                     bouts = trial.query_bouts(sort_by=query_kwargs['sort_by'], subset=subset)
+                    resps = trial.query('camera_heading', sort_by=query_kwargs['sort_by'], subset=subset)
+                    bar_positions = trial.query('bar_orientation', sort_by=query_kwargs['sort_by'], subset=subset)
+                    for bout, bar_position, resp in zip(bouts, bar_positions, resps):
+                        bar_position = np.unwrap(bar_position)
+                        bar_position += np.pi
+                        bar_position %= 2*np.pi
+                        bar_position -= np.pi
+                        for saccade in bout.saccades:
+                            peak_speed = abs(saccade.peak_velocity) * 180 / np.pi
+                            if (peak_speed >= min_speed) * (peak_speed <= max_speed):
+                                # store the start position, stop position, and signed amplitude
+                                # todo: get the position of the bar and calculate heading angles relative to the bar
+                                for storage, pos in zip([start_pos, stop_pos], [saccade.start, saccade.stop]):
+                                    bar = bar_position[pos]
+                                    head = resp[pos]
+                                    storage += [bar - head]
+                                amps += [saccade.amplitude]
                     resps = trial.query(heading_var, sort_by=query_kwargs['sort_by'], subset=subset)
                     # convert the bar_positions variable to a general reference angle input parameter
                     if reference_var in dir(trial):
@@ -1797,7 +1908,6 @@ class TrackingExperiment():
                                     for storage, pos in zip([start_pos, stop_pos], [saccade.start, saccade.stop]):
                                         head = resp[pos]
                                         storage += [head]
-                                    amps += [saccade.amplitude]
                 if not isinstance(col, (list, np.ndarray)):
                     col = [col]
                 amplitude = np.array(amps)
@@ -1808,17 +1918,26 @@ class TrackingExperiment():
                 position += np.pi
                 position %= 2*np.pi
                 position -= np.pi
-                for ax in col:
+                for ax, row_summ_ax in zip(col, row_summ_axes):
                     data = {'amplitude':amplitude, 'position':position}
-                    hist = ax.hist2d(position, amplitude, bins=bins, range=[[-np.pi, np.pi],[-np.pi, np.pi]], cmap='Greys')
+                    # ax = plt.gca()
+                    # sbn.kdeplot(data=data, x='position', y='amplitude', ax=ax, levels=20, fill=True, cmap='Greys')
+                    # ax.scatter(position, amplitude, marker='.', alpha=.1, color='k', edgecolor='none')
+                    ax.hist2d(position, amplitude, bins=21, range=[[-np.pi, np.pi],[-np.pi, np.pi]], cmap='Greys')
+                    # ax.set_xlabel(None)
+                    # ax.set_ylabel(None)
+                    # ax.set_xlabel('position')
+                    # ax.set_ylabel('amplitude')
                     ax.set_aspect('equal')
-                    # plt.colorbar(hist[3], ax=ax)
-
+                    # ax.set_xticks([-np.pi, -np.pi/2, 0, np.pi/2, np.pi], ['-$\pi$', '-$\pi$/2', '0', '$\pi$/2', '$\pi$'])
+                    # ax.set_yticks([-np.pi, -np.pi/2, 0, np.pi/2, np.pi], ['-$\pi$', '-$\pi$/2', '0', '$\pi$/2', '$\pi$'])
+                    # plot mean +/- SEM
         # add the xticks, yticks, and axis labels
         ticks = ([-np.pi, -np.pi/2, 0, np.pi/2, np.pi], ['-$\pi$', '-$\pi$/2', '0', '$\pi$/2', '$\pi$'])
-        self.display.format(xlim=(-np.pi, np.pi), ylim=(-np.pi, np.pi), 
+        self.display.format(xlim=(np.pi, np.pi), ylim=(-1.25*np.pi, 1.25*np.pi), 
                             xlabel='orientation', ylabel='amplitude', 
                             xticks=ticks, yticks=ticks)
+        plt.show()
         # format the bottom and right margins to show the 
         if bottom_margin:
             bottom_row = self.display.bottom_row
@@ -2350,9 +2469,6 @@ class TrackingExperiment():
                     ax.set_aspect('equal')
                     ax.set_xlim(-max_radius, max_radius)
                     ax.set_ylim(-max_radius, max_radius)
-                breakpoint()
-                # todo: flip the y-axis for all of the summary axes
-                # todo: add the y-axis to the right column
             if xlabel is None:
                 xlabel = xvar
             if ylabel is None:
@@ -2584,9 +2700,8 @@ class SummaryDisplay():
             num_rows = 1
         if num_cols == 0:
             num_cols = 1
-        # make the figure and axes
-        self.fig, self.axes = plt.subplots(
-            num_rows, num_cols, layout='constrained', **fig_kwargs)
+        self.fig, self.axes = plt.subplots(num_rows, num_cols, layout='constrained',
+                                           **fig_kwargs)
         if num_rows == 1 and num_cols == 1:
             self.axes = np.array([self.axes])[:, np.newaxis]
         if num_rows == 1:
@@ -2750,10 +2865,7 @@ class SummaryDisplay():
             for col_num, (ax, is_left, is_bottom) in enumerate(zip(row, are_left, are_bottom)):
                 # set the plot limits if they were specified
                 if xlim is not None:
-                    try:
-                        ax.set_xlim(xlim[0], xlim[1])
-                    except:
-                        breakpoint()
+                    ax.set_xlim(xlim[0], xlim[1])
                 if ylim is not None:
                     if not (special_bottom_left and is_bottom and is_left):
                         ax.set_ylim(ylim[0], ylim[1])
@@ -2812,8 +2924,8 @@ class TrackingTrial():
         except:
             pass
         if self.file_opened:
-            # store the h5 datasets as attributes
-            self.holocube_framerate = holocube_framerate
+            # # store the h5 datasets as attributes
+            # self.holocube_framerate = holocube_framerate
             # store whether the datasets were completely loaded
             self.load_datasets()
             # grab default dataset frequently used
@@ -2880,10 +2992,7 @@ class TrackingTrial():
         min_frames = np.inf
         for attr in ['orientation', 'camera_heading', 'virtual_heading']:
             if attr in dir(self):
-                try:
-                    min_frames = min(self.__getattribute__(attr).shape[1], min_frames)
-                except:
-                    breakpoint()
+                min_frames = min(self.__getattribute__(attr).shape[1], min_frames)
         for attr in ['orientation', 'camera_heading', 'virtual_heading']:
             if attr in dir(self):
                 self.__setattr__(attr, self.__getattribute__(attr)[:, :min_frames])
@@ -2896,6 +3005,10 @@ class TrackingTrial():
             # make a count of each frame in order from start to end
             self.frame_ind_offline = np.arange(self.num_tests * self.num_frames_offline).reshape(
                 self.num_tests, self.num_frames_offline)
+        # measure the framerate directly
+        duration = self.stop_exp - self.start_exp
+        self.holocube_framerate = self.camera_heading.size / duration
+        # store the approximate times
         if 'num_frames' in dir(self):
             self.test_ind = np.arange(self.num_tests)
             # make a count of each frame in order from start to end
@@ -2977,7 +3090,7 @@ class TrackingTrial():
                 var = self.__getattribute__(key)
                 if not isinstance(var, (list, tuple, np.ndarray)):
                     var = np.repeat(var, self.num_tests)
-                if len(var) == self.num_tests:
+                if len(var) == len(include):
                     if isinstance(val, (list, tuple, np.ndarray)):
                         inds = np.array([test in val for test in var])
                     else:
@@ -2995,10 +3108,7 @@ class TrackingTrial():
                     pad = include.ndim - inds.ndim
                     index = [...]
                     index += [np.newaxis for p in range(pad)]
-                    try:
-                        include = include * inds[tuple(index)]
-                    except:
-                        breakpoint()
+                    include = include * inds[tuple(index)]
                 else:
                     print(f"A subset variable, {key}, has length {len(var)} but should be {len(include)}.")
         # grab the indexing variable
@@ -3219,6 +3329,7 @@ class TrackingTrial():
         if isinstance(ret, (str, bytes)):
             ret = np.repeat(ret, self.num_tests)
         include = np.ones(ret.shape, dtype=bool)
+        logic_conv = {'<':np.less, '<=':np.less_equal, '==':np.equal,'>':np.greater,'>=':np.greater_equal}
         if len(subset.keys()) > 0:
             for key, val in subset.items():                
                 logic, thresh = np.equal, val
@@ -3234,13 +3345,6 @@ class TrackingTrial():
                         inds = np.array([test in val for test in var])
                     # elif isinstance(val, (float, int, str, bool, bytes, np.integer, np.floating, np.str_)):
                     else:
-                        # inds = var == val
-                        # if isinstance(thresh, str):
-                        #     try:
-                        #         inds = np.char.equal(var, val)
-                        #     except:
-                        #         breakpoint()
-                        # else:
                         inds = logic(var, thresh)
                         if isinstance(val, float):
                             if np.isnan(val):
@@ -3250,10 +3354,7 @@ class TrackingTrial():
                     pad = include.ndim - inds.ndim
                     index = [...]
                     index += [np.newaxis for p in range(pad)]
-                    try:
-                        include = include * inds[tuple(index)]
-                    except:
-                        breakpoint()
+                    include = include * inds[tuple(index)]
                 else:
                     print(f"A subset variable, {key}, has length {len(var)} but should be {len(include)}.")
         # if self.dirname == 'Empty Sp Gal4' and 'img_id' in subset.keys():
@@ -3804,8 +3905,9 @@ class Bout():
                             # collect Saccades of each slice of the array
                             self.saccades += [Saccade(arr, self.framerate, start=in_point, stop=out_point, **saccade_kwargs)]
 
-    def query_saccades(self, output='heading', time_var='time', start=0, stop=np.inf, min_speed=350, max_speed=np.inf,
-                       **query_kwargs):
+
+    def query_saccades(self, output='heading', time_var='time', start=0, stop=np.inf, min_speed=350,
+                       max_speed=np.inf, **query_kwargs):
         """Grab saccade data between the start and stop times.
         
         Parameters
@@ -3839,14 +3941,6 @@ class Bout():
                     time, saccade = saccade.query(output=output, time_var=time_var, start=start, stop=stop)
                     times += [time]
                     saccades += [saccade]
-        # trim to the shortest length
-        # lengths = [len(saccade) for saccade in saccades]
-        # min_length = min(lengths)
-        # saccades = [saccade[:min_length] for saccade in saccades]
-        # times = [time[:min_length] for time in times]
-        # make into numpy arrays
-        # self.saccade_arr = np.asarray(saccades)
-        # times = np.asarray(times)
         return times, saccades
 
 class Saccade():
@@ -4192,7 +4286,6 @@ def interprate_inequality(string):
         pass
     # return the partial function
     return logic, val
-
 
 if __name__ == "__main__":
     tracker = OfflineTracker("..\\arena\\fourier feedback")
