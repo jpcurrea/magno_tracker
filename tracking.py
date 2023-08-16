@@ -28,6 +28,8 @@ from skvideo import io
 import sys
 import pandas as pd
 
+from functools import partial
+
 # for the video analysis
 # from ring_analysis import *
 # for plotting
@@ -305,7 +307,9 @@ class TrackingVideo():
         else:
             # self.video = io.vread(self.filename, as_grey=True)[..., 0]
             # self.times = np.arange(len(self.video))
-            self.video = io.FFmpegReader(self.filename)
+            input_dict = {'-hwaccel': 'cuda', '-hwaccel_output_format': 'cuda'}
+            output_dict = {'-c:v': 'h264_nvenc'}
+            self.video = io.FFmpegReader(self.filename, inputdict=input_dict, outputdict=output_dict)
             self.video.shape = self.video.getShape()
             self.times = np.arange(self.video.shape[0]) / self.video.inputfps
             # todo: replace the array method for an interative method of getting heading data
@@ -344,6 +348,11 @@ class TrackingVideo():
         # store results from the gui
         for var, var_storage in zip(['thresh', 'inner_r', 'outer_r'], ['threshold', 'inner_radius', 'outer_radius']): 
             self.__setattr__(var_storage, cam.__getattribute__(var))
+        # save these new values into the corresponding h5 file
+        # extension = "." + self.filename.split(".")[-1]
+        # h5_fn = self.filename.replace(extension, ".h5")
+        # breakpoint()
+        # dataset = h5py.File(h5_fn, mode='r+')
 
     def set_rings(self, center, inner_radius=10, outer_radius=20, wing_radius=40, 
                   thickness=3):
@@ -771,12 +780,37 @@ class OfflineTracker():
                     if gui:
                         track.ring_gui()
                         inner_r, outer_r, threshold = track.inner_radius, track.outer_radius, track.threshold
-                    else:
-                        inner_r, outer_r, threshold = data.inner_r, data.outer_r, data.thresh
+                        for val, lbl in zip([inner_r, outer_r, threshold], ['inner_r', 'outer_r', 'thresh']):
+                            try:
+                                data.add_attr(lbl, val)
+                            except:
+                                breakpoint()
+        for vid_fn, h5_fn in zip(self.vid_fns, self.h5_fns):
+            # load the dataset, which specifies the inner and outer radii for
+            # tracking
+            data = TrackingTrial(h5_fn)
+            # online continue if 1) this hasn't been run before or start_over
+            # is set to True, 2) 'end_test' times were specified, and 3) the
+            # dataset loaded successfully
+            # success = 'camera_heading_offline' not in dir(data)
+            # success = success or start_over
+            # success = success and 'stop_test' in dir(data)
+            # success = success and data.load_success
+            # todo: fix this 
+            already_processed = 'camera_heading_offline' in dir(data)
+            stop_specified = 'stop_test' in dir(data)
+            success = (not already_processed or start_over) and stop_specified and data.load_success
+            if success or start_over:
+                # load the video and process the fly's heading
+                track = TrackingVideo(vid_fn)
+                if method == 'rings':
+                    # reset the rings 
+                    inner_r, outer_r, threshold = data.inner_r, data.outer_r, data.thresh
                     # set the ring parameters from our dataset
                     center = (track.width/2, track.height/2)
                     track.set_rings(center, inner_radius=inner_r, outer_radius=outer_r, thickness=5)
                     track.get_heading(floor=0, ceiling=threshold, wings=wings)
+                    breakpoint()
                     if display:
                         track.graph_preview()
                     # get times associated with each frame
@@ -817,6 +851,7 @@ class OfflineTracker():
                 time_offline = np.linspace(
                     0, time_online.max(), heading_offline_arr.size).reshape(
                     heading_offline_arr.shape)
+                breakpoint()
                 data.add_dataset('time_offline', time_offline)
                 print(f"updated {h5_fn}")
                 # test: plot the two flattened traces
@@ -973,7 +1008,7 @@ class OfflineTracker():
 
 
 class TrackingExperiment():
-    def __init__(self, dirname, remove_incompletes=True):
+    def __init__(self, dirname, remove_incompletes=True, **trial_kwargs):
         """Load all H5 TrackingTrial files from the same experiment.
 
         Parameters
@@ -991,29 +1026,49 @@ class TrackingExperiment():
         
         self.trials = []
         for fn in self.h5_files:
-            try:
-                trial = TrackingTrial(fn)
-                if trial.load_success:
-                    self.trials += [trial]
-            except:
-                pass
+            trial = TrackingTrial(fn, **trial_kwargs)
+            if trial.load_success:
+                self.trials += [trial]
         if remove_incompletes:
             self.remove_incompletes()
 
-    def query(self, **kwargs):
+    def query(self, same_size=True, **kwargs):
         """Get specified data from each trial."""
         ret = []
+        if 'subset' not in kwargs.keys():
+            kwargs['subset'] = {}
         for trial in self.trials:
-            ret += [trial.query(**kwargs)]
+            # if 'dirname' in kwargs.values:
+            #     breakpoint()
+            # res = trial.query(output=kwargs['output'], subset=kwargs['subset'])
+            res = trial.query(**kwargs)
+            ret += [res]
         # check if all the results have the same shape
-        first_shape = ret[0].shape
+        try:
+            first_shape = ret[0].shape
+        except:
+            breakpoint()
         same_shape = [trial_data.shape == first_shape for trial_data in ret]
         # return as an array if they are all the same shape
         if np.all(same_shape):
-            return np.array(ret)
-        # otherwise return as a list
-        else:
-            return ret
+            ret = np.array(ret)
+        elif same_size:
+            shapes = [arr.shape for arr in ret]
+            sizes = np.array([arr.size for arr in ret])
+            max_shape = shapes[np.argmax(sizes)]
+            new_ret = []
+            empty = np.zeros(max_shape)
+            for arr in ret:
+                empty.fill(np.nan)
+                if arr.ndim > 1:
+                    for vals, storage in zip(arr, empty):
+                        storage[:len(vals)] = vals
+                else:
+                    empty[:, :len(arr)] = arr
+                new_ret += [np.copy(empty)]
+            ret = np.array(new_ret)
+            # find the maximum shape and pad the others with NaNs to match
+        return ret
 
     def query_bouts(self, **kwargs):
         """Get the bouts from each trial."""
@@ -1170,11 +1225,12 @@ class TrackingExperiment():
             trial.__setattr__(key, trial.__getattribute__(key+"_smoothed"))
 
     def plot_saccades(self, col_var, row_var, time_var='time', start=0, 
-                      stop=np.inf, row_cmap=None, col_cmap=None, 
+                      stop=.5, row_cmap=None, col_cmap=None, 
                       fig=None, right_margin=True, bottom_margin=True,
                       xlim=None, ylim=None, xticks=None, yticks=None, 
                       positive_amplitude=False, scale=1.5, reversal_split=False,
                       saccade_var='arr_relative', min_speed=350, max_speed=np.inf,
+                      mean_bins=25,
                       **query_kwargs):
         """Plot saccade data in one big grid as in the plot summary below.
         
@@ -1216,6 +1272,8 @@ class TrackingExperiment():
             of the saccade. Choose one from the following: arr_relative, velocity, acceleration.
         summary_func : callable, default=np.nanmean
             The function to plot summarizing the data in each subplot.
+        mean_bins : int, default=25
+            The number of bins to use for bin averaging the saccade time series.
         min_speed, max_speed : float, default=350, np.inf
             The minimum and maximum peak speed to include in the saccades here.
         **query_kwargs
@@ -1237,14 +1295,8 @@ class TrackingExperiment():
             col_vals = [None]
         assert len(col_vals) > 0 or len(row_vals) > 0, "The subset is empty!"
         # todo: what's up with the number of axes?
-        if len(row_vals) > 0:
-            row_vals = np.unique(row_vals[0])
-        else:
-            row_vals = np.unique(row_vals)
-        if len(col_vals) > 0:
-            col_vals = np.unique(col_vals[0])
-        else:
-            col_vals = np.unique(col_vals)
+        row_vals = np.unique(row_vals)
+        col_vals = np.unique(col_vals)
         num_rows, num_cols = len(row_vals), len(col_vals)
         # get the colors from the specified colormaps
         colors = {}
@@ -1254,6 +1306,9 @@ class TrackingExperiment():
             ['rows', 'columns']):
             if len(vals) > 0:
                 if isinstance(cmap, str):
+                    if isinstance(vals[0], (str, bytes)):
+                        # if values are strings, sort them in alphabetical order and use their index for the colors
+                        vals = np.argsort(vals)
                     norm = matplotlib.colors.Normalize(vals.min(), vals.max())
                     cmap = matplotlib.cm.ScalarMappable(norm=norm, cmap=cmap)
                     colors[key] = cmap.to_rgba(vals)[:, :-1]
@@ -1355,6 +1410,7 @@ class TrackingExperiment():
                             if (peak_speed >= min_speed) * (peak_speed <= max_speed):
                                 # get the corresponding time values
                                 time = saccade.__getattribute__(time_var)
+                                
                                 heading = np.copy(saccade.__getattribute__(saccade_var))
                                 # get the range of times to plot
                                 include = (time >= start) * (time < stop)
@@ -1404,6 +1460,11 @@ class TrackingExperiment():
                                 start_amps += [heading[start_ind]]
                                 # if time_var == 'relative_time':
                                 #     ax.scatter(heading[start_ind], time[start_ind], marker='.', color='k', edgecolor='none', alpha=.5, zorder=2)
+                                # if positive_amplitude:
+                                    # plot a single mean
+                                # else:
+                                    # todo: plot the mean in the trace subplot and the mean +/- CI in the right margin
+                                    # for each direction
                 # make a scatterplot of the start and stop times
                 if bottom_margin:
                     xvals = np.array(stop_amps)
@@ -1417,6 +1478,8 @@ class TrackingExperiment():
                 # try:
                 if not isinstance(col, (list, np.ndarray)):
                     col = [col]
+                if row_summ_axes is None:
+                    row_summ_axes = [None]
                 for ax, row_summ_ax, same_dir in zip(col, row_summ_axes, [True, False]):
                     # get the mean time and heading within 20 evenly distributed bins
                     time_bins_pos = []
@@ -1425,7 +1488,7 @@ class TrackingExperiment():
                     time_bins_neg = []
                     saccade_bins_mean_neg = []
                     saccade_bins_sem_neg = []
-                    time_edges = np.linspace(start, stop, 50)
+                    time_edges = np.linspace(start, stop, mean_bins)
                     signs = [1, -1]
                     if positive_amplitude:
                         # reducing to just the positive sign, the nested zip loops will skip the negative calculations
@@ -1444,7 +1507,7 @@ class TrackingExperiment():
                                     include = (time >= time_start) * (time < time_stop)
                                     # and only those within headings in the same sign
                                     if np.any(include):
-                                        headings_mean = heading[include].mean()
+                                        headings_mean = np.nanmean(heading[include])
                                         if headings_mean/abs(headings_mean) == sign or positive_amplitude:
                                             saccade_bin += [heading[include]]
                                     else:
@@ -1523,6 +1586,7 @@ class TrackingExperiment():
                 else:
                     ax.set_yticks([])
                 sbn.despine(ax=ax, bottom=False, left=num!=0)
+        if right_margin and bottom_margin:
             self.display.corner_ax.axis('off')
         # add the row values
         # make specific labels if reversal_split
@@ -1538,10 +1602,11 @@ class TrackingExperiment():
         # add the sample size to the first subplot
         self.display.fig.suptitle(f"N={sample_size}")
 
-    def plot_saccade_dynamics(self, col_var, row_var, row_cmap=None, col_cmap=None,
+    def plot_saccade_dynamics(self, col_var, row_var, heading_var='camera_heading', row_cmap=None, col_cmap=None,
                               fig=None, right_margin=True, bottom_margin=True, scale=1.5, 
                               reversal_split=False, output='start', 
-                              min_speed=350, max_speed=np.inf, **query_kwargs):
+                              min_speed=350, max_speed=np.inf, reference_var=None, bins=21,
+                              **query_kwargs):
         """Plot saccade position (x) and amplitude (y) in a grid as in the plot summary below.
         
         These plots will allow us to measure the 
@@ -1550,6 +1615,8 @@ class TrackingExperiment():
         ----------
         col_var, row_var : str
             The variable names to paramaterize along columns and rows of the grid.
+        heading_var : str, default='camera_heading'
+            The variable to use for the saccade heading.
         time_var : str, default='time'
             The time variable to use. So far there are two options: 1) time from the start 
             of the saccade or 2) time from the peak velocity.
@@ -1561,9 +1628,15 @@ class TrackingExperiment():
             Whether to use the start or stop position of the saccade.
         min_speed, max_speed : float, default=350, np.inf
             The minimum and maximum peak speed to include in the saccades here.
+        reference_var : str, default=None
+            If provided, the saccades will be aligned to the value of this variable.
+        bins : int, default=21
+            The bins to use for the 2D histogram.
         **query_kwargs
             These get passed to the query 
         """
+        # force the bottom and right margins to be off
+        bottom_margin, right_margin = False, False
         assert output in ['start', 'stop'], "output parameter must be either 'start' or 'stop'"
         if 'subset' not in query_kwargs:
             query_kwargs['subset'] = {}
@@ -1582,14 +1655,15 @@ class TrackingExperiment():
         assert len(col_vals) > 0 or len(row_vals) > 0, "The subset is empty!"
         # todo: what's up with the number of axes?
         if len(row_vals) > 0:
-            row_vals = np.unique(row_vals[0])
+            row_vals = np.unique(row_vals)
         else:
             row_vals = np.unique(row_vals)
         if len(col_vals) > 0:
-            col_vals = np.unique(col_vals[0])
+            col_vals = np.unique(col_vals)
         else:
             col_vals = np.unique(col_vals)
         num_rows, num_cols = len(row_vals), len(col_vals)
+        # get the colors from the specified colormaps
         # get the colors from the specified colormaps
         colors = {}
         for cmap, vals, key in zip(
@@ -1598,6 +1672,9 @@ class TrackingExperiment():
             ['rows', 'columns']):
             if len(vals) > 0:
                 if isinstance(cmap, str):
+                    if isinstance(vals[0], (str, bytes)):
+                        # if values are strings, sort them in alphabetical order and use their index for the colors
+                        vals = np.argsort(vals)
                     norm = matplotlib.colors.Normalize(vals.min(), vals.max())
                     cmap = matplotlib.cm.ScalarMappable(norm=norm, cmap=cmap)
                     colors[key] = cmap.to_rgba(vals)[:, :-1]
@@ -1688,23 +1765,39 @@ class TrackingExperiment():
                 # collect the saccade starting positions and amplitudes for making a 2D plot 
                 for trial in self.trials:
                     bouts = trial.query_bouts(sort_by=query_kwargs['sort_by'], subset=subset)
-                    resps = trial.query('camera_heading', sort_by=query_kwargs['sort_by'], subset=subset)
-                    bar_positions = trial.query('bar_orientation', sort_by=query_kwargs['sort_by'], subset=subset)
-                    for bout, bar_position, resp in zip(bouts, bar_positions, resps):
-                        bar_position = np.unwrap(bar_position)
-                        bar_position += np.pi
-                        bar_position %= 2*np.pi
-                        bar_position -= np.pi
-                        for saccade in bout.saccades:
-                            peak_speed = abs(saccade.peak_velocity) * 180 / np.pi
-                            if (peak_speed >= min_speed) * (peak_speed <= max_speed):
-                                # store the start position, stop position, and signed amplitude
-                                # todo: get the position of the bar and calculate heading angles relative to the bar
-                                for storage, pos in zip([start_pos, stop_pos], [saccade.start, saccade.stop]):
-                                    bar = bar_position[pos]
-                                    head = resp[pos]
-                                    storage += [bar - head]
-                                amps += [saccade.amplitude]
+                    resps = trial.query(heading_var, sort_by=query_kwargs['sort_by'], subset=subset)
+                    # convert the bar_positions variable to a general reference angle input parameter
+                    if reference_var in dir(trial):
+                        reference_positions = trial.query(reference_var, sort_by=query_kwargs['sort_by'], subset=subset)
+                        for bout, reference_position, resp in zip(bouts, reference_positions, resps):
+                            reference_position = np.unwrap(reference_position)
+                            reference_position += np.pi
+                            reference_position %= 2*np.pi
+                            reference_position -= np.pi
+                            times, saccades = bout.query_saccades(sort_by=query_kwargs['sort_by'], subset=subset)
+                            breakpoint()
+                            for saccade in saccades:
+                                peak_speed = abs(saccade.peak_velocity) * 180 / np.pi
+                                if (peak_speed >= min_speed) * (peak_speed <= max_speed):
+                                    # store the start position, stop position, and signed amplitude
+                                    # todo: get the position of the bar and calculate heading angles relative to the bar
+                                    for storage, pos in zip([start_pos, stop_pos], [saccade.start, saccade.stop]):
+                                        bar = reference_position[pos]
+                                        head = resp[pos]
+                                        storage += [bar - head]
+                                    amps += [saccade.amplitude]
+                    # use no reference angle if reference_var is not in the trial data
+                    else:
+                        for bout, resp in zip(bouts, resps):
+                            for saccade in bout.saccades:
+                                peak_speed = abs(saccade.peak_velocity) * 180 / np.pi
+                                if (peak_speed >= min_speed) * (peak_speed <= max_speed):
+                                    # store the start position, stop position, and signed amplitude
+                                    # get the position of the bar and calculate heading angles
+                                    for storage, pos in zip([start_pos, stop_pos], [saccade.start, saccade.stop]):
+                                        head = resp[pos]
+                                        storage += [head]
+                                    amps += [saccade.amplitude]
                 if not isinstance(col, (list, np.ndarray)):
                     col = [col]
                 amplitude = np.array(amps)
@@ -1715,26 +1808,17 @@ class TrackingExperiment():
                 position += np.pi
                 position %= 2*np.pi
                 position -= np.pi
-                for ax, row_summ_ax in zip(col, row_summ_axes):
+                for ax in col:
                     data = {'amplitude':amplitude, 'position':position}
-                    # ax = plt.gca()
-                    # sbn.kdeplot(data=data, x='position', y='amplitude', ax=ax, levels=20, fill=True, cmap='Greys')
-                    # ax.scatter(position, amplitude, marker='.', alpha=.1, color='k', edgecolor='none')
-                    ax.hist2d(position, amplitude, bins=21, range=[[-np.pi, np.pi],[-np.pi, np.pi]], cmap='Greys')
-                    # ax.set_xlabel(None)
-                    # ax.set_ylabel(None)
-                    # ax.set_xlabel('position')
-                    # ax.set_ylabel('amplitude')
+                    hist = ax.hist2d(position, amplitude, bins=bins, range=[[-np.pi, np.pi],[-np.pi, np.pi]], cmap='Greys')
                     ax.set_aspect('equal')
-                    # ax.set_xticks([-np.pi, -np.pi/2, 0, np.pi/2, np.pi], ['-$\pi$', '-$\pi$/2', '0', '$\pi$/2', '$\pi$'])
-                    # ax.set_yticks([-np.pi, -np.pi/2, 0, np.pi/2, np.pi], ['-$\pi$', '-$\pi$/2', '0', '$\pi$/2', '$\pi$'])
-                    # plot mean +/- SEM
+                    # plt.colorbar(hist[3], ax=ax)
+
         # add the xticks, yticks, and axis labels
         ticks = ([-np.pi, -np.pi/2, 0, np.pi/2, np.pi], ['-$\pi$', '-$\pi$/2', '0', '$\pi$/2', '$\pi$'])
-        self.display.format(xlim=(np.pi, np.pi), ylim=(-1.25*np.pi, 1.25*np.pi), 
+        self.display.format(xlim=(-np.pi, np.pi), ylim=(-np.pi, np.pi), 
                             xlabel='orientation', ylabel='amplitude', 
                             xticks=ticks, yticks=ticks)
-        plt.show()
         # format the bottom and right margins to show the 
         if bottom_margin:
             bottom_row = self.display.bottom_row
@@ -1944,6 +2028,8 @@ class TrackingExperiment():
                      xlim=None, ylim=None, xticks=None, yticks=None, 
                      logx=False, logy=False, display=None,
                      summary_func=np.nanmean, xlabel=None, ylabel=None,
+                     plot_type='line', bins=100, use_density=False,
+                     confidence_interval=False, confidence=.84,
                      **query_kwargs):
         """Plot experimental data in one big grid.
         
@@ -1986,6 +2072,13 @@ class TrackingExperiment():
         summary_func : callable, default=np.nanmean
             The function for generating the summary statistic of interest in the right and bottom
             margins. It's applied to the sets of traces plotted in the trace plots.
+        plot_type : str, default='line'
+            Whether to plot the data as a line plot ('line'), a 2D histogram ('hist2d'),
+            or as 2d simulated trajectory ('trajectory2d').
+        bins : int or tuple, default=None
+            The bins parameter to pass to the 2D histogram.
+        use_density : bool, default=False
+            Whether to plot the density instead of the count in the 2d histogram.
         **query_kwargs
             These get passed to the query 
         """
@@ -1999,14 +2092,8 @@ class TrackingExperiment():
         col_vals = self.query(output=col_var, sort_by=col_var, subset=subset)
         assert len(col_vals) > 0 or len(row_vals) > 0, "The subset is empty!"
         # todo: what's up with the number of axes?
-        if len(row_vals) > 0:
-            row_vals = np.unique(row_vals[0])
-        else:
-            row_vals = np.unique(row_vals)
-        if len(col_vals) > 0:
-            col_vals = np.unique(col_vals[0])
-        else:
-            col_vals = np.unique(col_vals)
+        row_vals = np.unique(row_vals)
+        col_vals = np.unique(col_vals)
         num_rows, num_cols = len(row_vals), len(col_vals)
         # get the colors from the specified colormaps
         colors = {}
@@ -2069,6 +2156,7 @@ class TrackingExperiment():
         # plot the data
         num_frames = self.trials[0].num_frames
         repetitions = []
+        max_radius = 0
         for row_num, (row, row_val, row_colors) in enumerate(zip(
             trace_axes, row_vals, color_arr)):
             if right_margin:
@@ -2088,13 +2176,24 @@ class TrackingExperiment():
                 subset[col_var] = col_val
                 # todo: get the subset x- and y-values
                 # update the subset dictionary
-                xs = self.query(output=xvar, subset=subset, sort_by=query_kwargs['sort_by'])
-                ys = self.query(output=yvar, subset=subset, sort_by=query_kwargs['sort_by'])
+                xs = self.query(same_size=True, output=xvar, subset=subset, sort_by=query_kwargs['sort_by'])
+                ys = self.query(same_size=True, output=yvar, subset=subset, sort_by=query_kwargs['sort_by'])
+                # todo: pad arrays in included_xs to match the longest one and convert to an array
                 # get sample size
                 # sample_size = xs[0].shape[0]
-                sample_size = len(xs)
+                # breakpoint()
+                # if callable(summary_func):
+                #     # ax_mean = np.nanmean(xs, axis=0)
+                #     ax_mean = summary_func(xs, axis=0)
+                #     y = ys[0]
+                #     # mean_vals = np.array(mean_vals)
+                #     # ax_mean = mean_vals.mean(0)
+                #     ax.plot(ax_mean, y, color='w', zorder=4, lw=4)
+                #     ax.plot(ax_mean, y, color=color, zorder=5)
                 if isinstance(xs, np.ndarray):
+                    sample_size = xs.shape[0]
                     if xs.size > 0:
+                        reps = xs.shape[1]
                         # reshape the data
                         ys = ys.reshape(-1, ys.shape[-1])
                         xs = xs.reshape(-1, xs.shape[-1])
@@ -2106,38 +2205,126 @@ class TrackingExperiment():
                         #         breakpoint()
                         #         ax.plot(x, y, color='gray', lw=.5, alpha=.5)
                         #         mean_vals += [x]
-                        try:
-                            if np.squeeze(xs).ndim > 1:
-                                ax.plot(xs.T, ys.T, color='gray', lw=.5, alpha=.5)
-                            else:
-                                ax.plot(xs, ys, color='gray', lw=.5, alpha=.5)
-                        except:
-                            breakpoint()
-                        if callable(summary_func):
+                        nans = np.isnan(xs)
+                        not_all_nans = nans.mean(1) < 1
+                        new_xs, new_ys = xs[not_all_nans], ys[not_all_nans]
+                        if plot_type == 'hist2d':
+                            # take histogram of the x and y data in order to get the maximum
+                            # fig, ax = plt.subplots()
+                            no_nans = np.isnan(new_xs) == False
+                            hist, xedges, yedges = np.histogram2d(new_xs[no_nans], new_ys[no_nans], bins=bins, density=use_density)
+                            # cmap = matplotlib.colors.LinearSegmentedColormap.from_list("", [(1,1,1), color])
+                            cmap = matplotlib.colors.LinearSegmentedColormap.from_list("", [(1,1,1), (0, 0, 0)])
+                            max_val = hist.max()
+                            mesh = ax.pcolormesh(xedges, yedges, hist.T, cmap=cmap, vmin=0, vmax=hist.max())
+                            # plt.colorbar(mesh, ax=ax)
+                        elif plot_type == 'trajectory2d':
+                            # todo: plot the 2d trajectory for each fly 
+                            d_vectors = np.array([np.cos(new_xs), np.sin(new_xs)]).transpose(1, 0, 2)
+                            # replace d_vectors with 0 if nan
+                            d_vectors[np.isnan(d_vectors)] = 0
+                            trajectory = np.cumsum(d_vectors, axis=-1)
+                            trajectory /= trajectory.shape[-1]
+                            # find the last non-nan number in the trajectory
+                            last_pos = trajectory[..., -1]
+                            radii = np.linalg.norm(last_pos, axis=1)
+                            # normalize the trajectory to the maximum radius
+                            # trajectory /= radii[:, np.newaxis, np.newaxis]
+                            ax.plot(trajectory[:, 0].T, trajectory[:, 1].T, lw=.5, color='k', alpha=.25)
+                            # todo: plot the radius and corresponding circle for each fly
+                            max_radius = max(np.nanmax(radii), max_radius)
+                            # scatterplot of the last position
+                            ax.scatter(last_pos[..., 0], last_pos[..., 1], color='k', marker='.', s=.5)
+                            for radius, pos in zip(radii, last_pos):
+                                circle = plt.Circle((0, 0), radius=radius, color=color, alpha=.25, fill=False, lw=.5)
+                                ax.add_artist(circle)
+                        else:
+                            ax.plot(new_xs.T, new_ys.T, color='gray', lw=.5, alpha=.5)
+                            # if np.squeeze(xs).ndim > 1:
+                            #     # ax.plot(xs.T, ys.T, color='gray', lw=.5, alpha=.5)
+                            #     reps = 0
+                            #     for num, (x, y) in enumerate(zip(xs, ys)):
+                            #         try:
+                            #             ax.plot(x, y, color='gray', lw=.5, alpha=.5)
+                            #             reps += 1
+                            #         except:
+                            #             pass
+                            # else:
+                        no_nans = np.isnan(ys) == False
+                        all_no_nans = np.all(no_nans, axis=1)
+                        y = ys[all_no_nans][0]
+                        if callable(summary_func) and plot_type in ['hist2d', 'line']:
                             # ax_mean = np.nanmean(xs, axis=0)
                             ax_mean = summary_func(xs, axis=0)
-                            y = ys[0]
                             # mean_vals = np.array(mean_vals)
                             # ax_mean = mean_vals.mean(0)
-                            ax.plot(ax_mean, y, color='w', zorder=4, lw=4)
-                            ax.plot(ax_mean, y, color=color, zorder=5)
+                            if plot_type == 'hist2d':
+                                ax.scatter(ax_mean, y, color='w', zorder=4, marker='.', s=1)
+                                ax.scatter(ax_mean, y, color=color, zorder=5, marker='.', s=.5)
+                            else:
+                                ax.plot(ax_mean, y, color='w', zorder=4, lw=1)
+                                ax.plot(ax_mean, y, color=color, zorder=5)
                         # plot the mean in the two summary plots
                         if row_summ_ax is not None:
-                            if callable(summary_func):
-                                summary = summary_func(xs, axis=0)
-                                row_summ_ax.plot(summary, ys[0], color=color)
+                            if plot_type in ['hist2d', 'line']:
+                                if callable(summary_func):
+                                    summary = summary_func(xs, axis=0)
+                                    row_summ_ax.plot(summary, y, color=color, zorder=1)
+                                    if confidence_interval:
+                                        # todo: get the 84% C.I. for each time point using bootstrapping
+                                        tot = xs.shape[0]
+                                        # todo: use a for loop to avoid loading the full pseudo distribution
+                                        rand_samples = np.random.randint(0, tot-1, (tot, 1000))
+                                        lows, highs = [], []
+                                        for frame_vals in xs.T:
+                                            pseudo_distro = frame_vals[rand_samples]
+                                            summary = summary_func(pseudo_distro, axis=0)
+                                            lb, ub = (1 - confidence)/2, (1 - confidence)/2
+                                            low, high = np.percentile(summary, (lb, ub))
+                                            lows += [low]
+                                            highs += [high]
+                                        lows, highs = np.array(lows), np.array(highs)
+                                        row_summ_ax.fill_betweenx(y, lows, highs, color=color, alpha=.3, zorder=2)
+                            else:
+                                y = new_ys[0]
+                                # measure the radial distance travelled
+                                dist = np.linalg.norm(trajectory, axis=1)
+                                row_summ_ax.plot(dist.T, new_ys.T, color=color, lw=.5, alpha=.5)
+                                # plot the mean distance travelled
+                                mean_dist = np.nanmean(dist, axis=0)
+                                row_summ_ax.plot(mean_dist, y, color='w', lw=3, zorder=3)
+                                row_summ_ax.plot(mean_dist, y, color=color, lw=2, zorder=4)
                         if col_summ_ax is not None:
-                            if callable(summary_func):
-                                summary = summary_func(xs, axis=0)
-                                col_summ_ax.plot(summary, ys[0], color=color)
-                        repetitions += [xs.shape[0]]
+                            if plot_type in ['hist2d', 'line']:
+                                if callable(summary_func):
+                                    summary = summary_func(xs, axis=0)
+                                    col_summ_ax.plot(summary, y, color=color)
+                            else:
+                                y = new_ys[0]
+                                # measure the radial distance travelled
+                                dist = np.linalg.norm(trajectory, axis=1)
+                                col_summ_ax.plot(dist.T, new_ys.T, color=color, lw=.5, alpha=.5)
+                                # plot the mean distance travelled
+                                mean_dist = np.nanmean(dist, axis=0)
+                                col_summ_ax.plot(mean_dist, y, color='w', lw=3, zorder=3)
+                                col_summ_ax.plot(mean_dist, y, color=color, lw=2, zorder=4)
+                        repetitions += [not_all_nans.sum()]
                 elif len(xs) > 0:
                     # reshape the data
                     sample_size = len(xs)
-                    xvals, yvals = np.concatenate(xs), np.concatenate(ys)
-                    repetitions += [len(xvals)]
-                    ax.plot(xvals.T, yvals.T, color='gray', lw=.5, alpha=.5)
-                    y = ys[0][0]
+                    # xvals, yvals = np.concatenate(xs), np.concatenate(ys)
+                    # repetitions += [len(xvals)]
+                    reps = 0
+                    # ax.plot(xvals.T, yvals.T, color='gray', lw=.5, alpha=.5)
+                    xvals = []
+                    for x, y in zip(xs, ys):
+                        if x.size > 0 and y.size > 0:
+                            ax.plot(x, y, color='gray', lw=.5, alpha=.5)
+                            reps += 1
+                            xvals += [x]
+                            good_y = y
+                    y = good_y
+                    xvals = np.array(xvals)
                     if callable(summary_func):
                         ax_mean = summary_func(xvals, axis=0)
                         # mean_vals = np.array(mean_vals)
@@ -2153,9 +2340,19 @@ class TrackingExperiment():
                         if callable(summary_func):
                             summary = summary_func(xvals, axis=0)
                             col_summ_ax.plot(summary, y, color=color)
+                repetitions += [reps]
                 # breakpoint()
                 # add the xticks, yticks, and axis labels
         if format_axes:
+            # if plotting trajectories, let's keep the an equal aspect ratio
+            if plot_type == 'trajectory2d':
+                for ax in trace_axes.flatten():
+                    ax.set_aspect('equal')
+                    ax.set_xlim(-max_radius, max_radius)
+                    ax.set_ylim(-max_radius, max_radius)
+                breakpoint()
+                # todo: flip the y-axis for all of the summary axes
+                # todo: add the y-axis to the right column
             if xlabel is None:
                 xlabel = xvar
             if ylabel is None:
@@ -2165,7 +2362,207 @@ class TrackingExperiment():
             # add the row values
             self.display.label_margins(row_vals, row_var, col_vals, col_var)
             # add the sample size to the first subplot
-            self.display.fig.suptitle(f"N={sample_size}, {min(repetitions)}–{max(repetitions)} traces per subplot")
+            self.display.fig.suptitle(f"N={sample_size}, {min(repetitions)}–{max(repetitions)} traces per subject")
+        # plt.show()
+
+    def plot_histogram_summary(
+            self, xvar, col_var, row_var, use_probability=False, bins=None,
+            row_cmap=None, col_cmap=None, fig=None,
+            right_margin=True, bottom_margin=True,
+            xlim=None, xticks=None, logx=False, logy=False, display=None, ylim=None,
+            summary_func=partial(scipy.stats.circmean, low=-np.pi, high=np.pi), xlabel=None, 
+            **query_kwargs):
+        """Plot histgrams of data in one big grid arranged by two variables.
+        
+        The color for each subplot is determined by the average of the column and 
+        row colors: color = sqrt(mean([col_color^2, row_color^2])). This is the 
+        proper way to average two colors and should generate a unique color for each 
+        plot. 
+
+        todo: add option to define colors in HSV space so that the user can
+        align rows and columns with independent channels. For instance, rows can
+        correspond to different hues while columns correspond to saturations. 
+
+        Parameters
+        ----------
+        xvar : str
+            The variable name to use for the histograms.
+        col_var, row_var : str
+            The variable names to paramaterize along columns and rows of the grid.
+        row_cmap, col_cmap : func or array-like, default=None
+            The colormap to use for colorizing along the rows or columns. If both are
+            supplied, the product of the two colors is used for each subplot. If a 
+            function is supplied, it will be applied to the corresponding col_var or row_var.
+            If a list is supplied, it must have as many elements as the corresponding column or
+            row.
+        right_margin, bottom_margin : bool, default=True
+            Whether to plot the means from each subplot in the margin to the right
+            or bottom of the axes. A colormap (row_cmap or col_cmap) must be provided
+            in order to distinguish individual traces.
+        xlim, ylim : tuple=(min, max), default=None
+            The tuple of the minimum and maximum values for that dimension.
+        xticks, yticks : list, default=None
+            Specify the list of ticks on the x- or y-axis.
+        logx, logy : bool, default=False
+            Whether to format the x- or y-axis on a log scale.
+        display : SummaryDisplay, default=None
+            Option to provide a SummaryDisplay with the same subplot arrangement
+            to allow superimposing different datasets.
+        xlabel, ylabel : str, default=None
+            Option to provide custom x- and y-labels.
+        summary_func : callable, default=np.nanmean
+            The function for generating the summary statistic of interest in the right and bottom
+            margins. It's applied to the sets of traces plotted in the trace plots.
+        **query_kwargs
+            These get passed to the query 
+        """
+        if 'subset' not in query_kwargs:
+            query_kwargs['subset'] = {}
+        if 'sort_by' not in query_kwargs:
+            query_kwargs['sort_by'] = 'test_ind'
+        subset = copy.copy(query_kwargs['subset'])
+        # get the values used for coloring each subplot
+        row_vals = self.query(output=row_var, sort_by=row_var, subset=query_kwargs['subset'])
+        col_vals = self.query(output=col_var, sort_by=col_var, subset=query_kwargs['subset'])
+        assert len(col_vals) > 0 or len(row_vals) > 0, "The subset is empty!"
+        # todo: what's up with the number of axes?
+        row_vals = np.unique(row_vals)
+        col_vals = np.unique(col_vals)
+        num_rows, num_cols = len(row_vals), len(col_vals)
+        # get the colors from the specified colormaps
+        colors = {}
+        for cmap, vals, key in zip(
+            [row_cmap, col_cmap], 
+            [row_vals, col_vals],
+            ['rows', 'columns']):
+            if len(vals) > 0:
+                if isinstance(cmap, str):
+                    if isinstance(vals[0], (str, bytes)):
+                        # if values are strings, sort them in alphabetical order and use their index for the colors
+                        vals = np.argsort(vals)
+                    # add comments below
+                    # make a colormap
+                    norm = matplotlib.colors.Normalize(vals.min(), vals.max())
+                    cmap = matplotlib.cm.ScalarMappable(norm=norm, cmap=cmap)
+                    colors[key] = cmap.to_rgba(vals)[:, :-1]
+                elif callable(cmap):
+                    colors[key] = cmap(vals)
+                elif isinstance(row_cmap, (list, np.ndarray, tuple)):
+                    assert len(cmap) == len(vals), (
+                        f"Colormap list has {len(cmap)} elements but {len(vals)} {key}.")
+                    colors[key] = row_cmap
+                else:
+                    colors[key] = []
+            else:
+                colors[key] = []
+        # combine the color lists to make an array specifying the color of each subplot
+        if len(colors['rows']) == num_rows and len(colors['columns']) == num_cols:
+            # get the mean combination of row and column colors
+            color_mean = .5*(
+                colors['rows'][:, np.newaxis]**2 +
+                colors['columns'][np.newaxis, :]**2)
+            color_arr = np.sqrt(color_mean)
+            # elif colors['columns'] is not None:
+            #     color_arr = np.repeat(colors['columns'][np.newaxis], num_rows, axis=0)
+            # elif colors['rows'] is not None:
+            #     color_arr = np.repeat(colors['rows'][:, np.newaxis], num_cols, axis=0)
+        elif len(colors['columns']) == num_cols:
+            color_arr = np.repeat(colors['columns'][np.newaxis], num_rows, axis=0)
+        elif len(colors['rows']) == num_rows:
+            color_arr = np.repeat(colors['rows'][:, np.newaxis], num_cols, axis=1)
+        else:
+            color_arr = np.zeros((num_rows, num_cols, 3), dtype='uint8')
+        # test: check that the colors are aligned properly. we want this array shape to be num_rows X num_cols
+        # add a row or column if plotting in the margins
+        if bottom_margin:
+            num_rows += 1
+        if right_margin:
+            num_cols += 1
+        # make the figure and axes with a grid defined by num_rows and num_cols
+        figsize = (1.5 * num_cols + 1, 1.5*num_rows + 1)
+        format_axes = True
+        if display is None:
+            self.display = SummaryDisplay(
+                num_rows=num_rows, num_cols=num_cols, right_margin=right_margin, 
+                bottom_margin=bottom_margin, figsize=figsize)
+        else:
+            self.display = display
+            format_axes = False
+        trace_axes = self.display.trace_axes
+        # plot the data
+        num_frames = self.trials[0].num_frames
+        repetitions = []
+        if 'histograms' not in dir(self):
+            self.histograms = {}
+        self.histograms[xvar] = {}
+        for row_num, (row, row_val, row_colors) in enumerate(zip(
+            trace_axes, row_vals, color_arr)):
+            row_hists = []
+            if right_margin:
+                row_summ_ax = self.display.right_col[row_num]
+            else:
+                row_summ_ax = None
+            # update the subset dictionary
+            subset[row_var] = row_val
+            for col_num, (ax, col_val, color) in enumerate(zip(
+                row, col_vals, row_colors)):
+                while isinstance(ax, np.ndarray):
+                    ax = ax[0]
+                if bottom_margin:
+                    col_summ_ax = self.display.bottom_row[col_num]
+                else:
+                    col_summ_ax = None
+                subset[col_var] = col_val
+                # todo: get the subset x- and y-values
+                # update the subset dictionary
+                xs = self.query(same_size=True, output=xvar, subset=subset, sort_by=query_kwargs['sort_by'])
+                if isinstance(xs, np.ndarray):
+                    sample_size = xs.shape[0]
+                    if xs.size > 0:
+                        reps = xs.shape[1]
+                        # reshape the data
+                        xs = xs.reshape(-1, xs.shape[-1])
+                        nans = np.isnan(xs)
+                        not_all_nans = nans.mean(1) < 1
+                        counts, _, _ = ax.hist(xs[not_all_nans].flatten(), color=color, alpha=1, density=use_probability, bins=bins, histtype='stepfilled')
+                        self.histograms[xvar][(row_val, col_val)] = counts
+                        if callable(summary_func):
+                            no_nans = np.isnan(xs) == False
+                            ax_mean = summary_func(xs[no_nans])
+                            # ax_mean = mean_vals.mean(0)
+                            ax.axvline(ax_mean, color='w', zorder=4, lw=4)
+                            ax.axvline(ax_mean, color='r', zorder=4)
+                            # ax.plot(ax_mean, y, color=color, zorder=5)
+                        # plot the mean in the two summary plots
+                        for ax, vals in zip([row_summ_ax, col_summ_ax], [row_vals, col_vals]):
+                            if ax is not None:
+                                if callable(summary_func):
+                                    no_nans = np.isnan(xs) == False
+                                    summary = summary_func(xs[no_nans])
+                                    alpha = 1./float(len(vals))
+                                    ax.hist(xs.flatten(), color=color, zorder=1, alpha=1, bins=bins, histtype='step', density=use_probability)
+                                    ax.axvline(summary, color='w', zorder=4, lw=4)
+                                    ax.axvline(summary, color=color, zorder=4)
+                        # if col_summ_ax is not None:
+                        #     if callable(summary_func):
+                        #         summary = summary_func(xs, axis=0)
+                        #         col_summ_ax.plot(summary, y, color=color)
+                        repetitions += [not_all_nans.sum()]
+        if format_axes:
+            if xlabel is None:
+                xlabel = xvar
+            if use_probability:
+                # ylim = (0, 1)
+                ylabel = "Probability"
+            else:
+                ylabel = "Count"
+            self.display.format(xlim=xlim, ylim=ylim, xlabel=xlabel, ylabel=ylabel,
+                                xticks=xticks, logx=logx, logy=logy)
+            # add the row values
+            self.display.label_margins(row_vals, row_var, col_vals, col_var)
+            # add the sample size to the first subplot
+            self.display.fig.suptitle(f"N={min(repetitions)}–{max(repetitions)} traces per subplot")
+        # plt.show()
 
 
 class SummaryDisplay():
@@ -2187,8 +2584,9 @@ class SummaryDisplay():
             num_rows = 1
         if num_cols == 0:
             num_cols = 1
-        self.fig, self.axes = plt.subplots(num_rows, num_cols, layout='constrained',
-                                           **fig_kwargs)
+        # make the figure and axes
+        self.fig, self.axes = plt.subplots(
+            num_rows, num_cols, layout='constrained', **fig_kwargs)
         if num_rows == 1 and num_cols == 1:
             self.axes = np.array([self.axes])[:, np.newaxis]
         if num_rows == 1:
@@ -2270,9 +2668,12 @@ class SummaryDisplay():
         if col_label is not None:
             prop = adjustment / fig_height
             self.bottom_bound += prop
-        self.fig.tight_layout(
-            rect=[self.left_bound, self.bottom_bound, 
-                    1 - self.left_bound, 1 - self.bottom_bound])
+        try:
+            self.fig.tight_layout(
+                rect=[self.left_bound, self.bottom_bound, 
+                      1 - self.left_bound, 1 - self.bottom_bound])
+        except:
+            pass
         if row_label is not None:
             # calculate the y locations to add spines to
             yvals = []
@@ -2318,7 +2719,7 @@ class SummaryDisplay():
 
     def format(self, xlim=None, ylim=None, xticks=None, yticks=None, 
                xlabel=None, ylabel=None, special_bottom_left=False, 
-               logx=False, logy=False):
+               logx=False, logy=False, despine_right=True):
         """Format the subplots and figure.
         
         Parameters
@@ -2333,17 +2734,26 @@ class SummaryDisplay():
             Whether to exclude the bottom left subplot.
         logx, logy : bool, default=False
             Whether to format the x or y-axis along a log scale.
+        despine_right : bool, default=True
+            Whether to remove the left spine from the right column subplots.
         """
+        # account for the bottom right subplot when plotting in the right margin
+        inds = np.arange(len(self.axes.flatten()))
+        if self.right_margin:
+            inds = inds[:-1]
+        for ax in self.axes.flatten()[inds]:
+            # plot the x=0 and y=0 lines 
+            ax.axhline(0, linestyle='--', color='k', zorder=1, lw=.5)
+            ax.axvline(0, linestyle='--', color='k', zorder=1, lw=.5)
         num_rows, num_cols = len(self.axes), len(self.axes[0])
-        for row_num, (row, are_left, are_bottom, are_trace) in enumerate(zip(self.axes, self.left, self.bottom, self.trace_axes)):
+        for row_num, (row, are_left, are_bottom) in enumerate(zip(self.axes, self.left, self.bottom)):
             for col_num, (ax, is_left, is_bottom) in enumerate(zip(row, are_left, are_bottom)):
-                # plot the x=0 and y=0 lines 
-                if not ((col_num == num_cols) and (row_num == num_rows)):
-                    ax.axhline(0, linestyle='--', color='k', zorder=1, lw=.5)
-                    ax.axvline(0, linestyle='--', color='k', zorder=1, lw=.5)
                 # set the plot limits if they were specified
                 if xlim is not None:
-                    ax.set_xlim(xlim[0], xlim[1])
+                    try:
+                        ax.set_xlim(xlim[0], xlim[1])
+                    except:
+                        breakpoint()
                 if ylim is not None:
                     if not (special_bottom_left and is_bottom and is_left):
                         ax.set_ylim(ylim[0], ylim[1])
@@ -2379,12 +2789,12 @@ class SummaryDisplay():
                 else:
                     ax.set_yticks([])
                 # despine the axes
-                if not (special_bottom_left and is_bottom and is_left):
-                    sbn.despine(ax=ax, left=is_left==False, bottom=is_bottom==False, trim=True)
+                # if not special_bottom_left:
+                sbn.despine(ax=ax, left=is_left==False, bottom=is_bottom==False, trim=True)
 
 
 class TrackingTrial():
-    def __init__(self, filename, holocube_framerate=60):
+    def __init__(self, filename, holocube_framerate=120):
         """Load an H5 TrackingTrial file from the magnocube library.
 
         Parameters
@@ -2421,6 +2831,28 @@ class TrackingTrial():
             The array to store.
         """
         # first re-load the dataset in readwrite mode
+        self.h5_file.close()
+        self.h5_file = h5py.File(self.filename, 'r+')
+        # then add the dataset
+        if name in self.h5_file.keys():
+            del self.h5_file[name]
+        self.h5_file.create_dataset(name=name, data=arr)
+        del self.h5_file
+        # finally, reload the file and datsets in read mode
+        self.h5_file = h5py.File(self.filename, 'r')
+        self.load_datasets()
+
+    def add_attr(self, name, val):
+        """Add an attribute to the whole trial dataset.
+
+        Parameters
+        ----------
+        name : str
+            The name of the dataset
+        val : 
+            The value to store.
+        """
+        # first re-load the dataset in readwrite mode
         del self.h5_file
         try:
             self.h5_file = h5py.File(self.filename, 'r+')
@@ -2428,8 +2860,8 @@ class TrackingTrial():
             breakpoint()
         # then add the dataset
         if name in self.h5_file.keys():
-            del self.h5_file[name]
-        self.h5_file.create_dataset(name=name, data=arr)
+            del self.h5_file.attrs[name]
+        self.h5_file.attrs[name] = val
         del self.h5_file
         # finally, reload the file and datsets in read mode
         self.h5_file = h5py.File(self.filename, 'r')
@@ -2535,31 +2967,53 @@ class TrackingTrial():
         subset : dict, default = {'is_test': True}
             The subset of parameters to include in the output.
         """
+        # a bout corresponds to each test
         include = np.ones(self.num_tests, dtype=bool)
-        includes = []
         if len(subset.keys()) > 0:
             for key, val in subset.items():
+                logic, thresh = np.equal, val
+                if isinstance(val, (str, bytes)):
+                    logic, thresh = interprate_inequality(val)
                 var = self.__getattribute__(key)
-                # if np.any(np.isnan(val)):
-                #     breakpoint()
-                if len(var) == len(include):
+                if not isinstance(var, (list, tuple, np.ndarray)):
+                    var = np.repeat(var, self.num_tests)
+                if len(var) == self.num_tests:
                     if isinstance(val, (list, tuple, np.ndarray)):
                         inds = np.array([test in val for test in var])
-                    elif isinstance(val, (float, int, str, bytes, bool, np.integer, np.floating)):
-                        inds = var == val
+                    else:
+                        inds = logic(var, thresh)
+                        if inds.ndim > 1:
+                            extra_dims = inds.ndim - 1
+                            axes = tuple(np.arange(1, extra_dims+1))
+                            # note: if any part satisfies the condition, include it
+                            inds = np.any(inds, axis=axes)
                         if isinstance(val, float):
                             if np.isnan(val):
                                 inds = np.isnan(var)
-                    includes += [inds]
-                    include *= inds
+                    while inds.ndim > include.ndim: 
+                        inds = np.any(inds, axis=-1)
+                    pad = include.ndim - inds.ndim
+                    index = [...]
+                    index += [np.newaxis for p in range(pad)]
+                    try:
+                        include = include * inds[tuple(index)]
+                    except:
+                        breakpoint()
                 else:
                     print(f"A subset variable, {key}, has length {len(var)} but should be {len(include)}.")
         # grab the indexing variable
         sort_by = self.__getattribute__(sort_by)
+        if isinstance(sort_by, (str, bytes)):
+            sort_by = np.repeat(sort_by, self.num_tests)
         # select the specified subset
         # todo: fix the order array below
         assert sort_by.ndim == 1, f"the sort_by array must be flat. instead sort_by.ndim={sort_by.ndim}"
-        sort_by = sort_by[include]
+        while include.ndim > sort_by.ndim: 
+            include = np.any(include, axis=-1).astype(bool)
+        try:
+            sort_by = sort_by[include]
+        except:
+            breakpoint()
         bouts = self.bouts[include]   # use only the subseted bouts
         # sort using the sort_by
         order = np.argsort(sort_by)
@@ -2622,6 +3076,7 @@ class TrackingTrial():
         # shift up by pi so that the 2pi unwrapping is centered around 0
         vals_unwrapped = np.unwrap(vals - lower, axis=-1, period=period)
         vals_unwrapped += lower
+        # comment here
         self.add_dataset(key + "_unwrapped", vals_unwrapped)
 
     def remove_saccades(self, key='camera_heading', invert=False, method='zero_velocity', min_speed=350, max_speed=np.inf):
@@ -2748,7 +3203,7 @@ class TrackingTrial():
         lbl += f" {method}"
         self.add_dataset(lbl, new_headings)
 
-    def query(self, output='yaw', sort_by='test_ind', subset={'is_test': True}):
+    def query(self, output='camera_heading', sort_by='test_ind', subset={'is_test': True}):
         """Return the trials indexed by a given attribute.
 
         Parameters  
@@ -2761,36 +3216,90 @@ class TrackingTrial():
             The subset of parameters to include in the output.
         """
         ret = self.__getattribute__(output)
-        include = np.ones(len(ret), dtype=bool)
+        if isinstance(ret, (str, bytes)):
+            ret = np.repeat(ret, self.num_tests)
+        include = np.ones(ret.shape, dtype=bool)
         if len(subset.keys()) > 0:
-            for key, val in subset.items():
+            for key, val in subset.items():                
+                logic, thresh = np.equal, val
+                if isinstance(val, (str, bytes)):
+                    logic, thresh = interprate_inequality(val)
                 var = self.__getattribute__(key)
+                if isinstance(var, (str, bytes)):
+                    var = np.repeat(var, self.num_tests)
                 # if np.any(np.isnan(val)):
                 #     breakpoint()
                 if len(var) == len(include):
                     if isinstance(val, (list, tuple, np.ndarray)):
                         inds = np.array([test in val for test in var])
-                    elif isinstance(val, (float, int, str, bool, bytes, np.integer, np.floating)):
-                        inds = var == val
+                    # elif isinstance(val, (float, int, str, bool, bytes, np.integer, np.floating, np.str_)):
+                    else:
+                        # inds = var == val
+                        # if isinstance(thresh, str):
+                        #     try:
+                        #         inds = np.char.equal(var, val)
+                        #     except:
+                        #         breakpoint()
+                        # else:
+                        inds = logic(var, thresh)
                         if isinstance(val, float):
                             if np.isnan(val):
                                 inds = np.isnan(var)
-                    include *= inds
+                    while inds.ndim > include.ndim: 
+                        inds = np.any(inds, axis=-1)
+                    pad = include.ndim - inds.ndim
+                    index = [...]
+                    index += [np.newaxis for p in range(pad)]
+                    try:
+                        include = include * inds[tuple(index)]
+                    except:
+                        breakpoint()
                 else:
                     print(f"A subset variable, {key}, has length {len(var)} but should be {len(include)}.")
+        # if self.dirname == 'Empty Sp Gal4' and 'img_id' in subset.keys():
+        #     breakpoint()
         # grab the indexing variable
         sort_by = self.__getattribute__(sort_by)
+        if isinstance(sort_by, (str, bytes)):
+            sort_by = np.repeat(sort_by, self.num_tests)
         assert ret.size >= sort_by.size, (
             "The indexing variable cannot be larger than the output")
         # select the specified subset
-        ret, sort_by = ret[include], sort_by[include]
+        # if ret.shape != include.shape:
+        #     new_ret = []
+        #     for inds, arr in zip(include, ret): new_ret += [arr[inds]]
+        #     ret = np.array(new_ret)
+        # else:
+        #     # new_ret = []
+        #     # for arr, inds in zip(ret, include): 
+        #     #     if isinstance(arr, np.ndarray):
+        #     #         if np.any(inds): 
+        #     #             new_ret += [arr[inds]]
+        #     ret = ret[include]
+        # index the return array using the include array
+        new_ret = []
+        for inds, arr, order in zip(include, ret, sort_by): 
+            if isinstance(arr, np.ndarray):
+                new_ret += [arr[inds]]
+            elif inds:
+                new_ret += [arr]
+        # get inclusion index for the sort_by variable
+        sort_include = np.copy(include)
+        while sort_by.ndim < sort_include.ndim: sort_include = np.any(sort_include, axis=-1).astype(bool)
+        sort_by = np.argsort(sort_by)[sort_include]
+        # sort using the sort_by array
+        new_ret_sorted = [new_ret[i] for i in sort_by]
+        # if np.array(new_ret).ndim == 1 and output == 'camera_heading_offline_wrapped':
+        #     breakpoint()
+        # the array takes on strange shape if the indexing variable is not the same shape as the output
+        ret = np.array(new_ret_sorted)
         # sort using the sort_by
         if sort_by.ndim == 1:
             order = np.argsort(sort_by)
-            return ret[:][order]
+            return ret[order]
         elif sort_by.ndim == 2:
             sort_by = sort_by.flatten()
-            return ret[:].flatten()[np.argsort(sort_by)]
+            return ret.flatten()[np.argsort(sort_by)]
 
     def butterworth_filter(self, key='camera_heading', low=1, high=6,
                            sample_rate=60):
@@ -2889,7 +3398,10 @@ class Bout():
         # store the parameters
         self.arr = arr
         self.framerate = framerate
-        self.time = np.arange(len(arr))/framerate
+        try:
+            self.time = np.arange(len(arr))/framerate
+        except:
+            breakpoint()
         self.duration = self.time.max()
 
     def get_stats(self, **saccade_kwargs):
@@ -2946,7 +3458,7 @@ class Bout():
             storage = [self.saccading_left, self.saccading_right][1 * is_left]
             storage[saccade.start:saccade.stop] = True
 
-    def process_saccades(self, threshold_speed=350, speed_noise_method=False, acceleration_method=False, 
+    def process_saccades(self, threshold_speed=350, speed_noise_method=True, acceleration_method=False, 
                          maximum_saccade_frequency=3, kalman_method=False, de_lag=True, **saccade_kwargs):
         """Find saccades in an array of values. 
         
@@ -2982,6 +3494,7 @@ class Bout():
             # let's find the best jerk_std and measurement noise for fitting the heading data
             kfilter = KalmanFitter(arr[0])
             vals_filtered = np.unwrap(kfilter.generate_vals(100, .3))
+            # vals_filtered = arr[0]
             # plt.scatter(range(len(arr[0])), arr[0]) 
             # plt.plot(np.unwrap(vals_filtered))
             # plt.show()
@@ -2990,63 +3503,75 @@ class Bout():
             # velocity = np.gradient(arr[0])
             velocity = np.gradient(vals_filtered)
             velocity *= self.framerate
+            # find peak velocities using a peak finding algorithm
+            # find the number of frames corresponding to 100 ms, because saccades are 
+            # unlikely to occur that frequently
+            dist = .5 * self.framerate
+            peaks = scipy.signal.find_peaks(np.abs(velocity), distance=dist, width=4, prominence=(np.pi, 30), wlen=dist)
+            # test:
+            # fig, axes = plt.subplots(nrows=2, sharex=True)
+            # axes[0].plot(arr[0])
+            # plt.sca(axes[1])
+            # plt.plot(velocity, zorder=2)
+            # velos = velocity[peaks[0]]
+            # plt.scatter(peaks[0], velos, marker='o', color=green, zorder=3)
+            # # velos = velocity[neg_peaks[0]]
+            # # plt.scatter(neg_peaks[0], velos, marker='o', color=red, zorder=3)
+            # for lb, ub in zip(peaks[1]['left_ips'], peaks[1]['right_ips']): axes[0].axvspan(lb, ub, color='gray', alpha=.3, zorder=1); axes[1].axvspan(lb, ub, color='gray', alpha=.3, zorder=1)
+            # plt.show()
+            # remove outlier peaks
+            starts, stops = peaks[1]['left_ips'], peaks[1]['right_ips']
             # find the rolling CI of the mean based on the past 5 velocities
-            series = pd.Series(velocity)
-            window = 5
-            rolling_mean = series.rolling(window, center=False).mean()
-            rolling_median = series.rolling(window, center=True).median()
-            rolling_std = series.rolling(window, center=False).std()
-            lower, upper = velocity - 2*rolling_std, velocity + 2*rolling_std
-            lower, upper = lower[:-1], upper[:-1]
-            upward = velocity[1:] > upper
-            downward = velocity[1:] < lower
+            # series = pd.Series(velocity)
+            # window = 5
+            # rolling_mean = series.rolling(window, center=False).mean()
+            # rolling_median = series.rolling(window, center=True).median()
+            # rolling_std = series.rolling(window, center=False).std()
+            # lower, upper = velocity - 2*rolling_std, velocity + 2*rolling_std
+            # lower, upper = lower[:-1], upper[:-1]
+            # upward = velocity[1:] > upper
+            # downward = velocity[1:] < lower
             # test: can we simply use these cross points to get candidate saccade starts and then apply a duration filter
-            outlier_thresh = 1
-            outlier_up = (velocity - velocity.mean())/velocity.std() > outlier_thresh
-            outlier_down = (velocity - velocity.mean())/velocity.std() < -outlier_thresh
+            # outlier_thresh = 1
+            # outlier_up = (velocity - velocity.mean())/velocity.std() > outlier_thresh
+            # outlier_down = (velocity - velocity.mean())/velocity.std() < -outlier_thresh
             # todo: find major peak velocities
-            peaks = scipy.signal.find_peaks(abs(velocity), prominence=.9)
+            # peaks = scipy.signal.find_peaks(abs(velocity), prominence=.9)
             # peaks, lb, ub = peaks[0], peaks[1]['left_bases'], peaks[1]['right_bases']
             # for low, peak, high in zip(lb, peaks, ub): plt.axvline(low, color='g'); plt.axvline(high, color='red'); plt.axvline(peak, color='k'); plt.plot(velocity, color='k')
             # outlier_up = velocity > (np.pi / 180. * threshold_speed)
             # outlier_down = velocity < (np.pi / 180. * -threshold_speed)
             # go through each break in the cw and ccw boolean arrays
-            starts, stops = [], []
-            for dir_arr, direction, thresh, outliers in zip([np.where(upward)[0], np.where(downward)[0]], [np.greater, np.less], [upper, lower], [outlier_up, outlier_down]):
-                ind = 0
-                starts_pot = np.array(dir_arr)
-                while len(starts_pot) > 0:
-                    start = starts_pot[0]
-                    velo = velocity[start+1:]
-                    bound = thresh[start]
-                    # the stop point is the last value within bounds
-                    in_bounds = direction(velo, bound)
-                    stops_pot = np.where((in_bounds[:-1] == True) * (in_bounds[1:] == False))[0]
-                    if len(stops_pot) > 0:
-                        stop = stops_pot[0]
-                        stop += start
-                        # check that the sequence has an outlier velocity
-                        is_fast = outliers[start:stop+1]
-                        # check if there is a peak within this range
-                        is_peak = (peaks[0] > start) * (peaks[0] < stop)
-                        if np.any(is_fast) or np.any(is_peak):
-                        # if np.any(is_peak):
-                            # check that 
-                            # plt.plot(velo)
-                            # plt.axhline(bound)
-                            # plt.axvspan(0, stop-start, color='gray', alpha=.3)
-                            starts += [start]
-                            stops += [stop]
-                        # remove all starts less than stop
-                        starts_pot = starts_pot[starts_pot > start]
-                    else:
-                        starts_pot = starts_pot[1:]
-            # fig, axes = plt.subplots(nrows=3, sharex=True)
-            # axes[1].plot(self.time, velocity, color='k', marker='.')
-            # axes[1].fill_between(self.time + self.time[1], velocity - 2*rolling_std, velocity + 2*rolling_std, color='gray')
-            # axes[0].plot(self.time, np.gradient(velocity), color='k', marker='.')
-            # axes[2].plot(self.time, arr[0])
-            # axes[0].plot(self.time, rolling_median)
+            # starts, stops = [], []
+            # for dir_arr, direction, thresh, outliers in zip([np.where(upward)[0], np.where(downward)[0]], [np.greater, np.less], [upper, lower], [outlier_up, outlier_down]):
+            #     ind = 0
+            #     starts_pot = np.array(dir_arr)
+            #     while len(starts_pot) > 0:
+            #         start = starts_pot[0]
+            #         velo = velocity[start+1:]
+            #         bound = thresh[start]
+            #         # the stop point is the last value within bounds
+            #         in_bounds = direction(velo, bound)
+            #         stops_pot = np.where((in_bounds[:-1] == True) * (in_bounds[1:] == False))[0]
+            #         if len(stops_pot) > 0:
+            #             stop = stops_pot[0]
+            #             stop += start
+            #             # check that the sequence has an outlier velocity
+            #             is_fast = outliers[start:stop+1]
+            #             # check if there is a peak within this range
+            #             is_peak = (peaks[0] > start) * (peaks[0] < stop)
+            #             if np.any(is_fast) or np.any(is_peak):
+            #             # if np.any(is_peak):
+            #                 # check that 
+            #                 # plt.plot(velo)
+            #                 # plt.axhline(bound)
+            #                 # plt.axvspan(0, stop-start, color='gray', alpha=.3)
+            #                 starts += [start]
+            #                 stops += [stop]
+            #             # remove all starts less than stop
+            #             starts_pot = starts_pot[starts_pot > start]
+            #         else:
+            #             starts_pot = starts_pot[1:]
             # store the resulting saccade
             for start, stop in zip(starts, stops):
                 saccade = Saccade(self.arr, self.framerate, start, stop, **saccade_kwargs)
@@ -3086,9 +3611,17 @@ class Bout():
                 else:
                     new_saccades += [saccade]
             self.saccades = new_saccades
-            # for saccade in self.saccades: axes[2].axvspan(self.time[saccade.start], self.time[saccade.stop], color='gray', alpha=.2)
-            # for start, stop in zip(starts, stops): plt.axvspan(self.time[start], self.time[stop], color='gray', alpha=.2)
-            # plt.show()
+            if 'display' in saccade_kwargs.keys():
+                if saccade_kwargs['display']:
+                    fig, axes = plt.subplots(nrows=3, sharex=True)
+                    axes[0].plot(self.time, np.gradient(velocity), color='k', marker='.')
+                    axes[1].plot(self.time, velocity, color='k', marker='.')
+                    axes[2].plot(self.time, arr[0])
+                    # axes[1].fill_between(self.time + self.time[1], velocity - 2*rolling_std, velocity + 2*rolling_std, color='gray')
+                    # axes[0].plot(self.time, rolling_median)
+                    for saccade in self.saccades: axes[2].axvspan(self.time[saccade.start], self.time[saccade.stop], color='gray', alpha=.2)
+                    # for start, stop in zip(np.round(starts).astype(int), np.round(stops).astype(int)): plt.axvspan(self.time[start], self.time[stop], color='gray', alpha=.2)
+                    plt.show()
         elif kalman_method:
             kfilter = KalmanFitter(np.unwrap(arr[0]))
             smoothed_arr = np.unwrap(kfilter.generate_vals(100, .01))
@@ -3193,7 +3726,6 @@ class Bout():
             for saccade in self.saccades:
                 plt.axvspan(saccade.start, saccade.stop, color='gray', alpha=.25)
             plt.show()
-
         else:
             # from Bender and Dickinson (2006)
             # 0. median filter
@@ -3272,7 +3804,8 @@ class Bout():
                             # collect Saccades of each slice of the array
                             self.saccades += [Saccade(arr, self.framerate, start=in_point, stop=out_point, **saccade_kwargs)]
 
-    def query_saccades(self, output='heading', time_var='time', start=0, stop=np.inf, min_speed=350, max_speed=np.inf):
+    def query_saccades(self, output='heading', time_var='time', start=0, stop=np.inf, min_speed=350, max_speed=np.inf,
+                       **query_kwargs):
         """Grab saccade data between the start and stop times.
         
         Parameters
@@ -3287,12 +3820,25 @@ class Bout():
             The parameter to use for sorting the trials.
         """
         times, saccades = [], []
+        # allow for subseting and sorting just like the other query functions
+        # we can only use parameters that are being collected by the Saccade object
         for saccade in self.saccades:
-            peak_speed = abs(saccade.peak_velocity) * 180. / np.pi
-            if (peak_speed > min_speed) and (peak_speed < max_speed):
-                time, saccade = saccade.query(output=output, time_var=time_var, start=start, stop=stop)
-                times += [time]
-                saccades += [saccade]
+            include = True
+            if 'subset' in query_kwargs:
+                # check if the subset condition is met by this saccade
+                subset = query_kwargs.pop('subset')
+                # using the subset conditions, check if this saccade meets the criteria
+                for key, val in subset.items():
+                    # interpret val for inequalities
+                    logic, thresh = interprate_inequality(val)
+                    key_vals = saccade.__getattribute__(key)
+                    include *= logic(key_vals, thresh)
+            if include:                    
+                peak_speed = abs(saccade.peak_velocity) * 180. / np.pi
+                if (peak_speed > min_speed) and (peak_speed < max_speed):
+                    time, saccade = saccade.query(output=output, time_var=time_var, start=start, stop=stop)
+                    times += [time]
+                    saccades += [saccade]
         # trim to the shortest length
         # lengths = [len(saccade) for saccade in saccades]
         # min_length = min(lengths)
@@ -3304,7 +3850,7 @@ class Bout():
         return times, saccades
 
 class Saccade():
-    def __init__(self, arr, framerate=1, start=0, stop=-1, interpolate_velocity=True, baseline_comparison=True, display=False):
+    def __init__(self, arr, framerate=1, start=0, stop=-1, interpolate_velocity=True, baseline_comparison=False, display=False):
         """Wrapper for saccade time series and measurements.
 
         Parameters
@@ -3345,12 +3891,14 @@ class Saccade():
         # store the original time series and time
         arr = np.unwrap(arr)
         self.original_arr = arr
-        self.start, self.stop = start, stop
-        self.arr = np.asarray(np.copy(self.original_arr)[start:stop+1])
+        self.start, self.stop = int(round(start)), int(round(stop))
+        self.arr = np.asarray(np.copy(self.original_arr)[self.start:self.stop+1])
         self.framerate = framerate
         self.time = np.arange(len(self.original_arr)).astype(float)
         self.time -= self.start
         self.time /= self.framerate
+        # get the start and stop times relative to the start of the bout
+        self.start_time, self.stop_time = self.start / self.framerate, self.stop / self.framerate
         # calculate the starting and ending angle
         self.start_angle = self.arr[0]
         self.stop_angle = self.arr[-1]
@@ -3367,7 +3915,7 @@ class Saccade():
         self.acceleration *= self.framerate
         if interpolate_velocity:
             # use a spline interpolation of the velocity to find the interpolated maximum
-            start_frame, stop_frame = max(self.start - 5, 0), min(self.stop+11, len(self.time))
+            start_frame, stop_frame = max(self.start - 10, 0), min(self.stop+11, len(self.time))
             # start_frame, stop_frame = max(self.start - 10, 0), min(self.stop+10, len(self.time))
             interp_func = scipy.interpolate.interp1d(self.time[start_frame: stop_frame], self.velocity[start_frame: stop_frame], kind='cubic')
             new_times = np.linspace(self.time[start_frame], self.time[stop_frame-1], 1000)
@@ -3384,56 +3932,56 @@ class Saccade():
             if len(velos_included) > 0:
                 velo_mean, velo_std = np.nanmean(velos_included), np.nanstd(velos_included)
                 velo_floor, velo_ceiling = velo_mean - 2 * velo_std, velo_mean + 2 * velo_std
-            # if either the floor or the ceiling crosses 0, replace with 0
-            # if (velo_floor > 0) != (self.peak_velocity > 0):
-            #     velo_floor = 0
-            # if (velo_ceiling > 0) != (self.peak_velocity > 0):
-            #     velo_ceiling = 0
-            # test: plot the headings, velocity, and angular acceleration highlighting the saccade interval and peak velocity
-            ta, tb = max(0, self.start-10), min(len(self.velocity), self.stop + 11)
-            if display:
-                fig, axes = plt.subplots(nrows=3, sharex=True)
-                axes[0].plot(self.time[ta: tb], 180./ np.pi * self.original_arr[ta:tb], 'ko-')
-                axes[1].plot(self.time[ta:tb], 180./ np.pi * self.velocity[ta: tb], 'ko-')
-                axes[1].plot(new_times, 180./ np.pi * new_velocity, 'r-')
-                axes[1].scatter(self.peak_time, 180./ np.pi * self.peak_velocity, marker='o', color='r')
-                for ax in axes: ax.axvline(self.peak_time, color='r')
-                axes[2].plot(self.time[ta: tb], 180./ np.pi * np.gradient(self.velocity[ta: tb]), 'ko-')
-                axes[0].axvspan(0, self.duration, color='gray', alpha=.25)   
-                axes[1].axvspan(0, self.duration, color='gray', alpha=.25)
-                axes[1].axhline(velo_ceiling * 180 / np.pi, color='k', linestyle='--')
-                axes[1].axhline(velo_floor * 180 / np.pi, color='k', linestyle='--')
-                axes[2].axvspan(0, self.duration, color='gray', alpha=.25)
-            # plt.show()
-            # breakpoint()
-            # todo: get the initial velocity and use this to update the start and stop points
-            # the new start is the frame before the first frame with a high speed
-            # the new stop is the first frame below threshold
-            self.success = True
-            if baseline_comparison:
-                if self.peak_velocity > 0:
-                    saccading = np.where(self.velocity[self.start: self.stop+10] > velo_ceiling)[0]
-                    not_saccading = np.where(self.velocity[self.start: self.stop+10] <= velo_ceiling)[0]
-                else:
-                    saccading = np.where(self.velocity[self.start: self.stop+10] < velo_floor)[0]
-                    not_saccading = np.where(self.velocity[self.start: self.stop+10] >= velo_floor)[0]
-                not_saccading += self.start
-                if len(saccading) > 0:
-                    self.start += saccading.min()
-                    self.start_angle = self.original_arr[self.start]
-                else:
-                    self.success = False
-                if len(saccading) > 0 and np.any(not_saccading > self.start):
-                    self.stop = not_saccading[not_saccading > self.start].min()
-                    self.stop_angle = self.original_arr[self.stop]
-                if self.stop - self.start < 3 or self.duration > 1.5:
-                    self.success = False
-                self.amplitude = self.stop_angle - self.start_angle
-            if self.success and display:
-                # plot the new saccade spans
-                axes[0].axvspan(self.time[self.start], self.time[self.stop], color='gray', alpha=.5)
-                axes[1].axvspan(self.time[self.start], self.time[self.stop], color='gray', alpha=.5)
-                axes[2].axvspan(self.time[self.start], self.time[self.stop], color='gray', alpha=.5)
+                # test: plot the headings, velocity, and angular acceleration highlighting the saccade interval and peak velocity
+                ta, tb = max(0, self.start-10), min(len(self.velocity), self.stop + 11)
+                if display:
+                    fig, axes = plt.subplots(nrows=3, sharex=True)
+                    axes[0].plot(self.time[ta: tb], 180./ np.pi * self.original_arr[ta:tb], 'ko-')
+                    axes[1].plot(self.time[ta:tb], 180./ np.pi * self.velocity[ta: tb], 'ko-')
+                    axes[1].plot(new_times, 180./ np.pi * new_velocity, 'r-')
+                    axes[1].scatter(self.peak_time, 180./ np.pi * self.peak_velocity, marker='o', color='r')
+                    for ax in axes: ax.axvline(self.peak_time, color='r')
+                    axes[2].plot(self.time[ta: tb], 180./ np.pi * np.gradient(self.velocity[ta: tb]), 'ko-')
+                    axes[0].axvspan(0, self.duration, color='gray', alpha=.25)  
+                    axes[1].axvspan(0, self.duration, color='gray', alpha=.25)
+                    axes[1].axhline(velo_ceiling * 180 / np.pi, color='k', linestyle='--')
+                    axes[1].axhline(velo_floor * 180 / np.pi, color='k', linestyle='--')
+                    axes[2].axvspan(0, self.duration, color='gray', alpha=.25)
+                # todo: get the initial velocity and use this to update the start and stop points
+                # the new start is the frame before the first frame with a high speed
+                # the new stop is the first frame below threshold
+                self.success = True
+                if baseline_comparison:
+                    offset = -5
+                    xmin = max(0, self.start + offset)
+                    xmax = min(len(self.velocity), self.stop + 10)
+                    if self.peak_velocity > 0:
+                        saccading = np.where(self.velocity[xmin: xmax] > velo_ceiling)[0]
+                        not_saccading = np.where(self.velocity[xmin: xmax] <= velo_ceiling)[0]
+                    else:
+                        saccading = np.where(self.velocity[xmin: xmax] < velo_floor)[0]
+                        not_saccading = np.where(self.velocity[xmin: xmax] >= velo_floor)[0]
+                    not_saccading += self.start + offset
+                    saccading += self.start + offset
+                    if len(saccading) > 0:
+                        self.start = saccading.min()
+                        self.start_angle = self.original_arr[self.start]
+                    # else:
+                    #     self.success = False
+                    if len(saccading) > 0 and np.any(not_saccading > self.start):
+                        self.stop = not_saccading[not_saccading > self.start].min()
+                        self.stop_angle = self.original_arr[self.stop]
+                    self.duration = (self.stop - self.start) / self.framerate
+                    if self.stop - self.start < 2 or self.duration > 1.5:
+                        self.success = False
+                    self.amplitude = self.stop_angle - self.start_angle
+                if self.success and display:
+                    # plot the new saccade spans
+                    axes[0].axvspan(self.time[self.start], self.time[self.stop], color='gray', alpha=.5)
+                    axes[1].axvspan(self.time[self.start], self.time[self.stop], color='gray', alpha=.5)
+                    axes[2].axvspan(self.time[self.start], self.time[self.stop], color='gray', alpha=.5)
+            else:
+                self.success = False
         else:
             peak_ind = np.argmax(abs(self.velocity[self.start: self.stop]))
             self.peak_velocity = self.velocity[self.start: self.stop][peak_ind]
@@ -3575,6 +4123,75 @@ def print_progress(part, whole):
     sys.stdout.write('\r')
     sys.stdout.write('[%-20s] %d%%' % ('=' * int(20 * prop), 100 * prop))
     sys.stdout.flush()
+
+def plot_diff_brackets(label, x1, x2, y1, y2, y_label, col='k',
+                       vert=False, ax=None, lw=1, size='medium'):
+    if ax is None:
+        ax = plt.gca()
+    if vert:
+        ax.plot([y1, y_label, y_label, y2], [x1, x1, x2, x2],
+                color=col, clip_on=False)
+        ax.text(y_label, (x1+x2)*.5, label, ha='center', va='bottom',
+                 color=col, rotation='vertical', size=size)
+    else:
+        ax.plot([x1, x1, x2, x2], [y1, y_label, y_label, y2],
+                color=col, clip_on=False)
+        ax.text((x1+x2)*.5, y_label, label, ha='center', va='bottom',
+                 color=col, rotation='horizontal', size=size)
+
+def moving_average(x, w): return np.convolve(x, np.ones(w), 'valid') / w
+
+def vector_strength(arr, bins=100):
+    """Convert array of angles into a time series of vector strength."""
+    # convert angles into unit vectors
+    xs, ys = np.cos(arr), np.sin(arr)
+    # get cumulitive sum of x and y values 
+    # xvals, yvals = np.cumsum(xs), np.cumsum(ys)
+    # ts = np.arange(len(xvals)) + 1
+    # dists = np.sqrt(xvals**2 + yvals**2)
+    # normalize by the number of frames
+    # test: what should we expect for a random walk???
+    # random_pts = np.random.random((10000, 2, len(ts)))
+    # norm = np.linalg.norm(random_pts, axis=1, keepdims=True)
+    # random_pts /= norm
+    # random_walks = np.cumsum(random_pts, axis=-1)
+    # # measure the distance traveled, normalized by the length of the line
+    # random_dists = np.sqrt(random_walks[:, 0]**2 + random_walks[:, 1]**2)
+    # random_dists_normed = random_dists / ts
+    # measure the rolling mean of x and y values
+    xmeans, ymeans = moving_average(xs, bins), moving_average(ys, bins)
+    dists = np.sqrt(xmeans**2 + ymeans**2)
+    # bin the distances 
+    return dists
+
+def interprate_inequality(string):
+    """Interpret a string as an inequality and return its partial function.
+
+    This assumes that inequalities are provided as a string in this order:
+        {variable} {inequality} {value}
+    
+    For example, "x < 5" returns partial(np.less, 5), which will only return
+    True if x is less than 5. Note that spaces are ignored.
+    """
+    # string = string.replace(' ', '')
+    # default to equality logic
+    logic = np.equal
+    logic_char = '=='
+    # first, identify the specific logic
+    logic_conv = {'<':np.less, '<=':np.less_equal, '==':np.equal,'>':np.greater,'>=':np.greater_equal}
+    for key in logic_conv:
+        if key in string:
+            logic = logic_conv[key]
+            logic_char = key
+    # then, extract the variable and value
+    val = string.split(logic_char)[-1]
+    # convert to float if possible
+    try:
+        val = float(val)
+    except:
+        pass
+    # return the partial function
+    return logic, val
 
 
 if __name__ == "__main__":
