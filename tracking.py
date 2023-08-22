@@ -944,10 +944,6 @@ class OfflineTracker():
                     heading_offline_arr.shape)
                 data.add_dataset('time_offline', time_offline)
                 print(f"updated {h5_fn}")
-                # test: plot the two flattened traces
-                # plt.plot(np.repeat(np.unwrap(heading_online).flatten(), int(round(frame_ratio))), color='k', zorder=2)
-                # plt.plot(np.unwrap(heading_offline_arr.flatten()), linestyle="", marker='.', color=red, zorder=3)
-                # plt.show()
                 # check if the online and offline headings are close
                 # fig, ax = plt.subplots()
                 # times_online = np.linspace(0, data.stop_exp - data.start_exp, heading_online.size)
@@ -2965,7 +2961,8 @@ class TrackingTrial():
             The value to store.
         """
         # first re-load the dataset in readwrite mode
-        del self.h5_file
+        if 'h5_file' in dir(self):
+            self.h5_file.close()
         try:
             self.h5_file = h5py.File(self.filename, 'r+')
         except:
