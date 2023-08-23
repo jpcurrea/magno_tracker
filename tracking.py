@@ -921,6 +921,7 @@ class OfflineTracker():
                     frame_padding = int(round(extra_frames / num_tests-1))
                     start, stop = data.start_exp, data.stop_exp
                     stops = data.stop_test
+                    breakpoint()
                     times_offline = np.linspace(start, stop, len(heading_offline) + 1)[:-1]
                     for num, (storage, stop) in enumerate(
                             zip(heading_offline_arr, stops)):
@@ -1826,7 +1827,7 @@ class TrackingExperiment():
                 else:
                     row_summ_axes = [self.display.right_col[row_num]]
             else:
-                row_summ_axes = None
+                row_summ_axes = []
             # update the subset dictionary
             if row_var is not None and row_val is not None:
                 subset[row_var] = row_val
@@ -1852,23 +1853,30 @@ class TrackingExperiment():
                 # collect the saccade starting positions and amplitudes for making a 2D plot 
                 for trial in self.trials:
                     bouts = trial.query_bouts(sort_by=query_kwargs['sort_by'], subset=subset)
-                    resps = trial.query('camera_heading', sort_by=query_kwargs['sort_by'], subset=subset)
-                    bar_positions = trial.query('bar_orientation', sort_by=query_kwargs['sort_by'], subset=subset)
-                    for bout, bar_position, resp in zip(bouts, bar_positions, resps):
-                        bar_position = np.unwrap(bar_position)
-                        bar_position += np.pi
-                        bar_position %= 2*np.pi
-                        bar_position -= np.pi
-                        for saccade in bout.saccades:
-                            peak_speed = abs(saccade.peak_velocity) * 180 / np.pi
-                            if (peak_speed >= min_speed) * (peak_speed <= max_speed):
-                                # store the start position, stop position, and signed amplitude
-                                # todo: get the position of the bar and calculate heading angles relative to the bar
-                                for storage, pos in zip([start_pos, stop_pos], [saccade.start, saccade.stop]):
-                                    bar = bar_position[pos]
-                                    head = resp[pos]
-                                    storage += [bar - head]
-                                amps += [saccade.amplitude]
+                    # resps = trial.query('camera_heading', sort_by=query_kwargs['sort_by'], subset=subset)
+                    # # this assumes that reference_var is stored in the trial data
+                    # if reference_var in dir(trial):
+                    #     reference_positions = trial.query(reference_var, sort_by=query_kwargs['sort_by'], subset=subset)
+                    #     for bout, reference_position, resp in zip(bouts, reference_positions, resps):
+                    #         reference_position = np.unwrap(reference_position)
+                    #         reference_position += np.pi
+                    #         reference_position %= 2*np.pi
+                    #         reference_position -= np.pi
+                    #         for saccade in bout.saccades:
+                    #             peak_speed = abs(saccade.peak_velocity) * 180 / np.pi
+                    #             if (peak_speed >= min_speed) * (peak_speed <= max_speed):
+                    #                 # store the start position, stop position, and signed amplitude
+                    #                 # todo: get the position of the bar and calculate heading angles relative to the bar
+                    #                 for storage, pos in zip([start_pos, stop_pos], [saccade.start, saccade.stop]):
+                    #                     ref = reference_position[pos]
+                    #                     head = resp[pos]
+                    #                     storage += [ref - head]
+                    #                 amps += [saccade.amplitude]
+                    # # use no reference angle if reference_var is not in the trial data
+                    # else:
+                    #     # let the user know that it couldn't find the reference angle
+                    #     print(f"Warning: reference angle {reference_var} not found in trial data. "
+                    #           "Using no reference angle.")
                     resps = trial.query(heading_var, sort_by=query_kwargs['sort_by'], subset=subset)
                     # convert the bar_positions variable to a general reference angle input parameter
                     if reference_var in dir(trial):
@@ -1879,25 +1887,28 @@ class TrackingExperiment():
                             reference_position %= 2*np.pi
                             reference_position -= np.pi
                             times, saccades = bout.query_saccades(sort_by=query_kwargs['sort_by'], subset=subset)
-                            breakpoint()
                             for saccade in saccades:
                                 peak_speed = abs(saccade.peak_velocity) * 180 / np.pi
                                 if (peak_speed >= min_speed) * (peak_speed <= max_speed):
                                     # store the start position, stop position, and signed amplitude
                                     # todo: get the position of the bar and calculate heading angles relative to the bar
                                     for storage, pos in zip([start_pos, stop_pos], [saccade.start, saccade.stop]):
-                                        bar = reference_position[pos]
+                                        ref = reference_position[pos]
                                         head = resp[pos]
-                                        storage += [bar - head]
+                                        storage += [ref - head]
                                     amps += [saccade.amplitude]
                     # use no reference angle if reference_var is not in the trial data
                     else:
+                        if reference_var is not None:
+                            # let the user know that it couldn't find the reference angle
+                            print(f"Warning: reference angle {reference_var} not found in trial data. "
+                                "Using no reference angle.")
+                        # calculate the heading without a reference angle (assume 0)
                         for bout, resp in zip(bouts, resps):
                             for saccade in bout.saccades:
                                 peak_speed = abs(saccade.peak_velocity) * 180 / np.pi
                                 if (peak_speed >= min_speed) * (peak_speed <= max_speed):
                                     # store the start position, stop position, and signed amplitude
-                                    # get the position of the bar and calculate heading angles
                                     for storage, pos in zip([start_pos, stop_pos], [saccade.start, saccade.stop]):
                                         head = resp[pos]
                                         storage += [head]
@@ -1930,7 +1941,6 @@ class TrackingExperiment():
         self.display.format(xlim=(np.pi, np.pi), ylim=(-1.25*np.pi, 1.25*np.pi), 
                             xlabel='orientation', ylabel='amplitude', 
                             xticks=ticks, yticks=ticks)
-        plt.show()
         # format the bottom and right margins to show the 
         if bottom_margin:
             bottom_row = self.display.bottom_row
@@ -2141,8 +2151,7 @@ class TrackingExperiment():
                      logx=False, logy=False, display=None,
                      summary_func=np.nanmean, xlabel=None, ylabel=None,
                      plot_type='line', bins=100, use_density=False,
-                     confidence_interval=False, confidence=.84,
-                     **query_kwargs):
+                     confidence_interval=False, confidence=.84, **query_kwargs):
         """Plot experimental data in one big grid.
         
         The color for each subplot is determined by the average of the column and 
@@ -2420,6 +2429,7 @@ class TrackingExperiment():
                                 mean_dist = np.nanmean(dist, axis=0)
                                 col_summ_ax.plot(mean_dist, y, color='w', lw=3, zorder=3)
                                 col_summ_ax.plot(mean_dist, y, color=color, lw=2, zorder=4)
+                        breakpoint()
                         repetitions += [not_all_nans.sum()]
                 elif len(xs) > 0:
                     # reshape the data
@@ -2452,8 +2462,6 @@ class TrackingExperiment():
                         if callable(summary_func):
                             summary = summary_func(xvals, axis=0)
                             col_summ_ax.plot(summary, y, color=color)
-                # repetitions += [reps]
-                # breakpoint() 
                 # add the xticks, yticks, and axis labels
         if format_axes:
             # if plotting trajectories, let's keep the an equal aspect ratio
@@ -2466,12 +2474,29 @@ class TrackingExperiment():
                 xlabel = xvar
             if ylabel is None:
                 ylabel = yvar
+            # the trajectory plots plot different variables along the margins
+            despine_right = True
+            if plot_type == 'trajectory2d':
+                despine_right = False
             self.display.format(xlim=xlim, ylim=ylim, xlabel=xlabel, ylabel=ylabel,
-                                xticks=xticks, yticks=yticks, logx=logx, logy=logy)
+                                xticks=xticks, yticks=yticks, logx=logx, logy=logy,
+                                despine_right=despine_right)
+            if plot_type == 'trajectory2d':
+                for num, ax in enumerate(self.display.right_col):
+                    # if last bottom row, add the x-axis label
+                    if num == len(self.display.right_col) - 1:
+                        ax.set_xlabel("radial distance (au)")
+                    ax.set_ylabel("time")
+                    ax.invert_yaxis()
+                for num, ax in enumerate(self.display.bottom_row):
+                    ax.set_xlabel("radial distance (au)")
+                    if num == 0:
+                        ax.set_ylabel("time")
+                    ax.invert_yaxis()
             # add the row values
             self.display.label_margins(row_vals, row_var, col_vals, col_var)
             # add the sample size to the first subplot
-            self.display.fig.suptitle(f"N={sample_size}, {min(repetitions)}–{max(repetitions)} traces per subject")
+            self.display.fig.suptitle(f"N={sample_size}, {min(repetitions)}–{max(repetitions)} traces per subplot")
         # plt.show()
 
     def plot_histogram_summary(
@@ -2853,6 +2878,9 @@ class SummaryDisplay():
             # plot the x=0 and y=0 lines 
             ax.axhline(0, linestyle='--', color='k', zorder=1, lw=.5)
             ax.axvline(0, linestyle='--', color='k', zorder=1, lw=.5)
+        # optionally, we can choose not to despine the left spine of the right column
+        if not despine_right:
+            self.left[:-1, -1] = True
         num_rows, num_cols = len(self.axes), len(self.axes[0])
         for row_num, (row, are_left, are_bottom) in enumerate(zip(self.axes, self.left, self.bottom)):
             for col_num, (ax, is_left, is_bottom) in enumerate(zip(row, are_left, are_bottom)):
@@ -2891,7 +2919,7 @@ class SummaryDisplay():
                         if yticks is not None:
                             ax.set_yticks(yticks[0], yticks[1])
                 # otherwise, clean up the ticks
-                else:
+                else:                    
                     ax.set_yticks([])
                 # despine the axes
                 # if not special_bottom_left:
