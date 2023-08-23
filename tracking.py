@@ -1135,10 +1135,7 @@ class TrackingExperiment():
             # if 'dirname' in kwargs.values:
             #     breakpoint()
             # res = trial.query(output=kwargs['output'], subset=kwargs['subset'])
-            try:
-                res = trial.query(**kwargs)
-            except:
-                breakpoint()
+            res = trial.query(**kwargs)
             ret += [res]
         # check if all the results have the same shape
         try:
@@ -2190,7 +2187,7 @@ class TrackingExperiment():
         plot_type : str, default='line'
             Whether to plot the data as a line plot ('line'), a 2D histogram ('hist2d'),
             or as 2d simulated trajectory ('trajectory2d').
-        bins : int or tuple, default=None
+        bins : int or tuple, default=100
             The bins parameter to pass to the 2D histogram.
         use_density : bool, default=False
             Whether to plot the density instead of the count in the 2d histogram.
@@ -2455,8 +2452,8 @@ class TrackingExperiment():
                         if callable(summary_func):
                             summary = summary_func(xvals, axis=0)
                             col_summ_ax.plot(summary, y, color=color)
-                repetitions += [reps]
-                # breakpoint()
+                # repetitions += [reps]
+                # breakpoint() 
                 # add the xticks, yticks, and axis labels
         if format_axes:
             # if plotting trajectories, let's keep the an equal aspect ratio
@@ -3082,7 +3079,7 @@ class TrackingTrial():
         if len(subset.keys()) > 0:
             for key, val in subset.items():
                 logic, thresh = np.equal, val
-                if isinstance(val, (str, bytes)):
+                if isinstance(val, str):
                     logic, thresh = interprate_inequality(val)
                 var = self.__getattribute__(key)
                 if not isinstance(var, (list, tuple, np.ndarray)):
@@ -3326,11 +3323,10 @@ class TrackingTrial():
         if isinstance(ret, (str, bytes)):
             ret = np.repeat(ret, self.num_tests)
         include = np.ones(ret.shape, dtype=bool)
-        logic_conv = {'<':np.less, '<=':np.less_equal, '==':np.equal,'>':np.greater,'>=':np.greater_equal}
         if len(subset.keys()) > 0:
             for key, val in subset.items():                
                 logic, thresh = np.equal, val
-                if isinstance(val, (str, bytes)):
+                if isinstance(val, str):
                     logic, thresh = interprate_inequality(val)
                 var = self.__getattribute__(key)
                 if isinstance(var, (str, bytes)):
@@ -3374,30 +3370,44 @@ class TrackingTrial():
         #     #         if np.any(inds): 
         #     #             new_ret += [arr[inds]]
         #     ret = ret[include]
+        # sort by the sort_by variable
         # index the return array using the include array
-        new_ret = []
-        for inds, arr, order in zip(include, ret, sort_by): 
-            if isinstance(arr, np.ndarray):
-                new_ret += [arr[inds]]
-            elif inds:
-                new_ret += [arr]
-        # get inclusion index for the sort_by variable
-        sort_include = np.copy(include)
-        while sort_by.ndim < sort_include.ndim: sort_include = np.any(sort_include, axis=-1).astype(bool)
-        sort_by = np.argsort(sort_by)[sort_include]
-        # sort using the sort_by array
-        new_ret_sorted = [new_ret[i] for i in sort_by]
-        # if np.array(new_ret).ndim == 1 and output == 'camera_heading_offline_wrapped':
-        #     breakpoint()
-        # the array takes on strange shape if the indexing variable is not the same shape as the output
-        ret = np.array(new_ret_sorted)
-        # sort using the sort_by
         if sort_by.ndim == 1:
-            order = np.argsort(sort_by)
-            return ret[order]
-        elif sort_by.ndim == 2:
+            # todo: does this algorithm work for sort_by arrays of higher dimension (like time)?
+            sort_by_inds = np.argsort(sort_by)
+            new_ret = []
+            for ind, arr in zip(include[sort_by_inds], ret[sort_by_inds]):
+                if isinstance(ind, (tuple, list, np.ndarray)):
+                    if any(ind):
+                        new_ret += [arr[ind]]
+                elif isinstance(ind, (bool, np.bool_)):
+                    if ind:
+                        new_ret += [arr]
+            ret = np.array(new_ret)
+            return ret
+        else:
+            new_ret = []
+            for inds, arr, order in zip(include, ret, sort_by): 
+                if isinstance(arr, np.ndarray):
+                    new_ret += [arr[inds]]
+                elif inds:
+                    new_ret += [arr]
+            # get inclusion index for the sort_by variable
+            sort_include = np.copy(include)
+            while sort_by.ndim < sort_include.ndim: sort_include = np.any(sort_include, axis=-1).astype(bool)
+            sort_by_inds = np.argsort(sort_by)[sort_include]
+            try:
+                # sort using the sort_by array
+                new_ret_sorted = [new_ret[i] for i in sort_by_inds]
+            except:
+                breakpoint()
+            # if np.array(new_ret).ndim == 1 and output == 'camera_heading_offline_wrapped':
+            #     breakpoint()
+            # the array takes on strange shape if the indexing variable is not the same shape as the output
+            ret = np.array(new_ret_sorted)
             sort_by = sort_by.flatten()
-            return ret.flatten()[np.argsort(sort_by)]
+            ret = ret.flatten()[np.argsort(sort_by)]
+        return ret
 
     def butterworth_filter(self, key='camera_heading', low=1, high=6,
                            sample_rate=60):
@@ -3928,10 +3938,14 @@ class Bout():
                 subset = query_kwargs.pop('subset')
                 # using the subset conditions, check if this saccade meets the criteria
                 for key, val in subset.items():
-                    # interpret val for inequalities
-                    logic, thresh = interprate_inequality(val)
                     key_vals = saccade.__getattribute__(key)
-                    include *= logic(key_vals, thresh)
+                    # interpret val for inequalities
+                    if isinstance(val, str):
+                        logic, thresh = interprate_inequality(val)
+                        include *= logic(key_vals, thresh)
+                    else:
+                        include *= key_vals == val
+
             if include:                    
                 peak_speed = abs(saccade.peak_velocity) * 180. / np.pi
                 if (peak_speed > min_speed) and (peak_speed < max_speed):
