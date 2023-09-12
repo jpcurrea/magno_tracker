@@ -1127,7 +1127,7 @@ class TrackingExperiment():
         if remove_incompletes:
             self.remove_incompletes()
 
-    def query(self, same_size=True, **kwargs):
+    def query(self, same_size=True, skip_empty=False, **kwargs):
         """Get specified data from each trial."""
         ret = []
         if 'subset' not in kwargs.keys():
@@ -1137,32 +1137,40 @@ class TrackingExperiment():
             #     breakpoint()
             # res = trial.query(output=kwargs['output'], subset=kwargs['subset'])
             res = trial.query(**kwargs)
-            ret += [res]
-        # check if all the results have the same shape
-        try:
+            if skip_empty:
+                if len(res) > 0:
+                    ret += [res]
+            else:
+                ret += [res]
+        if len(ret) > 0:
+            # check if all the results have the same shape
             first_shape = ret[0].shape
-        except:
-            breakpoint()
-        same_shape = [trial_data.shape == first_shape for trial_data in ret]
-        # return as an array if they are all the same shape
-        if np.all(same_shape):
-            ret = np.array(ret)
-        elif same_size:
-            shapes = [arr.shape for arr in ret]
-            sizes = np.array([arr.size for arr in ret])
-            max_shape = shapes[np.argmax(sizes)]
-            new_ret = []
-            empty = np.zeros(max_shape)
-            for arr in ret:
-                empty.fill(np.nan)
-                if arr.ndim > 1:
-                    for vals, storage in zip(arr, empty):
-                        storage[:len(vals)] = vals
-                else:
-                    empty[:, :len(arr)] = arr
-                new_ret += [np.copy(empty)]
-            ret = np.array(new_ret)
-            # find the maximum shape and pad the others with NaNs to match
+            same_shape = [trial_data.shape == first_shape for trial_data in ret]
+            # return as an array if they are all the same shape
+            if np.all(same_shape):
+                ret = np.array(ret)
+            if same_size:
+                shapes = [arr.shape for arr in ret]
+                sizes = np.array([arr.size for arr in ret])
+                max_shape = shapes[np.argmax(sizes)]
+                new_ret = []
+                dtype = [arr.dtype for arr in ret if len(arr) > 0][0]
+                empty = np.zeros(max_shape, dtype=dtype)
+                for arr in ret:
+                    empty.fill(np.nan)
+                    if arr.ndim > 1:
+                        for vals, storage in zip(arr, empty):
+                            storage[:len(vals)] = vals
+                    else:
+                        if empty.ndim == 2:
+                            empty[:, :len(arr)] = arr
+                        else:
+                            empty[:len(arr)] = arr
+                    new_ret += [np.copy(empty)]
+                ret = np.array(new_ret)
+                # find the maximum shape and pad the others with NaNs to match
+        else:
+            ret = []
         return ret
 
     def query_bouts(self, **kwargs):
@@ -1291,8 +1299,11 @@ class TrackingExperiment():
 
     def get_saccade_stats(self, **kwargs):
         """Process individual saccades and measure saccade data per trial."""
-        for trial in self.trials:
+        print_progress(0, len(self.trials))
+        for num, trial in enumerate(self.trials):
             trial.get_saccade_stats(**kwargs)
+            print_progress(num, len(self.trials))
+
 
     def remove_saccades(self, **saccade_kwargs):
         """Generate a new instance of the """
@@ -1319,13 +1330,13 @@ class TrackingExperiment():
             trial.butterworth_filter(key, low, high, sample_rate)
             trial.__setattr__(key, trial.__getattribute__(key+"_smoothed"))
 
-    def plot_saccades(self, col_var, row_var, time_var='time', start=0, 
+    def plot_saccades(self, col_var, row_var, output_var='camera_heading', time_var='time', start=0, 
                       stop=.5, row_cmap=None, col_cmap=None, 
                       fig=None, right_margin=True, bottom_margin=True,
                       xlim=None, ylim=None, xticks=None, yticks=None, 
                       positive_amplitude=False, scale=1.5, reversal_split=False,
                       saccade_var='arr_relative', min_speed=350, max_speed=np.inf,
-                      mean_bins=25,
+                      mean_bins=25, bins=100,
                       **query_kwargs):
         """Plot saccade data in one big grid as in the plot summary below.
         
@@ -1381,17 +1392,27 @@ class TrackingExperiment():
         subset = copy.copy(query_kwargs['subset'])
         # get the values used for coloring each subplot
         if row_var is not None:
-            row_vals = self.query(output=row_var, sort_by=row_var, subset=subset)
+            row_vals = self.query(output=row_var, sort_by=row_var, subset=subset, same_size=True, skip_empty=True)
         else:
             row_vals = [None]
         if col_var is not None:
-            col_vals = self.query(output=col_var, sort_by=col_var, subset=subset)
+            col_vals = self.query(output=col_var, sort_by=col_var, subset=subset, same_size=True, skip_empty=True)
         else:
             col_vals = [None]
         assert len(col_vals) > 0 or len(row_vals) > 0, "The subset is empty!"
         # todo: what's up with the number of axes?
         row_vals = np.unique(row_vals)
         col_vals = np.unique(col_vals)
+        new_row_vals, new_col_vals = [], []
+        for num, (vals, storage) in enumerate(zip([row_vals, col_vals], [new_row_vals, new_col_vals])):
+            if vals.dtype.type == np.bytes_:
+                non_nans = vals != b'nan'
+            elif vals.dtype.type in [np.string_, np.str_]:
+                non_nans = vals != 'nan'
+            else:
+                non_nans = np.isnan(vals) == False
+            storage += [arr for arr in vals[non_nans]]
+        row_vals, col_vals = np.array(new_row_vals), np.array(new_col_vals)
         num_rows, num_cols = len(row_vals), len(col_vals)
         # get the colors from the specified colormaps
         colors = {}
@@ -1400,25 +1421,24 @@ class TrackingExperiment():
             [row_vals, col_vals],
             ['rows', 'columns']):
             if len(vals) > 0:
+                if isinstance(vals[0], (str, bytes)):
+                    # if values are strings, sort them in alphabetical order and use their index for the colors
+                    vals = np.argsort(vals)
                 if isinstance(cmap, str):
-                    if isinstance(vals[0], (str, bytes)):
-                        # if values are strings, sort them in alphabetical order and use their index for the colors
-                        vals = np.argsort(vals)
                     norm = matplotlib.colors.Normalize(vals.min(), vals.max())
                     cmap = matplotlib.cm.ScalarMappable(norm=norm, cmap=cmap)
                     colors[key] = cmap.to_rgba(vals)[:, :-1]
                 elif callable(cmap):
                     colors[key] = cmap(vals)
-                elif isinstance(row_cmap, (list, np.ndarray, tuple)):
+                elif isinstance(cmap, (list, np.ndarray, tuple)):
+                    if len(cmap) != len(vals):
+                        breakpoint()
                     assert len(cmap) == len(vals), (
                         f"Colormap list has {len(cmap)} elements but {len(vals)} {key}.")
-                    colors[key] = row_cmap
-                else:
-                    colors[key] = []
-            else:
-                colors[key] = []
+                    colors[key] = np.asarray(cmap)
         # combine the color lists to make an array specifying the color of each subplot
-        if len(colors['rows']) == num_rows and len(colors['columns']) == num_cols:
+        # if len(colors['rows']) == num_rows and len(colors['columns']) == num_cols:
+        if 'rows' in colors.keys() and 'columns' in colors.keys():
             # get the mean comination of row and column colors
             # try:
             if num_rows > 0 and num_cols > 0:
@@ -1433,9 +1453,9 @@ class TrackingExperiment():
                 if num_rows == 0:
                     num_rows = 1
             color_arr = np.sqrt(color_mean)
-        elif len(colors['columns']) == num_cols:
+        elif 'columns' in colors.keys() and len(colors['columns']) == num_cols:
             color_arr = np.repeat(colors['columns'][np.newaxis], num_rows, axis=0)
-        elif len(colors['rows']) == num_rows:
+        elif 'rows' in colors.keys() and len(colors['rows']) == num_rows:
             color_arr = np.repeat(colors['rows'][:, np.newaxis], num_cols, axis=1)
         else:
             color_arr = np.zeros((num_rows, num_cols, 3), dtype='uint8')
@@ -1493,19 +1513,26 @@ class TrackingExperiment():
                 saccade_arr = []
                 time_arr = []
                 same_direction = []
-                sample_size = len(self.trials)
+                sample_size = 0
+                total_lines = []
                 start_amps, start_times = [], []
                 stop_amps, stop_times = [], []
                 for trial in self.trials:
+                    lines_plotted = 0
+                    # todo: make sure the output and subset variables have the same shape
                     bouts = trial.query_bouts(sort_by=query_kwargs['sort_by'], subset=subset)
-                    resps = trial.query(sort_by=query_kwargs['sort_by'], subset=subset)
+                    resps = trial.query(output=output_var, sort_by=query_kwargs['sort_by'], subset=subset)
                     for bout in bouts:
-                        for saccade in bout.saccades:
+                        # filter saccades
+                        time, saccades = bout.query_saccades(output='saccade', subset=subset, sort_by=query_kwargs['sort_by'])
+                        # if len(saccades) > 0:
+                        #     # test: is this list right? it includes all of the saccades
+                        #     # get the bar directions
+                        for saccade in saccades:
                             peak_speed = abs(saccade.peak_velocity) * 180 / np.pi
                             if (peak_speed >= min_speed) * (peak_speed <= max_speed):
                                 # get the corresponding time values
-                                time = saccade.__getattribute__(time_var)
-                                
+                                time = saccade.__getattribute__('time')
                                 heading = np.copy(saccade.__getattribute__(saccade_var))
                                 # get the range of times to plot
                                 include = (time >= start) * (time < stop)
@@ -1545,6 +1572,7 @@ class TrackingExperiment():
                                     ax = col
                                 ax.plot(heading, time, color='gray', lw=.25, alpha=.25, zorder=1)
                                 ax.plot(heading[saccade.start:saccade.stop], time[saccade.start:saccade.stop], color='k', lw=.25, alpha=.5, zorder=2)
+                                lines_plotted += 1
                                 # plot the stop coordinate
                                 stop_ind = saccade.stop
                                 # ax.scatter(heading[stop_ind], time[stop_ind], marker='.', color='k', edgecolor='none', alpha=.5, zorder=2)
@@ -1560,14 +1588,17 @@ class TrackingExperiment():
                                 # else:
                                     # todo: plot the mean in the trace subplot and the mean +/- CI in the right margin
                                     # for each direction
+                    if lines_plotted > 0:
+                        sample_size += 1
+                        total_lines += [lines_plotted]
                 # make a scatterplot of the start and stop times
                 if bottom_margin:
                     xvals = np.array(stop_amps)
-                    vals, _, _ = col_summ_ax.hist(xvals, bins=np.linspace(xlim[0], xlim[1], 100), color=color, histtype='stepfilled', alpha=.75)
+                    vals, _, _ = col_summ_ax.hist(xvals, bins=np.linspace(xlim[0], xlim[1], bins), color=color, histtype='stepfilled', alpha=.5, density=False)
                     max_count = max(max_count, max(vals))
                     if time_var == 'relative_time':
                         xvals = np.array(start_amps)
-                        vals, _, _ = col_summ_ax.hist(xvals, bins=np.linspace(xlim[0], xlim[1], 100), histtype='stepfilled', color=color, alpha=.5)
+                        vals, _, _ = col_summ_ax.hist(xvals, bins=np.linspace(xlim[0], xlim[1], bins), histtype='stepfilled', color=color, alpha=.5)
                         max_count = max(max_count, max(vals))
                 # todo: plot different rows if reversal_split is specified
                 # try:
@@ -1680,7 +1711,7 @@ class TrackingExperiment():
                     ax.set_ylabel("count")
                 else:
                     ax.set_yticks([])
-                sbn.despine(ax=ax, bottom=False, left=num!=0)
+                sbn.despine(ax=ax, bottom=False, left=num!=0, trim=num!=0)
         if right_margin and bottom_margin:
             self.display.corner_ax.axis('off')
         # add the row values
@@ -1695,13 +1726,16 @@ class TrackingExperiment():
             row_vals = new_row_vals
         self.display.label_margins(row_vals, row_var, col_vals, col_var)
         # add the sample size to the first subplot
-        self.display.fig.suptitle(f"N={sample_size}")
+        self.display.fig.suptitle(f"N={sample_size}, {min(total_lines)} - {max(total_lines)} lines per subject")
 
     def plot_saccade_dynamics(self, col_var, row_var, row_cmap=None, col_cmap=None,
+                              time_var='time',
                               fig=None, right_margin=True, bottom_margin=True, scale=1.5, 
                               reversal_split=False, output='start', 
-                              heading_var='camera_heading', reference_var=None, bins=21,
-                              min_speed=350, max_speed=np.inf, **query_kwargs):
+                              heading_var='camera_heading', reference_var=None, saccade_var='amplitude',
+                              bins=21, min_speed=350, max_speed=np.inf, scatter=False, 
+                              xlim=None, ylim=None, xticks=None, yticks=None,
+                              **query_kwargs):
         """Plot saccade position (x) and amplitude (y) in a grid as in the plot summary below.
         
         These plots will allow us to measure the 
@@ -1711,21 +1745,25 @@ class TrackingExperiment():
         col_var, row_var : str
             The variable names to paramaterize along columns and rows of the grid.
         time_var : str, default='time'
-            The time variable to use. So far there are two options: 1) time from the start 
-            of the saccade or 2) time from the peak velocity.
+            The time variable to use.
         right_margin, bottom_margin : bool, default=True
             Whether to plot the means from each subplot in the margin to the right
             or bottom of the axes. A colormap (row_cmap or col_cmap) must be provided
             in order to distinguish individual traces.
         output : str, default='start'
             Whether to use the start or stop position of the saccade.
-        min_speed, max_speed : float, default=350, np.inf
-            The minimum and maximum peak speed to include in the saccades here.
         heading_var : str, default='camera_heading'
             The variable to use for the saccade heading.
         reference_var : str, default=None
             If provided, the saccades will be aligned to the value of this variable.
+        saccade_var : str, default='amplitude',
+            Which saccade variable to plot. Options include 'amplitude' and 'peak_velocity'.
         bins : int, default=21
+            The number of bins to use for the 2D histogram.
+        min_speed, max_speed : float, default=350, np.inf
+            The minimum and maximum peak speed to include in the saccades here.
+        scatter : bool, default=False
+            Whether to plot the data as a scatter plot or a 2D histogram.
         **query_kwargs
             These get passed to the query 
         """
@@ -1750,6 +1788,16 @@ class TrackingExperiment():
         # todo: what's up with the number of axes?
         row_vals = np.unique(row_vals)
         col_vals = np.unique(col_vals)
+        new_row_vals, new_col_vals = [], []
+        for num, (vals, storage) in enumerate(zip([row_vals, col_vals], [new_row_vals, new_col_vals])):
+            if vals.dtype.type == np.bytes_:
+                non_nans = vals != b'nan'
+            elif vals.dtype.type in [np.string_, np.str_]:
+                non_nans = vals != 'nan'
+            else:
+                non_nans = np.isnan(vals) == False
+            storage += [arr for arr in vals[non_nans]]
+        row_vals, col_vals = np.array(new_row_vals), np.array(new_col_vals)
         num_rows, num_cols = len(row_vals), len(col_vals)
         # get the colors from the specified colormaps
         # get the colors from the specified colormaps
@@ -1758,7 +1806,7 @@ class TrackingExperiment():
             [row_cmap, col_cmap], 
             [row_vals, col_vals],
             ['rows', 'columns']):
-            if len(vals) > 0:
+            if len(vals) > 0 and cmap is not None:
                 if isinstance(cmap, str):
                     if isinstance(vals[0], (str, bytes)):
                         # if values are strings, sort them in alphabetical order and use their index for the colors
@@ -1771,7 +1819,7 @@ class TrackingExperiment():
                 elif isinstance(row_cmap, (list, np.ndarray, tuple)):
                     assert len(cmap) == len(vals), (
                         f"Colormap list has {len(cmap)} elements but {len(vals)} {key}.")
-                    colors[key] = row_cmap
+                    colors[key] = np.array(row_cmap)
                 else:
                     colors[key] = []
             else:
@@ -1795,7 +1843,10 @@ class TrackingExperiment():
         elif len(colors['columns']) == num_cols:
             color_arr = np.repeat(colors['columns'][np.newaxis], num_rows, axis=0)
         elif len(colors['rows']) == num_rows:
-            color_arr = np.repeat(colors['rows'][:, np.newaxis], num_cols, axis=1)
+            try:
+                color_arr = np.repeat(colors['rows'][:, np.newaxis], num_cols, axis=1)
+            except:
+                breakpoint()
         else:
             color_arr = np.zeros((num_rows, num_cols, 3), dtype='uint8')
         # todo: add extra rows if split_reversal
@@ -1849,98 +1900,75 @@ class TrackingExperiment():
                 # update the subset dictionary
                 sample_size = len(self.trials)
                 start_pos, stop_pos = [], []
+                key_pos = []
                 amps = []
                 # collect the saccade starting positions and amplitudes for making a 2D plot 
                 for trial in self.trials:
                     bouts = trial.query_bouts(sort_by=query_kwargs['sort_by'], subset=subset)
-                    # resps = trial.query('camera_heading', sort_by=query_kwargs['sort_by'], subset=subset)
-                    # # this assumes that reference_var is stored in the trial data
-                    # if reference_var in dir(trial):
-                    #     reference_positions = trial.query(reference_var, sort_by=query_kwargs['sort_by'], subset=subset)
-                    #     for bout, reference_position, resp in zip(bouts, reference_positions, resps):
-                    #         reference_position = np.unwrap(reference_position)
-                    #         reference_position += np.pi
-                    #         reference_position %= 2*np.pi
-                    #         reference_position -= np.pi
-                    #         for saccade in bout.saccades:
-                    #             peak_speed = abs(saccade.peak_velocity) * 180 / np.pi
-                    #             if (peak_speed >= min_speed) * (peak_speed <= max_speed):
-                    #                 # store the start position, stop position, and signed amplitude
-                    #                 # todo: get the position of the bar and calculate heading angles relative to the bar
-                    #                 for storage, pos in zip([start_pos, stop_pos], [saccade.start, saccade.stop]):
-                    #                     ref = reference_position[pos]
-                    #                     head = resp[pos]
-                    #                     storage += [ref - head]
-                    #                 amps += [saccade.amplitude]
-                    # # use no reference angle if reference_var is not in the trial data
-                    # else:
-                    #     # let the user know that it couldn't find the reference angle
-                    #     print(f"Warning: reference angle {reference_var} not found in trial data. "
-                    #           "Using no reference angle.")
                     resps = trial.query(heading_var, sort_by=query_kwargs['sort_by'], subset=subset)
+                    resp_times = trial.query(time_var, sort_by=query_kwargs['sort_by'], subset=subset)
                     # convert the bar_positions variable to a general reference angle input parameter
                     if reference_var in dir(trial):
                         reference_positions = trial.query(reference_var, sort_by=query_kwargs['sort_by'], subset=subset)
-                        for bout, reference_position, resp in zip(bouts, reference_positions, resps):
+                    else:
+                        reference_positions = np.zeros(len(bouts), dtype=int)
+                    # go through each bout and grab the saccade variables
+                    for bout, reference_position, resp, resp_time in zip(bouts, reference_positions, resps, resp_times):
+                        if reference_var in dir(trial):
+                            # if reference angle is specified, subtract it from the heading
                             reference_position = np.unwrap(reference_position)
                             reference_position += np.pi
                             reference_position %= 2*np.pi
                             reference_position -= np.pi
-                            times, saccades = bout.query_saccades(sort_by=query_kwargs['sort_by'], subset=subset)
-                            for saccade in saccades:
-                                peak_speed = abs(saccade.peak_velocity) * 180 / np.pi
-                                if (peak_speed >= min_speed) * (peak_speed <= max_speed):
-                                    # store the start position, stop position, and signed amplitude
-                                    # todo: get the position of the bar and calculate heading angles relative to the bar
-                                    for storage, pos in zip([start_pos, stop_pos], [saccade.start, saccade.stop]):
+                        # grab the subsetted saccades
+                        times, saccades = bout.query_saccades(output='saccade', sort_by=query_kwargs['sort_by'], subset=subset)
+                        # for each saccade, check if it's within the speed range and store the specified position
+                        for saccade in saccades:
+                            peak_speed = abs(saccade.peak_velocity) * 180 / np.pi
+                            if (peak_speed >= min_speed) * (peak_speed <= max_speed):
+                                # store the start position, stop position, and signed amplitude
+                                key_time = saccade.__getattribute__(f'{output}_time')
+                                pos = saccade.__getattribute__(f'{output}')
+                                # find the nearest resp_time 
+                                diffs = abs(resp_time - key_time)
+                                resp_ind = np.nanargmin(diffs)
+                                if diffs[resp_ind] < 1. / bout.trial.framerate:
+                                    head = resp[resp_ind]
+                                    if reference_var in dir(trial):
                                         ref = reference_position[pos]
-                                        head = resp[pos]
-                                        storage += [ref - head]
-                                    amps += [saccade.amplitude]
-                    # use no reference angle if reference_var is not in the trial data
-                    else:
-                        if reference_var is not None:
-                            # let the user know that it couldn't find the reference angle
-                            print(f"Warning: reference angle {reference_var} not found in trial data. "
-                                "Using no reference angle.")
-                        # calculate the heading without a reference angle (assume 0)
-                        for bout, resp in zip(bouts, resps):
-                            for saccade in bout.saccades:
-                                peak_speed = abs(saccade.peak_velocity) * 180 / np.pi
-                                if (peak_speed >= min_speed) * (peak_speed <= max_speed):
-                                    # store the start position, stop position, and signed amplitude
-                                    for storage, pos in zip([start_pos, stop_pos], [saccade.start, saccade.stop]):
-                                        head = resp[pos]
-                                        storage += [head]
+                                        key_pos += [ref - head]
+                                    else:
+                                        key_pos += [head]
+                                    amps += [saccade.__getattribute__(saccade_var)]
                 if not isinstance(col, (list, np.ndarray)):
                     col = [col]
                 amplitude = np.array(amps)
-                if output == 'start':
-                    position = np.array(start_pos)
-                else:
-                    position = np.array(stop_pos)
-                position += np.pi
-                position %= 2*np.pi
-                position -= np.pi
-                for ax, row_summ_ax in zip(col, row_summ_axes):
+                position = np.array(key_pos)
+                # position += np.pi
+                # position %= 2*np.pi
+                # position -= np.pi
+                for ax in col:
                     data = {'amplitude':amplitude, 'position':position}
                     # ax = plt.gca()
                     # sbn.kdeplot(data=data, x='position', y='amplitude', ax=ax, levels=20, fill=True, cmap='Greys')
-                    # ax.scatter(position, amplitude, marker='.', alpha=.1, color='k', edgecolor='none')
-                    ax.hist2d(position, amplitude, bins=21, range=[[-np.pi, np.pi],[-np.pi, np.pi]], cmap='Greys')
+                    if scatter:
+                        ax.scatter(position, amplitude, marker='o', alpha=.25, color='k', edgecolor='none')
+                    else:
+                        ax.hist2d(position, amplitude, bins=bins, range=[[-np.pi, np.pi],[-np.pi, np.pi]], cmap='Greys')
                     # ax.set_xlabel(None)
                     # ax.set_ylabel(None)
                     # ax.set_xlabel('position')
                     # ax.set_ylabel('amplitude')
-                    ax.set_aspect('equal')
+                    # ax.set_aspect('equal')
                     # ax.set_xticks([-np.pi, -np.pi/2, 0, np.pi/2, np.pi], ['-$\pi$', '-$\pi$/2', '0', '$\pi$/2', '$\pi$'])
                     # ax.set_yticks([-np.pi, -np.pi/2, 0, np.pi/2, np.pi], ['-$\pi$', '-$\pi$/2', '0', '$\pi$/2', '$\pi$'])
                     # plot mean +/- SEM
         # add the xticks, yticks, and axis labels
-        ticks = ([-np.pi, -np.pi/2, 0, np.pi/2, np.pi], ['-$\pi$', '-$\pi$/2', '0', '$\pi$/2', '$\pi$'])
-        self.display.format(xlim=(np.pi, np.pi), ylim=(-1.25*np.pi, 1.25*np.pi), 
-                            xlabel='orientation', ylabel='amplitude', 
-                            xticks=ticks, yticks=ticks)
+        # ticks = ([-np.pi, -np.pi/2, 0, np.pi/2, np.pi], ['-$\pi$', '0', '$\pi$'])
+        self.display.format(xlim=xlim, ylim=ylim, 
+                            # xlabel='orientation', ylabel='amplitude', 
+                            xlabel=heading_var, ylabel=saccade_var,
+                            xticks=xticks, yticks=yticks)
         # format the bottom and right margins to show the 
         if bottom_margin:
             bottom_row = self.display.bottom_row
@@ -1953,16 +1981,6 @@ class TrackingExperiment():
                     ax.set_yticks([])
                 sbn.despine(ax=ax, bottom=False, left=num!=0)
             self.display.corner_ax.axis('off')
-        # add the row values
-        # make specific labels if reversal_split
-        if reversal_split:
-            new_row_vals = []
-            for val in row_vals:
-                # new_row_vals += [val]
-                # new_row_vals += [val]
-                new_row_vals += [f"same\n{val}"]
-                new_row_vals += [f"reversal\n{val}"]
-            row_vals = new_row_vals
         self.display.label_margins(row_vals, row_var, col_vals, col_var)
         # add the sample size to the first subplot
         self.display.fig.suptitle(f"N={sample_size}")
@@ -2215,6 +2233,19 @@ class TrackingExperiment():
         # todo: what's up with the number of axes?
         row_vals = np.unique(row_vals)
         col_vals = np.unique(col_vals)
+        new_row_vals, new_col_vals = [], []
+        for num, (vals, storage) in enumerate(zip([row_vals, col_vals], [new_row_vals, new_col_vals])):
+            if vals.dtype.type == np.bytes_:
+                non_nans = vals != b'nan'
+            elif vals.dtype.type in [np.string_, np.str_]:
+                non_nans = vals != 'nan'
+            else:
+                try:
+                    non_nans = np.isnan(vals) == False
+                except:
+                    breakpoint()
+            storage += [arr for arr in vals[non_nans]]
+        row_vals, col_vals = np.array(new_row_vals), np.array(new_col_vals)
         num_rows, num_cols = len(row_vals), len(col_vals)
         # get the colors from the specified colormaps
         colors = {}
@@ -2360,7 +2391,10 @@ class TrackingExperiment():
                                 circle = plt.Circle((0, 0), radius=radius, color=color, alpha=.25, fill=False, lw=.5)
                                 ax.add_artist(circle)
                         else:
-                            ax.plot(new_xs.T, new_ys.T, color='gray', lw=.5, alpha=.5)
+                            try:
+                                ax.plot(new_xs.T, new_ys.T, color='gray', lw=.5, alpha=.5)
+                            except:
+                                breakpoint()
                             # if np.squeeze(xs).ndim > 1:
                             #     # ax.plot(xs.T, ys.T, color='gray', lw=.5, alpha=.5)
                             #     reps = 0
@@ -2371,9 +2405,10 @@ class TrackingExperiment():
                             #         except:
                             #             pass
                             # else:
-                        no_nans = np.isnan(ys) == False
-                        all_no_nans = np.all(no_nans, axis=1)
-                        y = ys[all_no_nans][0]
+                        # use the y-values from the trial with the fewest NaNs
+                        nans = np.isnan(ys)
+                        fewest_nans = nans.sum(1).argmin()
+                        y = ys[fewest_nans]
                         if callable(summary_func) and plot_type in ['hist2d', 'line']:
                             # ax_mean = np.nanmean(xs, axis=0)
                             ax_mean = summary_func(xs, axis=0)
@@ -2429,7 +2464,6 @@ class TrackingExperiment():
                                 mean_dist = np.nanmean(dist, axis=0)
                                 col_summ_ax.plot(mean_dist, y, color='w', lw=3, zorder=3)
                                 col_summ_ax.plot(mean_dist, y, color=color, lw=2, zorder=4)
-                        breakpoint()
                         repetitions += [not_all_nans.sum()]
                 elif len(xs) > 0:
                     # reshape the data
@@ -2562,6 +2596,16 @@ class TrackingExperiment():
         # todo: what's up with the number of axes?
         row_vals = np.unique(row_vals)
         col_vals = np.unique(col_vals)
+        new_row_vals, new_col_vals = [], []
+        for num, (vals, storage) in enumerate(zip([row_vals, col_vals], [new_row_vals, new_col_vals])):
+            if vals.dtype.type == np.bytes_:
+                non_nans = vals != b'nan'
+            elif vals.dtype.type in [np.string_, np.str_]:
+                non_nans = vals != 'nan'
+            else:
+                non_nans = np.isnan(vals) == False
+            storage += [arr for arr in vals[non_nans]]
+        row_vals, col_vals = np.array(new_row_vals), np.array(new_col_vals)
         num_rows, num_cols = len(row_vals), len(col_vals)
         # get the colors from the specified colormaps
         colors = {}
@@ -2747,6 +2791,8 @@ class SummaryDisplay():
             else:
                 self.bottom_row = self.axes[-1, :]
             self.trace_axes = self.trace_axes[:-1, :]
+        else:
+            self.bottom_row = []
         # if using both margins, avoid the corner margin
         if bottom_margin and right_margin:
             self.left[-1, -1] = False
@@ -2776,6 +2822,9 @@ class SummaryDisplay():
         # add the row values to the ylabels of the left column
         left_col = self.trace_axes[:, 0]
         for ax, val in zip(left_col, row_vals):
+            # convert bytes to string 
+            if isinstance(val, bytes):
+                val = val.decode('utf-8')
             lbl = ax.get_ylabel()
             if isinstance(val, (float, int)):
                 ax.set_ylabel(f"{val:.1f}\n\n{lbl}")
@@ -2786,6 +2835,9 @@ class SummaryDisplay():
         if self.right_margin:
             bottom_row = bottom_row[:-1]
         for ax, val in zip(bottom_row, col_vals):
+            # convert bytes to string 
+            if isinstance(val, bytes):
+                val = val.decode('utf-8')
             lbl = ax.get_xlabel()
             if isinstance(val, float):
                 ax.set_xlabel(f"{lbl}\n\n{val:.1f}")
@@ -3006,7 +3058,7 @@ class TrackingTrial():
         # load datasets
         for key, val in self.h5_file.items():
             # store each dataset as an attribute
-            self.__setattr__(key, np.squeeze(val[:]))
+            self.__setattr__(key, np.squeeze(val))
         # load attributes
         for key, val in self.h5_file.attrs.items():
             self.__setattr__(key, val)
@@ -3044,16 +3096,21 @@ class TrackingTrial():
         bouts_fn = self.filename.replace(".h5", "_bouts.pkl")
         if os.path.exists(bouts_fn):
             self.bouts = pickle.load(open(bouts_fn, 'rb'))
+            # add the parent trial to each bout
+            for bout in self.bouts:
+                bout.trial = self
         else:
             self.bouts = None
 
-    def get_saccade_stats(self, key='camera_heading', rerun=False, **saccade_kwargs):
+    def get_saccade_stats(self, key='camera_heading', time_var='time', rerun=False, **saccade_kwargs):
         """List saccades for each trial using peak angular velocities.
         
         Parameters
         ----------
         key : str, default='camera_heading'
             The variable to use for saccade data.
+        time_var : str, default='time'
+            The variable to use for time data.
         rerun : bool, default=False
             Whether to re-analyze the start and stop points of saccades for each bout.
         **saccade_kwargs
@@ -3068,16 +3125,20 @@ class TrackingTrial():
         if rerun or no_bouts:
             # get saccades for each trial
             self.bouts = []
-            times = getattr(self, 'time')
-            output_vals = getattr(self, key)
-            for time, test in zip(times, output_vals):
-                bout = Bout(test, self.holocube_framerate)
+            times = self.query(time_var)
+            output_vals = self.query(key)
+            test_inds = self.query('test_ind')
+            for time, test, test_ind in zip(times, output_vals, test_inds):
+                bout = Bout(test, time, self, test_ind, self.holocube_framerate)
                 bout.process_saccades(**saccade_kwargs)
                 bout.get_stats()
                 self.bouts += [bout]
             self.bouts = np.array(self.bouts)
             # use pickle to save the list of bouts for next time 
             bout_fn = self.filename.replace(".h5", "_bouts.pkl")
+            # we need to ditch the parent trial data before saving the bout
+            for bout in self.bouts: 
+                bout.trial = None
             pickle.dump(self.bouts, open(bout_fn, 'wb'))
         if 'saccade_duration' not in dir(self) or rerun:
             # store relevant saccade parameters:
@@ -3352,7 +3413,10 @@ class TrackingTrial():
             ret = np.repeat(ret, self.num_tests)
         include = np.ones(ret.shape, dtype=bool)
         if len(subset.keys()) > 0:
-            for key, val in subset.items():                
+            for key, val in subset.items():
+                # if key == 'bar_direction':
+                #     # todo: why is 0 being included in 'leftward' queries?
+                #     breakpoint()
                 logic, thresh = np.equal, val
                 if isinstance(val, str):
                     logic, thresh = interprate_inequality(val)
@@ -3363,7 +3427,7 @@ class TrackingTrial():
                 #     breakpoint()
                 if len(var) == len(include):
                     if isinstance(val, (list, tuple, np.ndarray)):
-                        inds = np.array([test in val for test in var])
+                        inds = np.isin(var, val)
                     # elif isinstance(val, (float, int, str, bool, bytes, np.integer, np.floating, np.str_)):
                     else:
                         inds = logic(var, thresh)
@@ -3415,26 +3479,44 @@ class TrackingTrial():
             return ret
         else:
             new_ret = []
-            for inds, arr, order in zip(include, ret, sort_by): 
-                if isinstance(arr, np.ndarray):
-                    new_ret += [arr[inds]]
-                elif inds:
-                    new_ret += [arr]
-            # get inclusion index for the sort_by variable
-            sort_include = np.copy(include)
-            while sort_by.ndim < sort_include.ndim: sort_include = np.any(sort_include, axis=-1).astype(bool)
-            sort_by_inds = np.argsort(sort_by)[sort_include]
-            try:
-                # sort using the sort_by array
-                new_ret_sorted = [new_ret[i] for i in sort_by_inds]
-            except:
-                breakpoint()
-            # if np.array(new_ret).ndim == 1 and output == 'camera_heading_offline_wrapped':
+            for inds, arr, order in zip(include, ret, sort_by):
+                if np.any(inds):
+                    # if order.dtype.type in [np.bytes_, np.string_]:
+                    #     # todo: fix this. it's not working for some reason
+                    #     # if we have a list of strings to sort by, we need to replace the strings
+                    #     # with a number corresponding to it's alphabetical order
+                    #     # then we need to 
+                    #     sub_order = order[inds]
+                    #     new_ret += [arr[inds][np.argsort(sub_order)]]
+                    if isinstance(arr, np.ndarray):
+                        sub_order = order[inds]
+                        sort_by_inds = np.argsort(sub_order)
+                        new_ret += [arr[inds][sort_by_inds]]
+                    elif inds:
+                        new_ret += [arr]
+            ret = np.array(new_ret)
+            # # at exception for string or bytes datasets
+            # if sort_by.dtype.type in [np.bytes_, np.string_]:
+            #     sort_by_vals, sort_by_inds = np.unique(sort_by, return_inverse=True)
+            #     sort_by_inds = sort_by_inds.reshape(ret.shape)
+            #     new_ret_sorted = []
             #     breakpoint()
-            # the array takes on strange shape if the indexing variable is not the same shape as the output
-            ret = np.array(new_ret_sorted)
-            sort_by = sort_by.flatten()
-            ret = ret.flatten()[np.argsort(sort_by)]
+            # else:
+            #     # get inclusion index for the sort_by variable
+            #     sort_include = np.copy(include)
+            #     while sort_by.ndim < sort_include.ndim: sort_include = np.any(sort_include, axis=-1).astype(bool)
+            #     sort_by_inds = np.argsort(sort_by, axis=-1)
+            #     try:
+            #         # sort using the sort_by array
+            #         new_ret_sorted = [new_ret[i] for i in sort_by_inds]
+            #     except:
+            #         breakpoint()
+            #     # if np.array(new_ret).ndim == 1 and output == 'camera_heading_offline_wrapped':
+            #     #     breakpoint()
+            #     # the array takes on strange shape if the indexing variable is not the same shape as the output
+            #     ret = np.array(new_ret_sorted)
+            #     sort_by = sort_by.flatten()
+            #     ret = ret.flatten()[np.argsort(sort_by)]
         return ret
 
     def butterworth_filter(self, key='camera_heading', low=1, high=6,
@@ -3519,26 +3601,29 @@ class KalmanFitter():
         return self.error(self.modelled_vals)
 
 class Bout():
-    def __init__(self, arr, framerate, original_times=None):
+    def __init__(self, arr, time, trial, test_ind, original_times=None):
         """Analyze a flight bout isolating saccades and taking pertinent measurements.
         
         Parameters
         ----------
         arr : np.ndarray, shape=(num_frames)
             The array of heading values.
-        framerate : float,
-            The framerate of the heading time series.
+        time : np.ndarray, shape=(num_frames)
+            The array of time values.
+        trial : TrackingTrial
+            The trial instance that the bout belongs to.
+        test_ind : int
+            The index of the test that the bout belongs to from its parent Trial.
         original_times : np.ndarray
             Optionally, provide the time values from the video to allow 
         """
         # store the parameters
+        self.trial = trial
         self.arr = arr
-        self.framerate = framerate
-        try:
-            self.time = np.arange(len(arr))/framerate
-        except:
-            breakpoint()
-        self.duration = self.time.max()
+        self.time = time
+        self.test_ind = test_ind
+        self.framerate = 1./(self.time[1] - self.time[0])
+        self.duration = self.time.max() - self.time.min()
 
     def get_stats(self, **saccade_kwargs):
         """Calculate a bunch of bout statistics.
@@ -3710,7 +3795,7 @@ class Bout():
             #             starts_pot = starts_pot[1:]
             # store the resulting saccade
             for start, stop in zip(starts, stops):
-                saccade = Saccade(self.arr, self.framerate, start, stop, **saccade_kwargs)
+                saccade = Saccade(self.arr, self, self.framerate, start, stop, **saccade_kwargs)
                 if abs(saccade.peak_velocity) < threshold_speed * np.pi / 180.:
                     saccade.success = False
                 if saccade.success:
@@ -3941,7 +4026,7 @@ class Bout():
                             self.saccades += [Saccade(arr, self.framerate, start=in_point, stop=out_point, **saccade_kwargs)]
 
 
-    def query_saccades(self, output='heading', time_var='time', start=0, stop=np.inf, min_speed=350,
+    def query_saccades(self, output='heading', time_var='time', reference_time='start', start=0, stop=np.inf, min_speed=350,
                        max_speed=np.inf, **query_kwargs):
         """Grab saccade data between the start and stop times.
         
@@ -3951,6 +4036,10 @@ class Bout():
             The variable to output. Can also be velocity.
         time_var : str, default = 'time'
             The saccade time frame to use for selecting 
+        reference_time : str, default='start'
+            The time to use as the reference for subsetting the saccades. 
+            For instance, we could look for all saccades that start (vs stop)
+            when another variable is at a certain value.
         start, stop : float, default=0., -1.
             The start and stop times to include in the saccade.
         sort_by : str, default = 'time'
@@ -3963,18 +4052,40 @@ class Bout():
             include = True
             if 'subset' in query_kwargs:
                 # check if the subset condition is met by this saccade
-                subset = query_kwargs.pop('subset')
+                subset = query_kwargs['subset']
                 # using the subset conditions, check if this saccade meets the criteria
                 for key, val in subset.items():
-                    key_vals = saccade.__getattribute__(key)
-                    # interpret val for inequalities
-                    if isinstance(val, str):
-                        logic, thresh = interprate_inequality(val)
-                        include *= logic(key_vals, thresh)
-                    else:
-                        include *= key_vals == val
-
-            if include:                    
+                    # we need to process saccade parameters differently from bout and trial data
+                    key_val = None
+                    for obj in [self.trial, self, saccade]:
+                        if key in dir(obj):
+                            key_vals = obj.__getattribute__(key)
+                            key_val = key_vals
+                    if key_val is not None:
+                        # if key_vals is an array, we need to use the reference time to subset
+                        if isinstance(key_vals, np.ndarray):
+                            # if obj is a trial, we need to find the data specific to that bout
+                            if len(key_vals) == len(self.trial.test_ind):
+                                key_vals = key_vals[self.test_ind]
+                                key_val = key_vals
+                            if isinstance(key_val, np.ndarray):
+                                if len(key_vals) == len(saccade.time):
+                                    if reference_time == 'start':
+                                        key_val = key_vals[saccade.start]
+                                    elif reference_time == 'stop':
+                                        key_val = key_vals[saccade.stop]
+                                    else:
+                                        raise ValueError(f'`reference_time` must be either "start" or "stop".')
+                        # interpret val for inequalities
+                        if isinstance(val, (str, bytes)):
+                            starts = [saccade.start for saccade in self.saccades]
+                            logic, thresh = interprate_inequality(val)
+                            if isinstance(key_val, bytes):
+                                key_val = key_val.decode('utf-8')
+                            include *= logic(key_val, thresh)
+                        else:
+                            include *= key_val == val
+            if include:
                 peak_speed = abs(saccade.peak_velocity) * 180. / np.pi
                 if (peak_speed > min_speed) and (peak_speed < max_speed):
                     time, saccade = saccade.query(output=output, time_var=time_var, start=start, stop=stop)
@@ -3983,13 +4094,15 @@ class Bout():
         return times, saccades
 
 class Saccade():
-    def __init__(self, arr, framerate=1, start=0, stop=-1, interpolate_velocity=True, baseline_comparison=False, display=False):
+    def __init__(self, arr, bout, framerate=1, start=0, stop=-1, interpolate_velocity=True, baseline_comparison=False, display=False):
         """Wrapper for saccade time series and measurements.
 
         Parameters
         ----------
         arr : np.ndarray
             The heading time series from the whole trial.
+        bout : Bout
+            The parent bout containing this saccade.
         framerate : float, default=1
             The framerate of the time series.
         start, stop : int, default=0, -1
@@ -4022,6 +4135,7 @@ class Saccade():
             velocity.
         """
         # store the original time series and time
+        self.bout = bout
         arr = np.unwrap(arr)
         self.original_arr = arr
         self.start, self.stop = int(round(start)), int(round(stop))
@@ -4174,9 +4288,12 @@ class Saccade():
         include = (time >= start) * (time < stop)
         if output == 'heading':
             ret = self.original_arr - self.start_angle
+            return time[include], ret[include]
         elif output == 'velocity':
             ret = self.velocity
-        return time[include], ret[include]
+            return time[include], ret[include]
+        elif output == 'saccade':
+            return time[include], self            
 
 def angle_rgb(angles, sat=.5, val=.7, period=2*np.pi):
     """Return a color for the given angle for a circular cmap."""
@@ -4306,23 +4423,25 @@ def interprate_inequality(string):
     For example, "x < 5" returns partial(np.less, 5), which will only return
     True if x is less than 5. Note that spaces are ignored.
     """
+    if isinstance(string, bytes):
+        string = string.decode('utf-8')
     # string = string.replace(' ', '')
     # default to equality logic
     logic = np.equal
     logic_char = '=='
     # first, identify the specific logic
     logic_conv = {'<':np.less, '<=':np.less_equal, '==':np.equal,'>':np.greater,'>=':np.greater_equal}
+    logic_included = False
     for key in logic_conv:
         if key in string:
             logic = logic_conv[key]
             logic_char = key
+            logic_included = True
     # then, extract the variable and value
     val = string.split(logic_char)[-1]
     # convert to float if possible
-    try:
+    if logic_included:
         val = float(val)
-    except:
-        pass
     # return the partial function
     return logic, val
 
