@@ -1223,7 +1223,7 @@ class TrackingExperiment():
                 new_trials += [trial]
         self.trials = new_trials
 
-    def remove_too_fast(self, variable='camera_heading', speed_limit=np.pi/4, tolerance=.01):
+    def remove_too_fast(self, variable='camera_heading', speed_limit=np.pi/4, tolerance=.01, replace=True):
         """Use only trials with speeds less than the limit.
         
         This is good for getting rid of trials with errors resulting in head-tail inversions.
@@ -1236,12 +1236,35 @@ class TrackingExperiment():
             The maximum allowable speed.
         tolerance : float in [0, 1], default=.01
             Keep trials with this proportion of frames that are too fast.
+        replace : bool, default=True
+            Whether to replace the original trials with the interpolated values.
         """
         new_trials = []
         for trial in self.trials:
             vals = trial.query(variable, sort_by='test_ind')
             speeds = np.diff(vals, axis=-1)
             too_fast = abs(speeds) > speed_limit
+            if replace:
+                # re-wrap the heading data
+                vals_wrapped = np.copy(vals)
+                vals_wrapped += np.pi
+                vals_wrapped %= 2*np.pi
+                vals_wrapped -= np.pi
+                # get heading derivative
+                vals_wrapped_diffs = np.diff(vals_wrapped, axis=-1)
+                vals_wrapped_diffs[np.abs(vals_wrapped_diffs) > np.pi] = 0
+                # get cumulative sum of the derivative
+                new_vals = np.cumsum(vals_wrapped_diffs, axis=-1)
+                # replace the dataset
+                trial.add_dataset(variable, new_vals)
+                # breakpoint()
+                # arr = vals_wrapped[3]
+                # # arr[1:][too_fast[3]] = np.nan
+                # arr_diffs = np.diff(arr)
+                # arr_diffs[arr_diffs > np.pi] = 0
+                # new_arr = np.cumsum(arr_diffs, axis=0)
+                speeds = np.diff(new_vals, axis=-1)
+                too_fast = abs(speeds) > speed_limit
             if not np.any(too_fast.mean(-1) > tolerance):
                 new_trials += [trial]
         self.trials = new_trials
