@@ -921,7 +921,6 @@ class OfflineTracker():
                     frame_padding = int(round(extra_frames / num_tests-1))
                     start, stop = data.start_exp, data.stop_exp
                     stops = data.stop_test
-                    breakpoint()
                     times_offline = np.linspace(start, stop, len(heading_offline) + 1)[:-1]
                     for num, (storage, stop) in enumerate(
                             zip(heading_offline_arr, stops)):
