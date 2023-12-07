@@ -406,6 +406,8 @@ class TrackingVideo():
         self.outer_ring_angles = angles[include_outer]
         # wing ring and angles:
         wing_radius = 2 * outer_radius
+        # cap the wing radius at the diagonal of the video
+        wing_radius = min(wing_radius, min(self.height, self.width)/2)
         include_wing = (dists >= wing_radius - thickness/2) * (dists <= wing_radius + thickness/2)
         self.wing_inds = include_wing
         ys_outer, xs_outer = np.where(include_wing)
@@ -432,6 +434,7 @@ class TrackingVideo():
             Whether to also calculate the left and right wingbeat amplitudes.
         """
         self.heading = []
+        self.thrust = []
         self.wing_vals = []
         if 'headings' not in dir(self):
             self.headings = {}
@@ -506,6 +509,11 @@ class TrackingVideo():
                 # calculate direction vector between the center of the fly and the head
                 direction = heading_pos - diff
                 heading = np.arctan2(direction[0], direction[1])
+                # todo: rotate the direction vector by the heading angle
+                rot_matrix = np.array([[np.cos(heading), -np.sin(heading)], [np.sin(heading), np.cos(heading)]])
+                direction_subj = rot_matrix @ direction
+                thrust_approx = direction_subj[1]
+                self.thrust += [thrust_approx]
                 # store the shift in the center of mass for plotting
                 self.com_shift = np.round(-diff).astype(int)
                 # center and wrap the heading
@@ -556,17 +564,6 @@ class TrackingVideo():
                 # 5. grab the head angs within those bounds
                 head_ang = scipy.stats.circmean(head_angs, low=-np.pi, high=np.pi)
                 self.heading += [head_ang]
-                # extra: measure the wing 
-                if wings:
-                    # get the wing ring values
-                    wing_vals = frame[self.wing_ring_coords[:, 1], self.wing_ring_coords[:, 0]]
-                    self.wing_vals += [wing_vals]
-                    # test: use the heading angle to reduce the search for the wings
-                    # plt.imshow(frame)
-                    # plt.scatter(self.wing_ring_coords[:, 0], self.wing_ring_coords[:, 1], c=wing_vals)
-                    # plt.show()
-                    # plot a vector using the heading angle
-                    # plt.figure()
             elif method == 'svd':
                 # 1. threshold the video
                 body = (frame > floor) * (frame <= ceiling)
@@ -574,6 +571,37 @@ class TrackingVideo():
                 # 2. get 2D coordinates representing the fly
                 # ys, xs =
                 # 3. get the orientation of the principle component
+            # extra: measure the wing 
+            if wings:
+                breakpoint()
+                # get the wing ring values
+                wing_vals = frame[self.wing_ring_coords[:, 1], self.wing_ring_coords[:, 0]]
+                self.wing_vals += [wing_vals]
+                breakpoint()
+                # test: plot the outer ring colored by the values and the predicted head position
+                outer_vals = frame[self.outer_ring_coords[:, 1], self.outer_ring_coords[:, 0]]
+                plt.imshow(frame, cmap='gray')
+                plt.scatter(self.inner_ring_coords[:, 0], self.inner_ring_coords[:, 1], c=self.inner_ring_angles, alpha=.25)
+                plt.colorbar()
+                plt.show()
+                # test: use the heading angle to reduce the search for the wings
+                plt.imshow(frame, cmap='gray')  
+                plt.scatter(self.wing_ring_coords[:, 0], self.wing_ring_coords[:, 1], c=wing_vals)
+                plt.show()
+                # rotate the wing angles based on the heading angle
+                new_angs = self.wing_ring_angles - self.heading[-1]
+                new_angs %= 2 * np.pi
+                # negative angles are the 
+                # plot the wing coords, colored by their wing angle
+                plt.imshow(frame)
+                plt.scatter(self.wing_ring_coords[:, 0], self.wing_ring_coords[:, 1], c=self.wing_ring_angles)
+                # plot the heading position
+                xc, yc = self.center
+                plt.scatter(heading_pos[0] + yc, heading_pos[1] + xc, c='r', s=100)
+                plt.gca().set_aspect('equal')
+                plt.show()
+                # plot a vector using the heading angle
+                # plt.figure()
             print_progress(num, self.num_frames)
         if isinstance(self.video, io.ffmpeg.FFmpegReader):
             self.video = io.FFmpegReader(self.filename)
@@ -921,7 +949,6 @@ class OfflineTracker():
                     frame_padding = int(round(extra_frames / num_tests-1))
                     start, stop = data.start_exp, data.stop_exp
                     stops = data.stop_test
-                    breakpoint()
                     times_offline = np.linspace(start, stop, len(heading_offline) + 1)[:-1]
                     for num, (storage, stop) in enumerate(
                             zip(heading_offline_arr, stops)):
@@ -938,6 +965,9 @@ class OfflineTracker():
                     # get the principle component of the above-threshold pixel coordinates
                     breakpoint()
                 data.add_dataset('camera_heading_offline', heading_offline_arr)
+                data.add_dataset('com_thrust', self.thrust)
+                if wings:
+                    data.add_dataset('wing_vals', self.wing_vals)
                 # add a time
                 time_online = data.query('time', sort_by='test_ind')
                 time_offline = np.linspace(
@@ -1121,9 +1151,12 @@ class TrackingExperiment():
         
         self.trials = []
         for fn in self.h5_files:
-            trial = TrackingTrial(fn, **trial_kwargs)
-            if trial.load_success:
-                self.trials += [trial]
+            try:
+                trial = TrackingTrial(fn, **trial_kwargs)
+                if trial.load_success:
+                    self.trials += [trial]
+            except:
+                pass
         if remove_incompletes:
             self.remove_incompletes()
 
@@ -3089,13 +3122,17 @@ class TrackingTrial():
         min_frames = np.inf
         for attr in ['orientation', 'camera_heading', 'virtual_heading']:
             if attr in dir(self):
-                min_frames = min(self.__getattribute__(attr).shape[1], min_frames)
+                min_frames = min(self.__getattribute__(attr).shape[-1], min_frames)
         for attr in ['orientation', 'camera_heading', 'virtual_heading']:
             if attr in dir(self):
-                self.__setattr__(attr, self.__getattribute__(attr)[:, :min_frames])
+                self.__setattr__(attr, self.__getattribute__(attr)[..., :min_frames])
                 if attr in ['orientation', 'camera_heading']:
-                    # make an attribute indexing the time point of each frame
-                    self.num_tests, self.num_frames = self.__getattribute__(attr).shape
+                    arr = self.__getattribute__(attr)
+                    if arr.ndim == 1:
+                        self.num_tests, self.num_frames = 1, len(arr)
+                    elif arr.ndim == 2:
+                        # make an attribute indexing the time point of each frame
+                        self.num_tests, self.num_frames = arr.shape
         attr = 'camera_heading_offline'
         if attr in dir(self):
             self.num_tests, self.num_frames_offline = self.__getattribute__(attr).shape
@@ -3216,6 +3253,7 @@ class TrackingTrial():
                     index += [np.newaxis for p in range(pad)]
                     include = include * inds[tuple(index)]
                 else:
+                    breakpoint()
                     print(f"A subset variable, {key}, has length {len(var)} but should be {len(include)}.")
         # grab the indexing variable
         sort_by = self.__getattribute__(sort_by)
@@ -3444,10 +3482,15 @@ class TrackingTrial():
                 if isinstance(val, str):
                     logic, thresh = interprate_inequality(val)
                 var = self.__getattribute__(key)
-                if isinstance(var, (str, bytes)):
+                if isinstance(var, (str, bytes, bool, float, int)):
+                    var = np.repeat(var, self.num_tests)
+                if var.ndim == 0:
                     var = np.repeat(var, self.num_tests)
                 # if np.any(np.isnan(val)):
                 #     breakpoint()
+                # repeat attribute values to be the same length
+                if len(var) == 1:
+                    var = np.repeat(var, self.num_frames)
                 if len(var) == len(include):
                     if isinstance(val, (list, tuple, np.ndarray)):
                         inds = np.isin(var, val)
@@ -3464,6 +3507,7 @@ class TrackingTrial():
                     index += [np.newaxis for p in range(pad)]
                     include = include * inds[tuple(index)]
                 else:
+                    breakpoint()
                     print(f"A subset variable, {key}, has length {len(var)} but should be {len(include)}.")
         # if self.dirname == 'Empty Sp Gal4' and 'img_id' in subset.keys():
         #     breakpoint()
