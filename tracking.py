@@ -4643,7 +4643,13 @@ def interprate_inequality(string):
     val = string.split(logic_char)[-1]
     # convert to float if possible
     if logic_included:
-        val = float(val)
+        try:
+            val = float(val)
+        except:
+            # this sometimes happens when an inequality happens to be in the variable name
+            # if converting to float fails, revert to the original parameter values
+            logic = np.equal
+            val = string
     # return the partial function
     return logic, val
 
