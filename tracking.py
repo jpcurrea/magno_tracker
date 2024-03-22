@@ -1137,17 +1137,20 @@ class TrackingExperiment():
 
         Parameters
         ----------
-        dirname : path
-            The directory to load.
+        dirname : path, or list
+            The directory to load or a list of h5 directories to load.
         remove_incompletes : bool, default=True
             Whether to keep trials with missing tests.
         """
         self.dirname = dirname
-        self.files = os.listdir(dirname)
-        # get the path of the h5 files
-        self.h5_files = [os.path.join(dirname, fn) for fn in self.files if fn.endswith(".h5")]
-        # load a TrackingTrial for each file
-        
+        if isinstance(dirname, str):
+            self.dirname = [dirname]
+        self.files = []
+        for dirname in self.dirname:
+            fns = os.listdir(dirname)
+            self.files += [os.path.join(dirname, fn) for fn in fns]
+        self.h5_files = [file for file in self.files if file.endswith(".h5")]
+        # load a TrackingTrial for each h5 file
         self.trials = []
         for fn in self.h5_files:
             try:
