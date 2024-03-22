@@ -1293,7 +1293,7 @@ class TrackingExperiment():
                 new_trials += [trial]
         self.trials = new_trials
 
-    def remove_too_fast(self, variable='camera_heading', speed_limit=np.pi/4, tolerance=.01, replace=True):
+    def remove_too_fast(self, variable='camera_heading', speed_limit=np.pi/2, tolerance=.01, replace=True):
         """Use only trials with speeds less than the limit.
         
         This is good for getting rid of trials with errors resulting in head-tail inversions.
@@ -1312,32 +1312,21 @@ class TrackingExperiment():
         new_trials = []
         for trial in self.trials:
             vals = trial.query(variable, sort_by='test_ind')
-            speeds = np.diff(vals, axis=-1)
             # pad with zeros for the first frame
-            num_trials = speeds.shape[0]
-            if replace:
-                # re-wrap the heading data
-                vals_wrapped = np.copy(vals)
-                # vals_wrapped += np.pi
-                vals_wrapped %= 2*np.pi
-                # vals_wrapped -= np.pi
-                # get heading derivative
-                vals_wrapped_diffs = np.diff(vals_wrapped, axis=-1)
-                vals_wrapped_diffs = np.concatenate([np.zeros((num_trials, 1)), vals_wrapped_diffs], axis=-1)
-                speed = np.abs(vals_wrapped_diffs)
-                vals_wrapped[speed > speed_limit] = np.nan
-                # get cumulative sum of the derivative
-                # new_vals = np.cumsum(vals_wrapped_diffs, axis=-1)
+            num_trials = vals.shape[0]
+            vals_diffs = np.diff(vals, axis=-1)
+            vals_diffs = np.concatenate([np.zeros((num_trials, 1)), vals_diffs], axis=-1)
+            speed = np.abs(vals_diffs)
+            too_fast = speed > speed_limit
+            if replace and np.any(too_fast):
+                offset = np.round(vals_diffs[too_fast]/np.pi) * np.pi 
+                vals_diffs[too_fast] -= offset
+                vals_new = np.cumsum(vals_diffs, axis=-1)
                 # replace the dataset
-                trial.add_dataset(variable, vals_wrapped)
-                # breakpoint()
-                # arr = vals_wrapped[3]
-                # # arr[1:][too_fast[3]] = np.nan
-                # arr_diffs = np.diff(arr)
-                # arr_diffs[arr_diffs > np.pi] = 0
-                # new_arr = np.cumsum(arr_diffs, axis=0)
-                speeds = np.diff(vals_wrapped, axis=-1)
-                too_fast = abs(speeds) > speed_limit
+                trial.add_dataset(variable, vals_wrapped_new)
+                # recalculate the too_fast variable
+                speed = np.abs(np.diff(vals_new, axis=-1))
+                too_fast = speed > speed_limit
             if not np.any(too_fast.mean(-1) > tolerance):
                 new_trials += [trial]
         self.trials = new_trials
@@ -3451,6 +3440,8 @@ class TrackingTrial():
             interp = scipy.interpolate.interp1d(np.arange(val.size)[no_nans], val[no_nans], kind='nearest', fill_value='extrapolate')
             new_vals = np.copy(val)
             new_vals[nan] = interp(np.arange(val.size)[nan])
+            if nan.sum() > 0:
+                breakpoint()
             interpolated_vals += [new_vals]
         interpolated_vals = np.array(interpolated_vals)
         # shift up by pi so that the 2pi unwrapping is centered around 0
