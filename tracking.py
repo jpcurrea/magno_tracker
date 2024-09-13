@@ -1158,7 +1158,7 @@ class TrackingExperiment():
                 if trial.load_success:
                     self.trials += [trial]
             except:
-                pass
+                breakpoint()
         if remove_incompletes:
             self.remove_incompletes()
 
