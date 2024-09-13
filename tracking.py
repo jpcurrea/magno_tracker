@@ -1325,8 +1325,9 @@ class TrackingExperiment():
                 offset = np.round(vals_diffs[too_fast]/np.pi) * np.pi 
                 vals_diffs[too_fast] -= offset
                 vals_new = np.cumsum(vals_diffs, axis=-1)
+                vals_new[0] += vals[..., 0]
                 # replace the dataset
-                trial.add_dataset(variable, vals_wrapped_new)
+                trial.add_dataset(variable, vals_new)
                 # recalculate the too_fast variable
                 speed = np.abs(np.diff(vals_new, axis=-1))
                 too_fast = speed > speed_limit
@@ -1480,11 +1481,11 @@ class TrackingExperiment():
         subset = copy.copy(query_kwargs['subset'])
         # get the values used for coloring each subplot
         if row_var is not None:
-            row_vals = self.query(output=row_var, sort_by=row_var, subset=subset, same_size=True, skip_empty=True)
+            row_vals = self.query(output=row_var, sort_by=row_var)
         else:
             row_vals = [None]
         if col_var is not None:
-            col_vals = self.query(output=col_var, sort_by=col_var, subset=subset, same_size=True, skip_empty=True)
+            col_vals = self.query(output=col_var, sort_by=col_var)
         else:
             col_vals = [None]
         assert len(col_vals) > 0 or len(row_vals) > 0, "The subset is empty!"
@@ -1613,7 +1614,7 @@ class TrackingExperiment():
                 stop_amps, stop_times = [], []
                 for trial in self.trials:
                     lines_plotted = 0
-                    # todo: make sure the output and subset variables have the same shape
+                    # todo: fix the subsetting for bouts and saccades
                     bouts = trial.query_bouts(sort_by=query_kwargs['sort_by'], subset=subset)
                     resps = trial.query(output=output_var, sort_by=query_kwargs['sort_by'], subset=subset)
                     for bout in bouts:
@@ -1690,12 +1691,18 @@ class TrackingExperiment():
                 sample_sizes += [sample_size]
                 # make a scatterplot of the start and stop times
                 if bottom_margin:
+                    # choose a different linestyle for each row
+                    linestyle = ['-', '--', ':', '-.'][row_num // 4]
+                    # and a different line color for each set of rows
+                    linecolor = ['k', 'gray', blue, green, yellow, orange, red, purple][row_num % 8]
                     xvals = np.array(stop_amps)
-                    vals, _, _ = col_summ_ax.hist(xvals, bins=np.linspace(xlim[0], xlim[1], bins), color=color, histtype='stepfilled', alpha=.5, density=False)
+                    vals, _, _ = col_summ_ax.hist(xvals, bins=np.linspace(xlim[0], xlim[1], bins), 
+                        color=linecolor, histtype='step', alpha=.5, density=False, linestyle=linestyle,
+                        label=f"{row_val}")
                     max_count = max(max_count, max(vals))
                     if time_var == 'relative_time':
                         xvals = np.array(start_amps)
-                        vals, _, _ = col_summ_ax.hist(xvals, bins=np.linspace(xlim[0], xlim[1], bins), histtype='stepfilled', color=color, alpha=.5)
+                        vals, _, _ = col_summ_ax.hist(xvals, bins=np.linspace(xlim[0], xlim[1], bins), histtype='step', color=color, alpha=.5)
                         max_count = max(max_count, max(vals))
                 # todo: plot different rows if reversal_split is specified
                 # try:
@@ -1806,6 +1813,7 @@ class TrackingExperiment():
                     ax = ax[0]
                 ax.set_ylim(0, max_count)
                 if num == 0:
+                    ax.legend(fontsize=6)
                     ax.set_yticks([0, max_count])
                     ax.set_ylabel("count")
                 else:
@@ -2277,7 +2285,7 @@ class TrackingExperiment():
                      summary_func=np.nanmean, xlabel=None, ylabel=None,
                      plot_type='line', bins=100, use_density=False,
                      confidence_interval=False, confidence=.84,
-                     scale=1.5, **query_kwargs):
+                     scale=1.5, plot_kwargs={}, **query_kwargs):
         """Plot experimental data in one big grid.
         
         The color for each subplot is determined by the average of the column and 
@@ -2328,6 +2336,8 @@ class TrackingExperiment():
             Whether to plot the density instead of the count in the 2d histogram.
         scale : float, default=1.5
             Scale parameter for setting the figsize.
+        plot_kwargs : dict, default={}
+            Additional keyword arguments to pass to the plotting function.
         **query_kwargs
             These get passed to the query 
         """
@@ -2337,25 +2347,24 @@ class TrackingExperiment():
             query_kwargs['sort_by'] = 'test_ind'
         subset = copy.copy(query_kwargs['subset'])
         # get the values used for coloring each subplot
-        row_vals = self.query(output=row_var, sort_by=row_var, subset=subset)
-        col_vals = self.query(output=col_var, sort_by=col_var, subset=subset)
+        row_vals = self.query(output=row_var, sort_by=row_var)
+        col_vals = self.query(output=col_var, sort_by=col_var)
         assert len(col_vals) > 0 or len(row_vals) > 0, "The subset is empty!"
-        # todo: what's up with the number of axes?
         row_vals = np.unique(row_vals)
         col_vals = np.unique(col_vals)
-        new_row_vals, new_col_vals = [], []
-        for num, (vals, storage) in enumerate(zip([row_vals, col_vals], [new_row_vals, new_col_vals])):
-            if vals.dtype.type == np.bytes_:
-                non_nans = vals != b'nan'
-            elif vals.dtype.type in [np.string_, np.str_]:
-                non_nans = vals != 'nan'
-            else:
-                try:
-                    non_nans = np.isnan(vals) == False
-                except:
-                    breakpoint()
-            storage += [arr for arr in vals[non_nans]]
-        row_vals, col_vals = np.array(new_row_vals), np.array(new_col_vals)
+        # new_row_vals, new_col_vals = [], []
+        # for num, (vals, storage) in enumerate(zip([row_vals, col_vals], [new_row_vals, new_col_vals])):
+        #     if vals.dtype.type == np.bytes_:
+        #         non_nans = vals != b'nan'
+        #     elif vals.dtype.type in [np.string_, np.str_]:
+        #         non_nans = vals != 'nan'
+        #     else:
+        #         try:
+        #             non_nans = np.isnan(vals) == False
+        #         except:
+        #             breakpoint()
+        #     storage += [arr for arr in vals[non_nans]]
+        # row_vals, col_vals = np.array(new_row_vals), np.array(new_col_vals)
         num_rows, num_cols = len(row_vals), len(col_vals)
         # get the colors from the specified colormaps
         colors = {}
@@ -2419,6 +2428,7 @@ class TrackingExperiment():
         num_frames = self.trials[0].num_frames
         repetitions = []
         max_radius = 0
+        hists, hist_bins, hist_colors = [], [], []
         for row_num, (row, row_val, row_colors) in enumerate(zip(
             trace_axes, row_vals, color_arr)):
             if right_margin:
@@ -2442,6 +2452,7 @@ class TrackingExperiment():
                                 sort_by=query_kwargs['sort_by'], skip_empty=True)
                 ys = self.query(same_size=True, output=yvar, subset=subset, 
                                 sort_by=query_kwargs['sort_by'], skip_empty=True)
+                # todo: for some reason the subsetting doesn't seem to be working properly
                 # todo: pad arrays in included_xs to match the longest one and convert to an array
                 # get sample size
                 # sample_size = xs[0].shape[0]
@@ -2481,8 +2492,22 @@ class TrackingExperiment():
                             # cmap = matplotlib.colors.LinearSegmentedColormap.from_list("", [(1,1,1), color])
                             cmap = matplotlib.colors.LinearSegmentedColormap.from_list("", [(1,1,1), (0, 0, 0)])
                             max_val = hist.max()
-                            mesh = ax.pcolormesh(xedges, yedges, hist.T, cmap=cmap, vmin=0, vmax=hist.max())
-                            # plt.colorbar(mesh, ax=ax)
+                            if 'vmax' in plot_kwargs:
+                                max_val = plot_kwargs['vmax']
+                                mesh = ax.pcolormesh(xedges, yedges, hist.T, cmap=cmap, vmin=0, vmax=max_val)
+                            else:
+                                mesh = ax.pcolormesh(xedges, yedges, hist.T, cmap=cmap, vmin=0, vmax=hist.max())
+                            cbar = True
+                            if 'cbar' in plot_kwargs:
+                                cbar = plot_kwargs['cbar']
+                            if cbar:
+                                if 'vmax' in plot_kwargs:
+                                    if row_num == 0 and col_num == 0:
+                                        # make a colorbar axis outside of the subplots
+                                        cbax = self.display.fig.add_axes([.92, .1, .02, .8])
+                                        plt.colorbar(mesh, cax=cbax)
+                                else:
+                                    plt.colorbar(mesh, ax=ax)
                         elif plot_type == 'trajectory2d':
                             # todo: plot the 2d trajectory for each fly 
                             d_vectors = np.array([np.cos(new_xs), np.sin(new_xs)]).transpose(1, 0, 2)
@@ -2495,15 +2520,62 @@ class TrackingExperiment():
                             radii = np.linalg.norm(last_pos, axis=1)
                             # normalize the trajectory to the maximum radius
                             # trajectory /= radii[:, np.newaxis, np.newaxis]
-                            ax.plot(trajectory[:, 0].T, trajectory[:, 1].T, lw=.5, color='k', alpha=.25)
+                            ax.plot(trajectory[:, 0].T, trajectory[:, 1].T, lw=.5, color='k', alpha=.25, zorder=2)
                             # todo: plot the radius and corresponding circle for each fly
                             max_radius = max(np.nanmax(radii), max_radius)
                             # scatterplot of the last position
-                            ax.scatter(last_pos[..., 0], last_pos[..., 1], color='k', marker='.', s=.5)
-                            for radius, pos in zip(radii, last_pos):
-                                circle = plt.Circle((0, 0), radius=radius, color=color, alpha=.25, fill=False, lw=.5)
-                                ax.add_artist(circle)
+                            ax.scatter(last_pos[..., 0], last_pos[..., 1], color='k', marker='.', s=.5, zorder=2)
+                            if 'circle' in plot_kwargs:
+                                if plot_kwargs['circle']:
+                                    for radius, pos in zip(radii, last_pos):
+                                        circle = plt.Circle((0, 0), radius=radius, color=color, alpha=.25, fill=False, lw=.5)
+                                        ax.add_artist(circle)
+                            if 'contour' in plot_kwargs:
+                                if plot_kwargs['contour']:
+                                    # make a linear colormap from white to color
+                                    cmap = matplotlib.colors.LinearSegmentedColormap.from_list("", [(1,1,1), color])
+                                    # plot the contour plot of the last positions
+                                    sbn.kdeplot(x=last_pos[:, 0], y=last_pos[:, 1], ax=ax, levels=3, fill=True, 
+                                                cmap=cmap, alpha=.3, zorder=1, linewidth=0)
+                            if 'circ_hist' in plot_kwargs:
+                                from matplotlib.patches import Wedge
+                                if plot_kwargs['circ_hist']:
+                                    # get the histogram of the last heading angles, new_xsx
+                                    angles = np.arctan2(last_pos[..., 1], last_pos[..., 0])
+                                    # angles = new_xs
+                                    bins = 100
+                                    if 'bins' in plot_kwargs:
+                                        bins = plot_kwargs['bins']
+                                    if isinstance(bins, int):
+                                        bins = np.linspace(-np.pi, np.pi, bins+1)
+                                    hist, bins = np.histogram(angles, bins=bins, density=False)
+                                    hists += [hist]
+                                    hist_bins += [bins]
+                                    hist_colors += [color]
+                            if 'mean_line' in plot_kwargs:
+                                if plot_kwargs['mean_line']:
+                                    # get the mean 2D trajectory
+                                    mean_trajectory = np.nanmean(trajectory, axis=0)
+                                    ax.plot(mean_trajectory[0], mean_trajectory[1], color='w', lw=4, zorder=4)
+                                    ax.plot(mean_trajectory[0], mean_trajectory[1], color=color, lw=1, zorder=5)
+                                    # add a spot at the last position
+                                    ax.scatter(mean_trajectory[0, -1], mean_trajectory[1, -1], color='w', marker='o', s=10, zorder=4)
+                                    ax.scatter(mean_trajectory[0, -1], mean_trajectory[1, -1], color=color, marker='o', s=5, zorder=5)
                         else:
+                            # remove regions that wrap around the circle
+                            # diffs = np.diff(new_xs, axis=-1)
+                            # too_fast = abs(diffs) > np.pi/2
+                            # starts = too_fast[1:] * np.logical_not(too_fast[:-1])
+                            # stops = np.logical_not(too_fast[1:]) * too_fast[:-1]
+                            # starts, stops = np.array(np.where(starts)), np.array(np.where(stops))
+                            # todo: instead of working on the array as a whole, do this for each trial
+                            for xvals in new_xs:
+                                diffs = np.append([0], np.diff(xvals))
+                                too_fast = abs(diffs) > np.pi/2
+                                starts = too_fast[1:] * np.logical_not(too_fast[:-1])
+                                stops = np.logical_not(too_fast[1:]) * too_fast[:-1]
+                                for start, stop in zip(np.where(starts)[0], np.where(stops)[0]): 
+                                    xvals[start:stop] = np.nan
                             ax.plot(new_xs.T, new_ys.T, color='gray', lw=.5, alpha=.5)
                             # if np.squeeze(xs).ndim > 1:
                             #     # ax.plot(xs.T, ys.T, color='gray', lw=.5, alpha=.5)
@@ -2535,7 +2607,7 @@ class TrackingExperiment():
                                 stops = np.logical_not(too_fast[1:]) * too_fast[:-1]
                                 for start, stop in zip(np.where(starts)[0], np.where(stops)[0]): 
                                     ax_mean[start:stop] = np.nan
-                                # breakpoint()
+                                breakpoint()
                                 try:
                                     ax.plot(ax_mean, y, color='w', zorder=4, lw=1)
                                 except:
@@ -2611,7 +2683,13 @@ class TrackingExperiment():
                     xvals = []
                     for x, y in zip(xs, ys):
                         if x.size > 0 and y.size > 0:
-                            ax.plot(x, y, color='gray', lw=.5, alpha=.5)
+                            alpha = .5
+                            lw = .5
+                            if 'alpha' in plot_kwargs:
+                                alpha = plot_kwargs['alpha']
+                            if 'lw' in plot_kwargs:
+                                lw = plot_kwargs['lw']
+                            ax.plot(x, y, color='gray', lw=lw, alpha=alpha)
                             reps += 1
                             xvals += [x]
                             good_y = y
@@ -2633,13 +2711,29 @@ class TrackingExperiment():
                             summary = summary_func(xvals, axis=0)
                             col_summ_ax.plot(summary, y, color=color)
                 # add the xticks, yticks, and axis labels
+        if plot_type == 'trajectory2d':
+            # normalize the counts by the total count to make the colormap unbiased to sample size
+            hists = np.array(hists)
+            hists = hists / hists.sum(1)[:, None]
+            max_val = hists.max()
+            for ax, hist, hist_bin, col in zip(trace_axes.flatten(), hists, hist_bins, hist_colors):
+                # make a polar histogram using wedges of equal area for each bin, wach with an inner radius of 1.01 and outer radius of 1.25
+                # and colorize them according to the histogram counts
+                cmap = matplotlib.colors.LinearSegmentedColormap.from_list("", [(1,1,1), col])
+                cvals = cmap(hist/max_val)
+                for start, stop, cval in zip(hist_bin[:-1], hist_bin[1:], cvals):
+                    ax.add_artist(Wedge((0, 0), 1.01, start*180/np.pi, stop*180/np.pi, color=cval, alpha=1, lw=.25, width=-.25, edgecolor=cval))
         if format_axes:
             # if plotting trajectories, let's keep the an equal aspect ratio
             if plot_type == 'trajectory2d':
                 for ax in trace_axes.flatten():
                     ax.set_aspect('equal')
-                    ax.set_xlim(-max_radius, max_radius)
-                    ax.set_ylim(-max_radius, max_radius)
+                    radius = max_radius
+                    if 'circ_hist' in plot_kwargs:
+                        if plot_kwargs['circ_hist']:
+                            radius = 1.27
+                    ax.set_xlim(-radius, radius)
+                    ax.set_ylim(-radius, radius)
             if xlabel is None:
                 xlabel = xvar
             if ylabel is None:
@@ -2647,23 +2741,29 @@ class TrackingExperiment():
             # the trajectory plots plot different variables along the margins
             despine_right = True
             if plot_type == 'trajectory2d':
-                despine_right = False
-                ylabel = None
+                ylabel = 'y'
+                xlabel = 'x'
+                # ylabel = '\n'
+                # xlabel = '\n'
             self.display.format(xlim=xlim, ylim=ylim, xlabel=xlabel, ylabel=ylabel,
                                 xticks=xticks, yticks=yticks, logx=logx, logy=logy,
                                 despine_right=despine_right)
             if plot_type == 'trajectory2d':
-                for num, ax in enumerate(self.display.right_col):
-                    # if last bottom row, add the x-axis label
-                    if num == len(self.display.right_col) - 1:
-                        ax.set_xlabel("radial distance (au)")
-                    ax.set_ylabel("time")
-                    ax.invert_yaxis()
-                for num, ax in enumerate(self.display.bottom_row):
-                    ax.set_xlabel("radial distance (au)")
-                    if num == 0:
-                        ax.set_ylabel("time")
-                    ax.invert_yaxis()
+                if 'circle' in plot_kwargs:
+                    if plot_kwargs['circle']:
+                        if right_margin:
+                            for num, ax in enumerate(self.display.right_col):
+                                # if last bottom row, add the x-axis label
+                                if num == len(self.display.right_col) - 1:
+                                    ax.set_xlabel("radial distance (au)")
+                                ax.set_ylabel("time")
+                                ax.invert_yaxis()
+                        if bottom_margin:
+                            for num, ax in enumerate(self.display.bottom_row):
+                                ax.set_xlabel("radial distance (au)")
+                                if num == 0:
+                                    ax.set_ylabel("time")
+                                ax.invert_yaxis()
             # add the row values
             self.display.label_margins(row_vals, row_var, col_vals, col_var)
             # add the sample size to the first subplot
@@ -2727,8 +2827,8 @@ class TrackingExperiment():
             query_kwargs['sort_by'] = 'test_ind'
         subset = copy.copy(query_kwargs['subset'])
         # get the values used for coloring each subplot
-        row_vals = self.query(output=row_var, sort_by=row_var, subset=query_kwargs['subset'])
-        col_vals = self.query(output=col_var, sort_by=col_var, subset=query_kwargs['subset'])
+        row_vals = self.query(output=row_var, sort_by=row_var)
+        col_vals = self.query(output=col_var, sort_by=col_var)
         assert len(col_vals) > 0 or len(row_vals) > 0, "The subset is empty!"
         # todo: what's up with the number of axes?
         row_vals = np.unique(row_vals)
@@ -2868,7 +2968,7 @@ class TrackingExperiment():
                 xlabel = xvar
             if use_probability:
                 # ylim = (0, 1)
-                ylabel = "Probability"
+                ylabel = "Density"
             else:
                 ylabel = "Count"
             self.display.format(xlim=xlim, ylim=ylim, xlabel=xlabel, ylabel=ylabel,
@@ -2920,6 +3020,8 @@ class SummaryDisplay():
             else:
                 self.right_col = self.axes[:, -1]
             self.trace_axes = self.trace_axes[:, :-1]
+        else:
+            self.right_row = []
         # partition the bottom row from self.trace_axes
         self.bottom_margin = bottom_margin
         if bottom_margin:
@@ -3330,35 +3432,39 @@ class TrackingTrial():
         # a bout corresponds to each test
         include = np.ones(self.num_tests, dtype=bool)
         if len(subset.keys()) > 0:
-            for key, val in subset.items():
-                logic, thresh = np.equal, val
-                if isinstance(val, str):
-                    logic, thresh = interprate_inequality(val)
-                var = self.__getattribute__(key)
-                if not isinstance(var, (list, tuple, np.ndarray)):
-                    var = np.repeat(var, self.num_tests)
-                if len(var) == len(include):
-                    if isinstance(val, (list, tuple, np.ndarray)):
-                        inds = np.array([test in val for test in var])
+            for key, vals in subset.items():
+                # convert vals to list if it isn't already
+                if not isinstance(vals, (list, tuple, np.ndarray)):
+                    vals = [vals]
+                for val in vals:
+                    logic, thresh = np.equal, val
+                    if isinstance(val, str):
+                        logic, thresh = interprate_inequality(val)
+                    var = self.query(output=key)
+                    if not isinstance(var, (list, tuple, np.ndarray)):
+                        var = np.repeat(var, self.num_tests)
+                    if len(var) == len(include):
+                        if isinstance(val, (list, tuple, np.ndarray)):
+                            inds = np.array([test in val for test in var])
+                        else:
+                            inds = logic(var, thresh)
+                            if inds.ndim > 1:
+                                extra_dims = inds.ndim - 1
+                                axes = tuple(np.arange(1, extra_dims+1))
+                                # note: if any part satisfies the condition, include it
+                                inds = np.any(inds, axis=axes)
+                            if isinstance(val, float):
+                                if np.isnan(val):
+                                    inds = np.isnan(var)
+                        while inds.ndim > include.ndim: 
+                            inds = np.any(inds, axis=-1)
+                        pad = include.ndim - inds.ndim
+                        index = [...]
+                        index += [np.newaxis for p in range(pad)]
+                        include = include * inds[tuple(index)]
                     else:
-                        inds = logic(var, thresh)
-                        if inds.ndim > 1:
-                            extra_dims = inds.ndim - 1
-                            axes = tuple(np.arange(1, extra_dims+1))
-                            # note: if any part satisfies the condition, include it
-                            inds = np.any(inds, axis=axes)
-                        if isinstance(val, float):
-                            if np.isnan(val):
-                                inds = np.isnan(var)
-                    while inds.ndim > include.ndim: 
-                        inds = np.any(inds, axis=-1)
-                    pad = include.ndim - inds.ndim
-                    index = [...]
-                    index += [np.newaxis for p in range(pad)]
-                    include = include * inds[tuple(index)]
-                else:
-                    breakpoint()
-                    print(f"A subset variable, {key}, has length {len(var)} but should be {len(include)}.")
+                        breakpoint()
+                        print(f"A subset variable, {key}, has length {len(var)} but should be {len(include)}.")
         # grab the indexing variable
         sort_by = self.__getattribute__(sort_by)
         if isinstance(sort_by, (str, bytes)):
@@ -3594,44 +3700,46 @@ class TrackingTrial():
             ret = np.repeat(ret, self.num_tests)
         include = np.ones(ret.shape, dtype=bool)
         if len(subset.keys()) > 0:
-            for key, val in subset.items():
-                # if key == 'bar_direction':
-                #     # todo: why is 0 being included in 'leftward' queries?
-                #     breakpoint()
-                logic, thresh = np.equal, val
-                if isinstance(val, str):
-                    logic, thresh = interprate_inequality(val)
-                var = self.__getattribute__(key)
-                if isinstance(var, (str, bytes, bool, float, int)):
-                    var = np.repeat(var, self.num_tests)
-                if var.ndim == 0:
-                    var = np.repeat(var, self.num_tests)
-                # if np.any(np.isnan(val)):
-                #     breakpoint()
-                if var.ndim > 0:
-                    if len(var) == len(include):
-                        if isinstance(val, (list, tuple, np.ndarray)):
-                            inds = np.isin(var, val)
-                        # elif isinstance(val, (float, int, str, bool, bytes, np.integer, np.floating, np.str_)):
-                        else:
-                            try:
-                                inds = logic(var, thresh)
-                            except:
-                                breakpoint()
-                            if isinstance(val, float):
-                                if np.isnan(val):
-                                    inds = np.isnan(var)
-                        while inds.ndim > include.ndim: 
-                            inds = np.any(inds, axis=-1)
-                        pad = include.ndim - inds.ndim
-                        index = [...]
-                        index += [np.newaxis for p in range(pad)]
-                        include = include * inds[tuple(index)]
-                elif isinstance(var, (np.integer, np.floating, np.str_, np.bool_)):
-                    include *= var == val
-                else:
-                    breakpoint()
-                    print(f"A subset variable, {key}, has length {len(var)} but should be {len(include)}.")
+            for key, vals in subset.items():
+                # todo: in order to allow lists of inequalities for each variable, we should
+                # convert all vals to lists
+                if not isinstance(vals, (list, tuple, np.ndarray)):
+                    vals = [vals]
+                for val in vals:
+                    logic, thresh = np.equal, val
+                    if isinstance(val, str):
+                        logic, thresh = interprate_inequality(val)
+                    var = self.__getattribute__(key)
+                    if isinstance(var, (str, bytes, bool, float, int)):
+                        var = np.repeat(var, self.num_tests)
+                    if var.ndim == 0:
+                        var = np.repeat(var, self.num_tests)
+                    # if np.any(np.isnan(val)):
+                    #     breakpoint()
+                    if var.ndim > 0:
+                        if len(var) == len(include):
+                            if isinstance(val, (list, tuple, np.ndarray)):
+                                inds = np.isin(var, val)
+                            # elif isinstance(val, (float, int, str, bool, bytes, np.integer, np.floating, np.str_)):
+                            else:
+                                try:
+                                    inds = logic(var, thresh)
+                                except:
+                                    breakpoint()
+                                if isinstance(val, float):
+                                    if np.isnan(val):
+                                        inds = np.isnan(var)
+                            while inds.ndim > include.ndim: 
+                                inds = np.any(inds, axis=-1)
+                            pad = include.ndim - inds.ndim
+                            index = [...]
+                            index += [np.newaxis for p in range(pad)]
+                            include = include * inds[tuple(index)]
+                    elif isinstance(var, (np.integer, np.floating, np.str_, np.bool_)):
+                        include *= var == val
+                    else:
+                        breakpoint()
+                        print(f"A subset variable, {key}, has length {len(var)} but should be {len(include)}.")
         # if self.dirname == 'Empty Sp Gal4' and 'img_id' in subset.keys():
         #     breakpoint()
         # grab the indexing variable
@@ -4249,37 +4357,41 @@ class Bout():
                 # check if the subset condition is met by this saccade
                 subset = query_kwargs['subset']
                 # using the subset conditions, check if this saccade meets the criteria
-                for key, val in subset.items():
+                for key, vals in subset.items():
+                    # convert vals to a list if it is not already
+                    if not isinstance(vals, list):
+                        vals = [vals]
+                    for val in vals:
                     # we need to process saccade parameters differently from bout and trial data
-                    key_val = None
-                    for obj in [self.trial, self, saccade]:
-                        if key in dir(obj):
-                            key_vals = obj.__getattribute__(key)
-                            key_val = key_vals
-                    if key_val is not None:
-                        # if key_vals is an array, we need to use the reference time to subset
-                        if isinstance(key_vals, np.ndarray):
-                            # if obj is a trial, we need to find the data specific to that bout
-                            if len(key_vals) == len(self.trial.test_ind):
-                                key_vals = key_vals[self.test_ind]
+                        key_val = None
+                        for obj in [self.trial, self, saccade]:
+                            if key in dir(obj):
+                                key_vals = obj.__getattribute__(key)
                                 key_val = key_vals
-                            if isinstance(key_val, np.ndarray):
-                                if len(key_vals) == len(saccade.time):
-                                    if reference_time == 'start':
-                                        key_val = key_vals[saccade.start]
-                                    elif reference_time == 'stop':
-                                        key_val = key_vals[saccade.stop]
-                                    else:
-                                        raise ValueError(f'`reference_time` must be either "start" or "stop".')
-                        # interpret val for inequalities
-                        if isinstance(val, (str, bytes)):
-                            starts = [saccade.start for saccade in self.saccades]
-                            logic, thresh = interprate_inequality(val)
-                            if isinstance(key_val, bytes):
-                                key_val = key_val.decode('utf-8')
-                            include *= logic(key_val, thresh)
-                        else:
-                            include *= key_val == val
+                        if key_val is not None:
+                            # if key_vals is an array, we need to use the reference time to subset
+                            if isinstance(key_vals, np.ndarray):
+                                # if obj is a trial, we need to find the data specific to that bout
+                                if len(key_vals) == len(self.trial.test_ind):
+                                    key_vals = key_vals[self.test_ind]
+                                    key_val = key_vals
+                                if isinstance(key_val, np.ndarray):
+                                    if len(key_vals) == len(saccade.time):
+                                        if reference_time == 'start':
+                                            key_val = key_vals[saccade.start]
+                                        elif reference_time == 'stop':
+                                            key_val = key_vals[saccade.stop]
+                                        else:
+                                            raise ValueError(f'`reference_time` must be either "start" or "stop".')
+                            # interpret val for inequalities
+                            if isinstance(val, (str, bytes)):
+                                starts = [saccade.start for saccade in self.saccades]
+                                logic, thresh = interprate_inequality(val)
+                                if isinstance(key_val, bytes):
+                                    key_val = key_val.decode('utf-8')
+                                include *= logic(key_val, thresh)
+                            else:
+                                include *= key_val == val
             if include:
                 peak_speed = abs(saccade.peak_velocity) * 180. / np.pi
                 if (peak_speed > min_speed) and (peak_speed < max_speed):
