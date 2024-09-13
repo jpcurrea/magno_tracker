@@ -2337,12 +2337,12 @@ class TrackingExperiment():
             query_kwargs['sort_by'] = 'test_ind'
         subset = copy.copy(query_kwargs['subset'])
         # get the values used for coloring each subplot
-        row_vals = self.query(output=row_var, sort_by=row_var, subset=subset)
-        col_vals = self.query(output=col_var, sort_by=col_var, subset=subset)
+        row_vals = self.query(output=row_var, sort_by=row_var, subset=subset, same_size=False)
+        col_vals = self.query(output=col_var, sort_by=col_var, subset=subset, same_size=False)
         assert len(col_vals) > 0 or len(row_vals) > 0, "The subset is empty!"
         # todo: what's up with the number of axes?
-        row_vals = np.unique(row_vals)
-        col_vals = np.unique(col_vals)
+        row_vals = np.unique(np.concatenate(row_vals))
+        col_vals = np.unique(np.concatenate(col_vals))
         new_row_vals, new_col_vals = [], []
         for num, (vals, storage) in enumerate(zip([row_vals, col_vals], [new_row_vals, new_col_vals])):
             if vals.dtype.type == np.bytes_:
@@ -2438,10 +2438,9 @@ class TrackingExperiment():
                 subset[col_var] = col_val
                 # todo: get the subset x- and y-values
                 # update the subset dictionary
-                xs = self.query(same_size=True, output=xvar, subset=subset, 
-                                sort_by=query_kwargs['sort_by'], skip_empty=True)
-                ys = self.query(same_size=True, output=yvar, subset=subset, 
-                                sort_by=query_kwargs['sort_by'], skip_empty=True)
+                xs = self.query(same_size=True, output=xvar, subset=subset, sort_by=query_kwargs['sort_by'], skip_empty=False)
+                ys = self.query(same_size=True, output=yvar, subset=subset, sort_by=query_kwargs['sort_by'], skip_empty=False)
+                xs, ys = np.array(xs), np.array(ys)
                 # todo: pad arrays in included_xs to match the longest one and convert to an array
                 # get sample size
                 # sample_size = xs[0].shape[0]
@@ -2456,10 +2455,13 @@ class TrackingExperiment():
                 #     ax.plot(ax_mean, y, color=color, zorder=5)
                 if isinstance(xs, np.ndarray):
                     sample_size = xs.shape[0]
-                    if xs.size > 0:
+                    if (xs.size > 0) and (ys.size > 0):
                         reps = xs.shape[1]
                         # reshape the data
-                        ys = ys.reshape(-1, ys.shape[-1])
+                        try:
+                            ys = ys.reshape(-1, ys.shape[-1])
+                        except:
+                            breakpoint()
                         xs = xs.reshape(-1, xs.shape[-1])
                         # plot individual traces and the mean
                         # mean_vals = []
@@ -2476,6 +2478,7 @@ class TrackingExperiment():
                             # take histogram of the x and y data in order to get the maximum
                             # fig, ax = plt.subplots()
                             no_nans = np.isnan(new_xs) == False
+                            no_nans = no_nans * (np.isnan(new_ys) == False)
                             hist, xedges, yedges = np.histogram2d(new_xs[no_nans], new_ys[no_nans], bins=bins, density=use_density)
                             self.hist, self.xedges, self.yedges = hist, xedges, yedges
                             # cmap = matplotlib.colors.LinearSegmentedColormap.from_list("", [(1,1,1), color])
@@ -2520,7 +2523,6 @@ class TrackingExperiment():
                         fewest_nans = nans.sum(1).argmin()
                         y = ys[fewest_nans]
                         if callable(summary_func) and plot_type in ['hist2d', 'line']:
-                            # ax_mean = np.nanmean(xs, axis=0)
                             ax_mean = summary_func(xs, axis=0)
                             # mean_vals = np.array(mean_vals)
                             # ax_mean = mean_vals.mean(0)
@@ -2599,8 +2601,8 @@ class TrackingExperiment():
                                 col_summ_ax.plot(mean_dist, y, color='w', lw=3, zorder=3)
                                 col_summ_ax.plot(mean_dist, y, color=color, lw=2, zorder=4)
                         repetitions += [not_all_nans.sum()]
-                    else:
-                        breakpoint()
+                    # else:
+                    #     breakpoint()
                 elif len(xs) > 0:
                     # reshape the data
                     sample_size = len(xs)
@@ -3177,6 +3179,25 @@ class TrackingTrial():
         self.h5_file = h5py.File(self.filename, 'r')
         self.load_datasets()
 
+    def remove_dataset(self, name):
+        """Remove a dataset from the h5 file.
+
+        Parameters
+        ----------
+        name : str
+            The name of the dataset to remove.
+        """
+        # first re-load the dataset in readwrite mode
+        self.h5_file.close()
+        self.h5_file = h5py.File(self.filename, 'r+')
+        # then add the dataset
+        if name in self.h5_file.keys():
+            del self.h5_file[name]
+        del self.h5_file
+        # finally, reload the file and datsets in read mode
+        self.h5_file = h5py.File(self.filename, 'r')
+        self.load_datasets()
+
     def add_attr(self, name, val):
         """Add an attribute to the whole trial dataset.
 
@@ -3589,7 +3610,7 @@ class TrackingTrial():
         subset : dict, default = {'is_test': True}
             The subset of parameters to include in the output.
         """
-        ret = self.__getattribute__(output)
+        ret = np.array(self.__getattribute__(output))
         if isinstance(ret, (str, bytes)) or ret.ndim == 0:
             ret = np.repeat(ret, self.num_tests)
         include = np.ones(ret.shape, dtype=bool)
@@ -3658,13 +3679,16 @@ class TrackingTrial():
             # todo: does this algorithm work for sort_by arrays of higher dimension (like time)?
             sort_by_inds = np.argsort(sort_by)
             new_ret = []
-            for ind, arr in zip(include[sort_by_inds], ret[sort_by_inds]):
-                if isinstance(ind, (tuple, list, np.ndarray)):
-                    if any(ind):
-                        new_ret += [arr[ind]]
-                elif isinstance(ind, (bool, np.bool_)):
-                    if ind:
-                        new_ret += [arr]
+            try:
+                for ind, arr in zip(include[sort_by_inds], ret[sort_by_inds]):
+                    if isinstance(ind, (tuple, list, np.ndarray)):
+                        if any(ind):
+                            new_ret += [arr[ind]]
+                    elif isinstance(ind, (bool, np.bool_)):
+                        if ind:
+                            new_ret += [arr]
+            except:
+                breakpoint()
             ret = np.array(new_ret)
             return ret
         else:
