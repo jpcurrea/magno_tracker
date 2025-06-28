@@ -26,6 +26,7 @@ import seaborn as sbn
 import skimage
 from skvideo import io
 import sys
+from time import time
 import pandas as pd
 
 from functools import partial
@@ -340,11 +341,11 @@ class TrackingVideo():
         # cam.arm()
         cam.displaying = True
         # cam.capture_dummy()
-        cam.capture_start()
         cam.display_start()
+        cam.capture_start()
         resp = input("adjust the ring parameters and press <enter> when you're happy: ")
-        cam.display_stop()
         cam.capture_stop()
+        cam.display_stop()
         # store results from the gui
         for var, var_storage in zip(['thresh', 'inner_r', 'outer_r'], ['threshold', 'inner_radius', 'outer_radius']): 
             self.__setattr__(var_storage, cam.__getattribute__(var))
@@ -414,7 +415,7 @@ class TrackingVideo():
         self.wing_ring_angles = angles[include_wing]
 
 
-    def get_heading(self, floor=0, ceiling=40, method='rings', wings=False, gui=False):
+    def get_heading(self, floor=0, ceiling=40, method='rings', wings=False, head=False, gui=False):
         """Threshold the video and get the heading for each frame.
 
 
@@ -431,6 +432,8 @@ class TrackingVideo():
             learning model. 
         wings : bool, default=False
             Whether to also calculate the left and right wingbeat amplitudes.
+        head : bool, default=False
+            Whether to also calculate the head angle.
         """
         self.heading = []
         self.thrust = []
@@ -474,6 +477,7 @@ class TrackingVideo():
                 tail_dir = scipy.stats.circmean(tail_angs.flatten(), low=-np.pi, high=np.pi)
                 # the head direction is the polar opposite of the tail
                 head_dir = tail_dir + np.pi
+                # head_dir = tail_dir
                 if head_dir > np.pi:
                     head_dir -= 2 * np.pi
                 # 3. get bounds of head angles, ignoring angles within +/- 90 degrees of the tail
@@ -497,11 +501,11 @@ class TrackingVideo():
                 if np.any(include):
                     inner_vals = frame[inner_inds[0], inner_inds[1]][include]
                     if invert:
-                        head = inner_vals < thresh
+                        head_pos = inner_vals < thresh
                     else:
-                        head = inner_vals > thresh
+                        head_pos = inner_vals > thresh
                     heading = scipy.stats.circmean(
-                        inner_angs[include][head],
+                        inner_angs[include][head_pos],
                         low=-np.pi, high=np.pi)
                 # convert from heading angle to head position
                 heading_pos = self.inner_radius * np.array([np.sin(heading), np.cos(heading)])
@@ -556,8 +560,8 @@ class TrackingVideo():
                         xs, ys = self.inner_ring_coords[include].T
                         inner_vals = frame[self.inner_ring_coords[include][:, 1],
                                            self.inner_ring_coords[include][:, 0]]
-                        head = (inner_vals > floor) * (inner_vals <= ceiling)
-                        head_angs += [self.inner_ring_angles[include][head]]
+                        head_pos = (inner_vals > floor) * (inner_vals <= ceiling)
+                        head_angs += [self.inner_ring_angles[include][head_pos]]
                 if len(head_angs) > 0:
                     head_angs = np.concatenate(head_angs)
                 # 5. grab the head angs within those bounds
@@ -572,21 +576,17 @@ class TrackingVideo():
                 # 3. get the orientation of the principle component
             # extra: measure the wing 
             if wings:
-                breakpoint()
                 # get the wing ring values
                 wing_vals = frame[self.wing_ring_coords[:, 1], self.wing_ring_coords[:, 0]]
                 self.wing_vals += [wing_vals]
-                breakpoint()
                 # test: plot the outer ring colored by the values and the predicted head position
                 outer_vals = frame[self.outer_ring_coords[:, 1], self.outer_ring_coords[:, 0]]
                 plt.imshow(frame, cmap='gray')
                 plt.scatter(self.inner_ring_coords[:, 0], self.inner_ring_coords[:, 1], c=self.inner_ring_angles, alpha=.25)
                 plt.colorbar()
-                plt.show()
                 # test: use the heading angle to reduce the search for the wings
                 plt.imshow(frame, cmap='gray')  
                 plt.scatter(self.wing_ring_coords[:, 0], self.wing_ring_coords[:, 1], c=wing_vals)
-                plt.show()
                 # rotate the wing angles based on the heading angle
                 new_angs = self.wing_ring_angles - self.heading[-1]
                 new_angs %= 2 * np.pi
@@ -596,16 +596,20 @@ class TrackingVideo():
                 plt.scatter(self.wing_ring_coords[:, 0], self.wing_ring_coords[:, 1], c=self.wing_ring_angles)
                 # plot the heading position
                 xc, yc = self.center
-                plt.scatter(heading_pos[0] + yc, heading_pos[1] + xc, c='r', s=100)
+                plt.scatter(heading_pos[0] + xc, heading_pos[1] + yc, c='r', s=100)
                 plt.gca().set_aspect('equal')
                 plt.show()
                 # plot a vector using the heading angle
                 # plt.figure()
+            if head:
+                breakpoint()
+                # 
             print_progress(num, self.num_frames)
         if isinstance(self.video, io.ffmpeg.FFmpegReader):
             self.video = io.FFmpegReader(self.filename)
         # convert to ndarray
         self.heading = np.array(self.heading)
+        breakpoint()
         if np.any(np.isnan(self.heading)):
             # if np.isnan(self.heading).mean() > .1:
             #     breakpoint()
@@ -847,7 +851,7 @@ class OfflineTracker():
         self.vid_fns = new_vid_fns
         self.h5_fns = new_h5_fns
 
-    def process_vids(self, start_over=False, method='combined', wings=False, gui=False, display=False):
+    def process_vids(self, start_over=False, method='combined', wings=False, head=False, gui=False, display=False):
         """For each video and h5 file, track and store the heading data.
 
         Parameters
@@ -858,6 +862,8 @@ class OfflineTracker():
             The method of measuring the
         wings : bool, default=False
             Whether to measure the left and right wingbeat amplitudes.
+        head : bool, default=False
+            Whether to measure the head orientation.
         gui : bool, default=False
             Whether to use a GUI to manually define the ring and threshold parameters.
         display : bool, default=False
@@ -902,7 +908,7 @@ class OfflineTracker():
                     # set the ring parameters from our dataset
                     center = (track.width/2, track.height/2)
                     track.set_rings(center, inner_radius=inner_r, outer_radius=outer_r, thickness=5)
-                    track.get_heading(floor=0, ceiling=threshold, wings=wings, method='combined')
+                    track.get_heading(floor=0, ceiling=threshold, wings=wings, method='combined', head=head)
                     # why is the offline tracking so much longer than the online tracking?
                     # note: I figured out why. the framerate of online tracking is determined by the 
                     # framerate of the stimulus. this must have been limited to 60 Hz, for some reason, and
@@ -924,6 +930,7 @@ class OfflineTracker():
                     # for kf, heading in zip(data.stop_test, data.camera_heading): plt.axvline(kf); ts = np.arange(len(heading)) / 120.; plt.plot(kf-2*ts[::-1], np.unwrap(heading))
                     if display:
                         track.graph_preview()
+                    # todo: add tracking for the head
                     # the method below assumes that the recorded framerates for the offline and online
                     # heading are correct, but it looks like sometimes the holocube framerate says 120 
                     # but was actually 60 Hz
@@ -964,7 +971,7 @@ class OfflineTracker():
                     # get the principle component of the above-threshold pixel coordinates
                     breakpoint()
                 data.add_dataset('camera_heading_offline', heading_offline_arr)
-                data.add_dataset('com_thrust', self.thrust)
+                # data.add_dataset('com_thrust', self.thrust)
                 if wings:
                     data.add_dataset('wing_vals', self.wing_vals)
                 # add a time
@@ -2014,7 +2021,8 @@ class TrackingExperiment():
                 amps = []
                 # collect the saccade starting positions and amplitudes for making a 2D plot 
                 for trial in self.trials:
-                    bouts = trial.query_bouts(sort_by=query_kwargs['sort_by'], subset=subset)
+                    #bouts = trial.query_bouts(sort_by=query_kwargs['sort_by'], subset=subset)
+                    bouts = trial.query('bouts', sort_by=query_kwargs['sort_by'], subset=subset)
                     resps = trial.query(heading_var, sort_by=query_kwargs['sort_by'], subset=subset)
                     resp_times = trial.query(time_var, sort_by=query_kwargs['sort_by'], subset=subset)
                     # convert the bar_positions variable to a general reference angle input parameter
@@ -2538,8 +2546,44 @@ class TrackingExperiment():
                                     # make a linear colormap from white to color
                                     cmap = matplotlib.colors.LinearSegmentedColormap.from_list("", [(1,1,1), color])
                                     # plot the contour plot of the last positions
-                                    sbn.kdeplot(x=last_pos[:, 0], y=last_pos[:, 1], ax=ax, levels=3, fill=True, 
-                                                cmap=cmap, alpha=.3, zorder=1, linewidth=0)
+                                    # sbn.kdeplot(x=last_pos[:, 0], y=last_pos[:, 1], ax=ax, levels=2, fill=True, 
+                                    #             cmap=cmap, alpha=.3, zorder=1, linewidth=0, )
+                                    # can we use bootstrapping to get the 95% CI of the mean in 2D?
+                                    # let's sample with replacement 10000 times
+                                    inds = np.arange(len(last_pos))
+                                    rand_inds = np.random.choice(inds, size=(10000, len(inds)), replace=True)
+                                    rand_last_pos = last_pos[rand_inds]
+                                    # take the mean for each sample
+                                    bootstrapped_means = np.nanmean(rand_last_pos, axis=1)
+    
+                                    # Compute mean and covariance of bootstrapped means
+                                    mean = np.mean(bootstrapped_means, axis=0)
+                                    cov = np.cov(bootstrapped_means, rowvar=False)
+                                    
+                                    # Get chi-square value for desired confidence level with 2 degrees of freedom
+                                    chi2 = scipy.stats.chi2
+                                    chi2_val = chi2.ppf(confidence, 2)
+                                    
+                                    # Compute eigenvalues and eigenvectors
+                                    eigenvals, eigenvecs = np.linalg.eigh(cov)
+                                    
+                                    # Order by eigenvalue in descending order
+                                    idx = eigenvals.argsort()[::-1]
+                                    eigenvals = eigenvals[idx]
+                                    eigenvecs = eigenvecs[:, idx]
+                                    
+                                    # Compute semi-axis lengths for the ellipse
+                                    a = np.sqrt(chi2_val * eigenvals[0])
+                                    b = np.sqrt(chi2_val * eigenvals[1])
+                                    
+                                    # Calculate the angle of the ellipse
+                                    angle = np.arctan2(eigenvecs[1, 0], eigenvecs[0, 0])
+
+                                    # now, plot the ellipse
+                                    ellipse = matplotlib.patches.Ellipse(mean, 2*a, 2*b, angle=np.degrees(angle),
+                                                color=color, alpha=.25, fill=True, lw=.5, zorder=2)
+                                    ax.add_artist(ellipse)
+
                             if 'circ_hist' in plot_kwargs:
                                 from matplotlib.patches import Wedge
                                 if plot_kwargs['circ_hist']:
@@ -2555,6 +2599,32 @@ class TrackingExperiment():
                                     hists += [hist]
                                     hist_bins += [bins]
                                     hist_colors += [color]
+                                    # and use bootstrapping to get the confidence interval for the angles
+                                    inds = np.arange(len(last_pos))
+                                    rand_inds = np.random.choice(inds, size=(10000, len(inds)), replace=True)
+                                    rand_last_pos = last_pos[rand_inds]
+                                    # take the mean for each sample
+                                    bootstrapped_means = np.nanmean(rand_last_pos, axis=1)
+                                    # now, get the angles for these means
+                                    boot_angles = np.arctan2(bootstrapped_means[..., 1], bootstrapped_means[..., 0])
+                                    # get the mean angle
+                                    mean_angle = np.arctan2(bootstrapped_means[..., 1].mean(), bootstrapped_means[..., 0].mean())
+                                    # now, get the bounds for the confidence interval and determine which is low vs. high based on the mean
+                                    lb_diff, ub_diff = np.percentile(boot_angles - mean_angle, [100*(1-confidence)/2, 100*(1+confidence)/2])
+                                    lb, ub = mean_angle + lb_diff, mean_angle + ub_diff
+                                    # now, plot an arc between the lower and upper bounds and a spot at the mean
+                                    radius = 1.125
+                                    arc = matplotlib.patches.Arc((0, 0), width=2*radius, height=2*radius, angle=0,
+                                                                 theta1=np.degrees(lb), theta2=np.degrees(ub),
+                                                                 color='w', lw=4, zorder=4, capstyle='round')
+                                    ax.add_artist(arc)
+                                    arc = matplotlib.patches.Arc((0, 0), width=2*radius, height=2*radius, angle=0,
+                                                                 theta1=np.degrees(lb), theta2=np.degrees(ub),
+                                                                 color=color, lw=2, zorder=5)
+                                    ax.add_artist(arc)
+                                    ax.scatter(radius*np.cos(mean_angle), radius*np.sin(mean_angle), color='w', marker='o', s=40, zorder=4)
+                                    ax.scatter(radius*np.cos(mean_angle), radius*np.sin(mean_angle), color=color, marker='o', s=20, zorder=5)
+
                             if 'mean_line' in plot_kwargs:
                                 if plot_kwargs['mean_line']:
                                     # get the mean 2D trajectory
@@ -2647,17 +2717,22 @@ class TrackingExperiment():
                                         lows, highs = np.array(lows), np.array(highs)
                                         row_summ_ax.fill_betweenx(y, lows, highs, color=color, alpha=.3, zorder=2, linewidth=0)
                             else:
-                                y = new_ys[0]
-                                # measure the radial distance travelled
-                                try:
-                                    dist = np.linalg.norm(trajectory, axis=1)
-                                except:
-                                    breakpoint()
-                                row_summ_ax.plot(dist.T, new_ys.T, color=color, lw=.5, alpha=.5)
-                                # plot the mean distance travelled
-                                mean_dist = np.nanmean(dist, axis=0)
-                                row_summ_ax.plot(mean_dist, y, color='w', lw=3, zorder=3)
-                                row_summ_ax.plot(mean_dist, y, color=color, lw=2, zorder=4)
+                                # if 'circ_hist' in plot_kwargs:
+                                #     # todo: make better summary plots.
+                                #     # if 'circ_hist' is specified, add all of the circle 
+
+                                # else:
+                                if 'circ_hist' not in plot_kwargs:
+                                    # measure the radial distance travelled
+                                    try:
+                                        dist = np.linalg.norm(trajectory, axis=1)
+                                    except:
+                                        breakpoint()
+                                    row_summ_ax.plot(dist.T, new_ys.T, color=color, lw=.5, alpha=.5)
+                                    # plot the mean distance travelled
+                                    mean_dist = np.nanmean(dist, axis=0)
+                                    row_summ_ax.plot(mean_dist, y, color='w', lw=3, zorder=3)
+                                    row_summ_ax.plot(mean_dist, y, color=color, lw=2, zorder=4)
                         if col_summ_ax is not None:
                             if plot_type in ['hist2d', 'line']:
                                 if callable(summary_func):
@@ -2713,7 +2788,7 @@ class TrackingExperiment():
                             summary = summary_func(xvals, axis=0)
                             col_summ_ax.plot(summary, y, color=color)
                 # add the xticks, yticks, and axis labels
-        if plot_type == 'trajectory2d':
+        if plot_type == 'trajectory2d' and 'circ_hist' in plot_kwargs:
             # normalize the counts by the total count to make the colormap unbiased to sample size
             hists = np.array(hists)
             hists = hists / hists.sum(1)[:, None]
@@ -2769,7 +2844,7 @@ class TrackingExperiment():
             # add the row values
             self.display.label_margins(row_vals, row_var, col_vals, col_var)
             # add the sample size to the first subplot
-            self.display.fig.suptitle(f"N={sample_size}, {min(repetitions)}–{max(repetitions)} traces per subplot")
+            # self.display.fig.suptitle(f"N={sample_size}, {min(repetitions)}–{max(repetitions)} traces per subplot")
         # plt.show()
 
     def plot_histogram_summary(
@@ -2980,6 +3055,7 @@ class TrackingExperiment():
             # add the sample size to the first subplot
             self.display.fig.suptitle(f"N={min(repetitions)}–{max(repetitions)} traces per subplot")
         # plt.show()
+    
 
 
 class SummaryDisplay():
@@ -3271,6 +3347,8 @@ class TrackingTrial():
         """
         # first re-load the dataset in readwrite mode
         self.h5_file.close()
+        while 'Closed' not in self.h5_file.__str__():
+            time.sleep(.01)
         self.h5_file = h5py.File(self.filename, 'r+')
         # then add the dataset
         if name in self.h5_file.keys():
@@ -3420,9 +3498,13 @@ class TrackingTrial():
                 bout.process_saccades(**saccade_kwargs)
                 bout.get_stats()
                 self.bouts += [bout]
+            if len(self.bouts) < 5:
+                breakpoint()
             self.bouts = np.array(self.bouts)
             # use pickle to save the list of bouts for next time 
             bout_fn = self.filename.replace(".h5", "_bouts.pkl")
+            if os.path.exists(bout_fn):
+                os.remove(bout_fn)
             # we need to ditch the parent trial data before saving the bout
             for bout in self.bouts: 
                 bout.trial = None
@@ -3716,9 +3798,12 @@ class TrackingTrial():
         subset : dict, default = {'is_test': True}
             The subset of parameters to include in the output.
         """
-        ret = np.array(self.__getattribute__(output))
-        if isinstance(ret, (str, bytes)) or ret.ndim == 0:
-            ret = np.repeat(ret, self.num_tests)
+        if output == 'bouts':
+            ret = np.array(self.bouts)
+        else:
+            ret = np.array(self.__getattribute__(output))
+            if isinstance(ret, (str, bytes)) or ret.ndim == 0:
+                ret = np.repeat(ret, self.num_tests)
         include = np.ones(ret.shape, dtype=bool)
         if len(subset.keys()) > 0:
             for key, vals in subset.items():
@@ -3764,11 +3849,19 @@ class TrackingTrial():
         # if self.dirname == 'Empty Sp Gal4' and 'img_id' in subset.keys():
         #     breakpoint()
         # grab the indexing variable
+        # if sort_by == 'test_ind':
+        #     sort_by = self.test_ind[self.is_test[:]]
+        # else:
+        #     sort_by = self.__getattribute__(sort_by)
         sort_by = self.__getattribute__(sort_by)
         if isinstance(sort_by, (str, bytes)) or sort_by.ndim == 0:
             sort_by = np.repeat(sort_by, self.num_tests)
+        if ret.size < sort_by.size:
+            # for some reason, non-tests are being skipped when processing the bouts
+            breakpoint()
         assert ret.size >= sort_by.size, (
             "The indexing variable cannot be larger than the output")
+            
         # select the specified subset
         # if ret.shape != include.shape:
         #     new_ret = []
@@ -4002,7 +4095,8 @@ class Bout():
             storage[saccade.start:saccade.stop] = True
 
     def process_saccades(self, threshold_speed=350, speed_noise_method=True, acceleration_method=False, 
-                         maximum_saccade_frequency=3, kalman_method=False, de_lag=True, **saccade_kwargs):
+                         maximum_saccade_frequency=3, kalman_method=False, de_lag=True,
+                         prominance=(1,30), kalman_filter_params=(100, .3), **saccade_kwargs):
         """Find saccades in an array of values. 
         
         We used a variant of the procedure from Bender and Dickinson (2006):
@@ -4027,6 +4121,8 @@ class Bout():
         de_lag : bool, default=True
             If using the acceleration method, whether to use cross-correlation to 
             avoid phase errors due to smoothing.
+        prominance : tuple, default=(1, 30)
+            The prominence of the peaks used for finding saccades.
         **saccade_kwargs
             Parameters for processing the saccades.
         """
@@ -4035,12 +4131,26 @@ class Bout():
         if speed_noise_method:
             # todo: try using Kalman Filter instead
             # let's find the best jerk_std and measurement noise for fitting the heading data
-            kfilter = KalmanFitter(arr[0])
-            vals_filtered = np.unwrap(kfilter.generate_vals(100, .3))
-            # vals_filtered = arr[0]
-            # plt.scatter(range(len(arr[0])), arr[0]) 
-            # plt.plot(np.unwrap(vals_filtered))
+            # kfilter = KalmanFitter(arr[0])
+            # kalman_filter_params = (100, .3)
+            # vals_filtered = np.unwrap(kfilter.generate_vals(kalman_filter_params[0], kalman_filter_params[1]), axis=-1)
+            # # use nonlinear optimization to find the best parameters for the Kalman filter
+            # from scipy.optimize import minimize
+            # def cost_function(params):
+            #     jerk_std, measurement_noise = params
+            #     vals_filtered = np.unwrap(kfilter.generate_vals(jerk_std, measurement_noise), axis=-1)
+            #     # calculate the cost as the sum of squared errors
+            #     return np.sum((arr[0] - vals_filtered)**2)
+            # res = minimize(cost_function, kalman_filter_params, method='Nelder-Mead', bounds=((0, 1000000), (1, 100)), options={'maxiter': 1000})
+            # vals_filtered = np.unwrap(kfilter.generate_vals(res.x[0], res.x[1]*10), axis=-1)
+            vals_filtered = butterworth_filter(arr, low=0, high=10, sample_rate=self.framerate)
+            vals_filtered_rev = butterworth_filter(arr[:, ::-1], low=0, high=10, sample_rate=self.framerate)
+            vals_filtered = (vals_filtered + vals_filtered_rev[:, ::-1]) / 2
+            vals_filtered = np.unwrap(vals_filtered[0], axis=-1)
+            # plt.plot(range(len(arr[0])), arr[0]) 
+            # plt.plot(vals_filtered)
             # plt.show()
+            # maybe instead of a kalman filter, I can use the butterworth filter
             self.saccades = []
             # use raw velocity to get the confidence interval based on a rolling window of variance
             # velocity = np.gradient(arr[0])
@@ -4050,11 +4160,11 @@ class Bout():
             # find the number of frames corresponding to 100 ms, because saccades are 
             # unlikely to occur that frequently
             dist = .5 * self.framerate
-            peaks = scipy.signal.find_peaks(np.abs(velocity), distance=dist/4, width=4, prominence=(1.25*np.pi, 30), wlen=dist)
-            # test:
+            peaks = scipy.signal.find_peaks(np.abs(velocity), distance=dist/4, width=3, prominence=prominance, wlen=dist)
+            # # test:
             # fig, axes = plt.subplots(nrows=2, sharex=True)
             # axes[0].plot(arr[0])
-            # plt.sca(axes[1])
+            # # plt.sca(axes[1])
             # plt.plot(velocity, zorder=2)
             # velos = velocity[peaks[0]]
             # plt.scatter(peaks[0], velos, marker='o', color=green, zorder=3)
@@ -4425,7 +4535,7 @@ class Bout():
         return times, saccades
 
 class Saccade():
-    def __init__(self, arr, bout, framerate=1, start=0, stop=-1, interpolate_velocity=True, baseline_comparison=False, display=False):
+    def __init__(self, arr, bout, framerate=1, start=0, stop=-1, interpolate_velocity=True, baseline_comparison=False, display=False, baseline_test=True):
         """Wrapper for saccade time series and measurements.
 
         Parameters
@@ -4444,6 +4554,8 @@ class Saccade():
         baseline_comparison : bool, default=True
             Whether to use the baseline distribution of velocities to correct the
             start and stop points of the saccade.
+        baseline_test : bool, default=True
+            Whether to use the velocity noise distribution to verify if the saccade is valid.
         display : bool, default=False
             Whether to display the resultant saccade start and stop points.
 
@@ -4496,7 +4608,8 @@ class Saccade():
             start_frame, stop_frame = max(self.start - 10, 0), min(self.stop+11, len(self.time))
             # start_frame, stop_frame = max(self.start - 10, 0), min(self.stop+10, len(self.time))
             interp_func = scipy.interpolate.interp1d(self.time[start_frame: stop_frame], self.velocity[start_frame: stop_frame], kind='cubic')
-            new_times = np.linspace(self.time[start_frame], self.time[stop_frame-1], 1000)
+            # new_times = np.linspace(self.time[start_frame], self.time[stop_frame-1], 1000)
+            new_times = np.linspace(0, self.duration, 1000)
             new_velocity = interp_func(new_times)
             peak_ind = np.argmax(abs(new_velocity))
             self.peak_velocity = new_velocity[peak_ind]
@@ -4531,6 +4644,7 @@ class Saccade():
                 # the new stop is the first frame below threshold
                 self.success = True
                 if baseline_comparison:
+                    breakpoint()
                     offset = -5
                     xmin = max(0, self.start + offset)
                     xmax = min(len(self.velocity), self.stop + 10)
@@ -4554,6 +4668,12 @@ class Saccade():
                     if self.stop - self.start < 2 or self.duration > 1.5:
                         self.success = False
                     self.amplitude = self.stop_angle - self.start_angle
+                if baseline_test:
+                    # check if peak velocity is outside of the velocity bounds
+                    if self.peak_velocity < 0 and self.peak_velocity > velo_floor:
+                        self.success = False
+                    elif self.peak_velocity > 0 and self.peak_velocity < velo_ceiling:
+                        self.success = False
                 if self.success and display:
                     # plot the new saccade spans
                     axes[0].axvspan(self.time[self.start], self.time[self.stop], color='gray', alpha=.5)
@@ -4629,6 +4749,9 @@ class Saccade():
 
 def angle_rgb(angles, sat=.5, val=.7, period=2*np.pi):
     """Return a color for the given angle for a circular cmap."""
+    # if the angle values are strings, just use a range of integers
+    if isinstance(angles[0], (str, bytes)):
+        angles = np.arange(len(angles))
     hues = (angles % period) / period
     sats, vals = np.repeat(sat, len(hues)), np.repeat(val, len(hues))
     hsv = np.array([hues, sats, vals]).T
@@ -4705,6 +4828,14 @@ def print_progress(part, whole):
     sys.stdout.write('\r')
     sys.stdout.write('[%-20s] %d%%' % ('=' * int(20 * prop), 100 * prop))
     sys.stdout.flush()
+
+def sigAsterisk(p):
+    l = [[.0001, '****'],[.001, '***'],[.01, '**'],[.05, '*']]
+    for v in l:
+        if p <= v[0]:
+            return v[1]
+        else:
+            return "ns"
 
 def plot_diff_brackets(label, x1, x2, y1, y2, y_label, col='k',
                        vert=False, ax=None, lw=1, size='medium'):
