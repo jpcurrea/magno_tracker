@@ -3180,7 +3180,7 @@ class SummaryDisplay():
                 val = val.decode('utf-8')
             lbl = ax.get_ylabel()
             if isinstance(val, (float, int)):
-                ax.set_ylabel(f"{val:.1f}\n\n{lbl}")
+                ax.set_ylabel(f"{val:.2f}\n\n{lbl}")
             else:
                 ax.set_ylabel(f"{val}\n\n{lbl}")
         # add the column values below the xlabels of the bottom row
@@ -3195,7 +3195,7 @@ class SummaryDisplay():
                 val = val.decode('utf-8')
             lbl = ax.get_xlabel()
             if isinstance(val, float):
-                ax.set_xlabel(f"{lbl}\n\n{val:.1f}")
+                ax.set_xlabel(f"{lbl}\n\n{val:.2f}")
             else:
                 ax.set_xlabel(f"{lbl}\n\n{val}")
         # adjust the subplots to fit the row or column label
