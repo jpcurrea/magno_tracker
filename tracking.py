@@ -815,8 +815,10 @@ class TrackingVideo():
             # axes[2].pcolormesh(bins, time_bins, graphs[2].T)
             # axes[2].set_title("Wing Ring")
         axes[-1].invert_yaxis()
-        axes[-1].set_xticks([-np.pi, -np.pi/2, 0, np.pi/2, np.pi],
-                        ["-$\pi$", "-$\pi$/2", "0", "$\pi$/2", "$\pi$"])
+        axes[-1].set_xticks(
+            [-np.pi, -np.pi/2, 0, np.pi/2, np.pi],
+            [r"-$\pi$", r"-$\pi$/2", r"0", r"$\pi$/2", r"$\pi$"]
+        )
         # format
         plt.tight_layout()
         plt.show()
@@ -1096,7 +1098,10 @@ class OfflineTracker():
                     sum_ts_ax.set_ylim(-np.pi/2, np.pi/2)
                     # format
                     sum_ts_ax.set_xticks([])
-                    sum_ts_ax.set_yticks([-np.pi/2, 0, np.pi/2], ["-$\dfrac{\pi}{2}$", "0", "$\dfrac{\pi}{2}$"])
+                    sum_ts_ax.set_yticks(
+                        [-np.pi/2, 0, np.pi/2],
+                        [r"-$\dfrac{\pi}{2}$", r"0", r"$\dfrac{\pi}{2}$"]
+                    )
                     sum_ts_ax.set_ylabel("Heading")
                     sbn.despine(ax=sum_ts_ax, bottom=True, trim=True)
                     # plot the velocity time series below position
@@ -2257,7 +2262,7 @@ class TrackingExperiment():
         for ax, ylim in zip(right_col, ylims):
             ax.set_ylim(ylim[0], ylim[1])
         # remove the bottom spines of both scatter axes
-        for ax, lbl in zip(scatter_axes, ["duration (s)", "peak speed ($\degree$/s)"]):
+        for ax, lbl in zip(scatter_axes, ["duration (s)", r"peak speed ($\degree$/s)"]):
             ax.set_xticks([])
             # ax.set_yticks([])
             sbn.despine(ax=ax, bottom=True, trim=False)
@@ -2275,8 +2280,14 @@ class TrackingExperiment():
         sbn.despine(ax=right_col[1], bottom=False, left=True, trim=True)
         # trim spines for the bottom ax
         bottom_ax.set_yticks(range(len(group_vals)), group_vals)
-        # bottom_ax.set_xticks([np.pi/16, np.pi/8, np.pi/4, np.pi/2, np.pi, 2*np.pi], ['$\pi$/16', '$\pi$/8', '$\pi$/4', '$\pi$/2', '$\pi$', '2$\pi$'])
-        bottom_ax.set_xticks([np.pi/64, np.pi/32, np.pi/16, np.pi/8, np.pi/4, np.pi/2, np.pi], ['$\pi$/64', '$\pi$/32', '$\pi$/16', '$\pi$/8', '$\pi$/4', '$\pi$/2', '$\pi$'])
+        # bottom_ax.set_xticks(
+        #     [np.pi/16, np.pi/8, np.pi/4, np.pi/2, np.pi, 2*np.pi],
+        #     [r'$\pi$/16', r'$\pi$/8', r'$\pi$/4', r'$\pi$/2', r'$\pi$', r'2$\pi$']
+        # )
+        bottom_ax.set_xticks(
+            [np.pi/64, np.pi/32, np.pi/16, np.pi/8, np.pi/4, np.pi/2, np.pi],
+            [r'$\pi$/64', r'$\pi$/32', r'$\pi$/16', r'$\pi$/8', r'$\pi$/4', r'$\pi$/2', r'$\pi$']
+        )
         # bottom_ax.set_xlim(xmin, xmax)
         # label the bottom axis
         bottom_ax.set_xlabel("magnitude")
@@ -2291,6 +2302,7 @@ class TrackingExperiment():
                      xlim=None, ylim=None, xticks=None, yticks=None, 
                      logx=False, logy=False, display=None,
                      summary_func=np.nanmean, xlabel=None, ylabel=None,
+                     color='k',
                      plot_type='line', bins=100, use_density=False,
                      confidence_interval=False, confidence=.84,
                      scale=1.5, plot_kwargs={}, **query_kwargs):
@@ -2345,7 +2357,18 @@ class TrackingExperiment():
         scale : float, default=1.5
             Scale parameter for setting the figsize.
         plot_kwargs : dict, default={}
-            Additional keyword arguments to pass to the plotting function.
+            Additional keyword arguments to pass to the plotting function. These include:
+                - 'color': the color of the lines in the trace plots
+                - 'alpha': the transparency of the lines in the trace plots
+                - 'linewidth': the width of the lines in the trace plots
+                - 'marker': the marker style for the scatter plots in the trace plots
+                - 'markersize': the size of the markers in the scatter plots in the trace plots
+                - 'edgecolor': the edge color of the markers in the scatter plots in the trace plots
+                - 'cmap': the colormap to use for the 2D histogram
+                - 'bins': the number of bins to use for the 2D histogram
+        color : str or tuple, default='k'
+            The color to use for the lines in the trace plots. If a colormap is provided
+            it will be used instead.
         **query_kwargs
             These get passed to the query 
         """
@@ -2415,7 +2438,12 @@ class TrackingExperiment():
         elif len(colors['rows']) == num_rows:
             color_arr = np.repeat(colors['rows'][:, np.newaxis], num_cols, axis=1)
         else:
-            color_arr = np.zeros((num_rows, num_cols, 3), dtype='uint8')
+            # color_arr = np.zeros((num_rows, num_cols, 3), dtype='uint8')
+            color_arr = np.zeros((num_rows, num_cols, 3), dtype='float')
+            if color != 'k':
+                # replace with the specified color (r, g, b)
+                # color_arr[:] = (255*np.array(color)).astype('uint8')
+                color_arr[:] = np.array(color)
         # test: check that the colors are aligned properly. we want this array shape to be num_rows X num_cols
         # add a row or column if plotting in the margins
         if bottom_margin:
@@ -2500,8 +2528,8 @@ class TrackingExperiment():
                             no_nans = no_nans * (np.isnan(new_ys) == False)
                             hist, xedges, yedges = np.histogram2d(new_xs[no_nans], new_ys[no_nans], bins=bins, density=use_density)
                             self.hist, self.xedges, self.yedges = hist, xedges, yedges
-                            # cmap = matplotlib.colors.LinearSegmentedColormap.from_list("", [(1,1,1), color])
-                            cmap = matplotlib.colors.LinearSegmentedColormap.from_list("", [(1,1,1), (0, 0, 0)])
+                            cmap = matplotlib.colors.LinearSegmentedColormap.from_list("", [(1,1,1), color])
+                            # cmap = matplotlib.colors.LinearSegmentedColormap.from_list("", [(1,1,1), (0, 0, 0)])
                             max_val = hist.max()
                             if 'vmax' in plot_kwargs:
                                 max_val = plot_kwargs['vmax']
