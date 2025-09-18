@@ -1,0 +1,9 @@
+camera
+h5py
+matplotlib
+numpy
+pandas
+scikit_image
+scikit_video
+scipy
+seaborn
