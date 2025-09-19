@@ -815,8 +815,10 @@ class TrackingVideo():
             # axes[2].pcolormesh(bins, time_bins, graphs[2].T)
             # axes[2].set_title("Wing Ring")
         axes[-1].invert_yaxis()
-        axes[-1].set_xticks([-np.pi, -np.pi/2, 0, np.pi/2, np.pi],
-                        ["-$\pi$", "-$\pi$/2", "0", "$\pi$/2", "$\pi$"])
+        axes[-1].set_xticks(
+            [-np.pi, -np.pi/2, 0, np.pi/2, np.pi],
+            [r"-$\pi$", r"-$\pi$/2", r"0", r"$\pi$/2", r"$\pi$"]
+        )
         # format
         plt.tight_layout()
         plt.show()
@@ -1096,7 +1098,10 @@ class OfflineTracker():
                     sum_ts_ax.set_ylim(-np.pi/2, np.pi/2)
                     # format
                     sum_ts_ax.set_xticks([])
-                    sum_ts_ax.set_yticks([-np.pi/2, 0, np.pi/2], ["-$\dfrac{\pi}{2}$", "0", "$\dfrac{\pi}{2}$"])
+                    sum_ts_ax.set_yticks(
+                        [-np.pi/2, 0, np.pi/2],
+                        [r"-$\dfrac{\pi}{2}$", r"0", r"$\dfrac{\pi}{2}$"]
+                    )
                     sum_ts_ax.set_ylabel("Heading")
                     sbn.despine(ax=sum_ts_ax, bottom=True, trim=True)
                     # plot the velocity time series below position
@@ -1325,7 +1330,10 @@ class TrackingExperiment():
             # pad with zeros for the first frame
             num_trials = vals.shape[0]
             vals_diffs = np.diff(vals, axis=-1)
-            vals_diffs = np.concatenate([np.zeros((num_trials, 1)), vals_diffs], axis=-1)
+            try:
+                vals_diffs = np.concatenate([np.zeros((num_trials, 1)), vals_diffs], axis=-1)
+            except:
+                breakpoint()
             speed = np.abs(vals_diffs)
             too_fast = speed > speed_limit
             if replace and np.any(too_fast):
@@ -1432,7 +1440,7 @@ class TrackingExperiment():
                       xlim=(-np.pi, np.pi), ylim=(.5, -.5), xticks=None, yticks=None, 
                       positive_amplitude=False, scale=1.5, reversal_split=False,
                       saccade_var='arr_relative', min_speed=350, max_speed=np.inf,
-                      mean_bins=25, bins=100,
+                      mean_bins=25, bins=100, line_color='k',
                       **query_kwargs):
         """Plot saccade data in one big grid as in the plot summary below.
         
@@ -1478,6 +1486,8 @@ class TrackingExperiment():
             The number of bins to use for bin averaging the saccade time series.
         min_speed, max_speed : float, default=350, np.inf
             The minimum and maximum peak speed to include in the saccades here.
+        line_color : str, default='k'
+            The color to use for plotting individual saccades.
         **query_kwargs
             These get passed to the query 
         """
@@ -1619,10 +1629,20 @@ class TrackingExperiment():
                 total_lines = []
                 start_amps, start_times = [], []
                 stop_amps, stop_times = [], []
+                line_color = np.array(matplotlib.colors.to_rgb(line_color))
+                # convert to hsv and then generate a low saturation higher value version of color
+                hsv = matplotlib.colors.rgb_to_hsv(line_color[np.newaxis, np.newaxis, :])
+                hsv[..., 2] *= 1.5
+                hsv[..., 1] *= .5
+                hsv[..., :3] = np.clip(hsv[..., :3], 0, 1)
+                muted_color = np.array(matplotlib.colors.hsv_to_rgb(hsv))
+                if muted_color.ndim > 1:
+                    muted_color = np.squeeze(muted_color)
                 for trial in self.trials:
                     lines_plotted = 0
                     # todo: fix the subsetting for bouts and saccades
-                    bouts = trial.query_bouts(sort_by=query_kwargs['sort_by'], subset=subset)
+                    # bouts = trial.query_bouts(sort_by=query_kwargs['sort_by'], subset=subset)
+                    bouts = trial.query(output='bouts', sort_by=query_kwargs['sort_by'], subset=subset)
                     resps = trial.query(output=output_var, sort_by=query_kwargs['sort_by'], subset=subset)
                     for bout in bouts:
                         # filter saccades
@@ -1674,8 +1694,8 @@ class TrackingExperiment():
                                 else:
                                     same_direction += [True]
                                     ax = col
-                                ax.plot(heading, time, color='gray', lw=.25, alpha=.25, zorder=1)
-                                ax.plot(heading[saccade.start:saccade.stop], time[saccade.start:saccade.stop], color='k', lw=.25, alpha=.5, zorder=2)
+                                ax.plot(heading, time, color=muted_color, lw=.25, alpha=.25, zorder=1)
+                                ax.plot(heading[saccade.start:saccade.stop], time[saccade.start:saccade.stop], color=line_color, lw=.25, alpha=.5, zorder=2)
                                 lines_plotted += 1
                                 # plot the stop coordinate
                                 stop_ind = saccade.stop
@@ -1764,7 +1784,7 @@ class TrackingExperiment():
                     saccade_bins_mean_pos, saccade_bins_sem_pos = np.array(saccade_bins_mean_pos), np.array(saccade_bins_sem_pos)
                     for saccade_bins_mean, sign in zip([saccade_bins_mean_pos, saccade_bins_mean_neg], signs):
                         ax.plot(saccade_bins_mean, time_bins, color='w', zorder=3, lw=2)
-                        ax.plot(saccade_bins_mean, time_bins, color=color, zorder=4, linestyle=['-', ':'][int(sign > 0)])
+                        ax.plot(saccade_bins_mean, time_bins, color=line_color, zorder=4, linestyle=['-', ':'][int(sign > 0)])
                     # plot mean +/- SEM
                     if right_margin:
                         for sign, saccade_bins_mean, saccade_bins_sem in zip(
@@ -1852,6 +1872,7 @@ class TrackingExperiment():
                               heading_var='camera_heading', reference_var=None, saccade_var='amplitude',
                               bins=21, min_speed=350, max_speed=np.inf, scatter=False, 
                               xlim=None, ylim=None, xticks=None, yticks=None,
+                              jitter_std=0.1,
                               **query_kwargs):
         """Plot saccade position (x) and amplitude (y) in a grid as in the plot summary below.
         
@@ -1881,6 +1902,8 @@ class TrackingExperiment():
             The minimum and maximum peak speed to include in the saccades here.
         scatter : bool, default=False
             Whether to plot the data as a scatter plot or a 2D histogram.
+        jitter_std : float, default=0.05
+            The standard deviation of the jitter to add to each point for visualization.
         **query_kwargs
             These get passed to the query 
         """
@@ -2104,7 +2127,7 @@ class TrackingExperiment():
         # add the sample size to the first subplot
         self.display.fig.suptitle(f"N={sample_size}")
 
-    def main_sequence_analysis(self, group_var='bg_gain', cmap='viridis', scale=1, subset={}):
+    def main_sequence_analysis(self, group_var='bg_gain', cmap='viridis', scale=1, subset={}, **plot_kwargs):
         """Plot the relation between saccade peak velocity, duration, and magnitude. 
         
         Parameters
@@ -2117,7 +2140,12 @@ class TrackingExperiment():
             Scale parameter for determining the figure size. 1 results in a 3x5 figure.
         subset : dict, default={}
             Optionally filter data before plotting. See TrackingTrial.query for more info.
+        **plot_kwargs
+            Additional keyword arguments passed to plt.subplots.
         """
+        jitter_std = .1
+        if 'jitter_std' in plot_kwargs:
+            jitter_std = plot_kwargs.pop('jitter_std')
         # allow for filtering of the data using subset
         group_vals = np.unique(self.query(output=group_var, sort_by=group_var, subset=subset))
         # get the color for each group
@@ -2147,10 +2175,10 @@ class TrackingExperiment():
         dur_meds, speed_meds, mag_meds = [], [], []
         for num, (group, color) in enumerate(zip(group_vals, colors)):
             subset[group_var] = group
-            peak_velo = abs(np.array(self.query(output='saccade_peak_velocity', sort_by=group_var, subset=subset)))
+            peak_velo = abs(np.array(self.query(output='saccade_peak_velocity', sort_by=group_var, subset=subset, skip_empty=True)))
             peak_velo *= 180. / np.pi
-            duration = np.array(self.query(output='saccade_duration', sort_by=group_var, subset=subset))
-            amplitude = abs(np.array(self.query(output='saccade_amplitude', sort_by=group_var, subset=subset)))
+            duration = np.array(self.query(output='saccade_duration', sort_by=group_var, subset=subset, skip_empty=True))
+            amplitude = abs(np.array(self.query(output='saccade_amplitude', sort_by=group_var, subset=subset, skip_empty=True)))
             sizes = np.unique([arr.size for arr in amplitude])
             same_sizes = len(sizes) == 1
             # todo: get the 95% CI of the mean duration, amplitude, and speed
@@ -2169,11 +2197,21 @@ class TrackingExperiment():
             for ys, ax, right_ax in zip([duration, peak_velo], scatter_axes, right_col):
                 # scatterplot for the main sequence
                 # check if the subsets are of different sizes
+                alpha, marker, edgecolor = .5, '.', 'none'
+                if 'alpha' in plot_kwargs:
+                    alpha = plot_kwargs['alpha']
                 if len(sizes) > 1:
                     for yvals, amp in zip(ys, amplitude):
-                        ax.scatter(amp, yvals, color=color, marker='.', edgecolor='none', alpha=.5)
+                        # add y-jitter
+                        yjitter = np.random.normal(0, jitter_std, size=len(yvals))
+                        ax.scatter(amp, yvals + yjitter, color=color, marker=marker, edgecolor=edgecolor, alpha=alpha)
                 else:
-                    ax.scatter(amplitude, ys, color=color, marker='.', edgecolor='none', alpha=.5)
+                    # remove unnecessary nesting
+                    ys = np.squeeze(ys)
+                    amplitude = np.squeeze(amplitude)
+                    # add y-jitter
+                    yjitter = np.random.normal(0, jitter_std, size=len(ys))
+                    ax.scatter(amplitude, ys + yjitter, color=color, marker=marker, edgecolor=edgecolor, alpha=alpha)
                 # jitterplot of yvalues in the right axis
                 # xjitter = np.random.normal(0, .1, size=len(ys))
                 # xvals = num + xjitter
@@ -2184,44 +2222,60 @@ class TrackingExperiment():
             # yvals = num + yjitter
             # bottom_ax.scatter(amplitude, yvals, color=color, marker='.', edgecolor='none', alpha=.5)
         # plot the medians:
-        dur_meds, speed_meds, mag_meds = np.array(dur_meds), np.array(speed_meds), np.array(mag_meds)
+        # dur_meds, speed_meds, mag_meds = np.array(dur_meds), np.array(speed_meds), np.array(mag_meds)
         # get the bootstrapped 95% CI for each group val by randomly sampling on a per-subject basis
         dur_lows, dur_mids, dur_highs = [], [], []
         speed_lows, speed_mids, speed_highs = [], [], []
         mag_lows, mag_mids, mag_highs = [], [], []
-        num_groups, num_trials = dur_meds.shape
+        num_groups = len(dur_meds)
+        # num_groups, num_trials = dur_meds.shape
         for lows, mids, highs, vals in zip(
             [dur_lows, speed_lows, mag_lows], 
             [dur_mids, speed_mids, mag_mids],
             [dur_highs, speed_highs, mag_highs],
             [dur_meds, speed_meds, mag_meds]):
-            # vals has shape len(group_vals) x len(self.trials)
-            inds = np.random.randint(0, num_trials, size=(len(self.trials), 10000))
-            # note: each vals has a mean value per subject
-            pseudo_distro = vals[:, inds]
-            pseudo_distro = np.nanmean(pseudo_distro, axis=1)
-            low, mid, high = np.percentile(pseudo_distro, [8, 50, 92], axis=-1)
-            mids += [mid]
-            lows += [low]
-            highs += [high]
+            lows_per_group, mids_per_group, highs_per_group = [], [], []
+            for arr in vals:
+                num_trials = len(arr)
+                # vals has shape len(group_vals) x len(self.trials)
+                inds = np.random.randint(0, num_trials, size=(num_trials, 10000))
+                # note: each vals has a mean value per subject
+                pseudo_distro = arr[inds]
+                pseudo_distro = np.nanmean(pseudo_distro, axis=1)
+                low, mid, high = np.nanpercentile(pseudo_distro, [8, 50, 92], axis=-1)
+                mids_per_group += [mid]
+                lows_per_group += [low]
+                highs_per_group += [high]
+            lows += [lows_per_group]
+            mids += [mids_per_group]
+            highs += [highs_per_group]
         dur_lows, dur_mids, dur_highs = dur_lows[0], dur_mids[0], dur_highs[0]
         speed_lows, speed_mids, speed_highs = speed_lows[0], speed_mids[0], speed_highs[0]
         mag_lows, mag_mids, mag_highs = mag_lows[0], mag_mids[0], mag_highs[0]
         # dur_meds, speed_meds, mag_meds = dur_meds.mean(-1), speed_meds.mean(-1), mag_meds.mean(-1)
         for ax, lows, meds, highs, vals in zip(
             right_col[:2], [dur_lows, speed_lows], [dur_mids, speed_mids], [dur_highs, speed_highs], [dur_meds, speed_meds]):
-            for val in vals.T:
-                ax.plot(range(len(val)), val, color='gray', alpha=.25, zorder=2)
-                ax.scatter(range(len(val)), val, c=colors, edgecolors='none', marker='o', zorder=3, alpha=.5)
-            for num, (low, meds, high) in enumerate(zip(lows, meds, highs)):
+            for num, (low, meds, high, val, color) in enumerate(zip(lows, meds, highs, vals, colors)):
+                # add some x-jitter to the points
+                xjitter = np.random.normal(0, jitter_std, size=len(val))
+                xvals = np.repeat(num, len(val)) + xjitter
+                # ax.plot(xvals, val, color='gray', alpha=.25, zorder=2)
+                # grab plot_kwargs if present, defaulting to:
+                alpha, marker, edgecolor = .5, 'o', 'none'
+                for var in ['alpha', 'marker', 'edgecolor']:
+                    if var in plot_kwargs:
+                        exec(f"{var} = plot_kwargs['{var}']")
+                ax.scatter(xvals, val, c=color, edgecolors=edgecolor, marker=marker, zorder=3, alpha=alpha)
                 ax.plot([num, num], [low, high], color='k', zorder=4)
                 ax.scatter(num, np.nanmean(meds, axis=-1), color='k', marker='o', edgecolors='w', linewidths=2, zorder=5)
         lows, meds, highs = mag_lows, mag_meds, mag_highs
         ax = bottom_ax
-        for vals in meds.T:
-            ax.plot(vals, range(len(vals)), color='gray', alpha=.25, zorder=2)
-            ax.scatter(vals, range(len(vals)), c=colors, edgecolors='none', marker='o', zorder=3, alpha=.5)
-        for num, (low, meds, high) in enumerate(zip(lows, meds, highs)):
+        for num, (low, meds, high, color) in enumerate(zip(lows, meds, highs, colors)):
+            # add some y-jitter to the points
+            yjitter = np.random.normal(0, .1, size=len(meds))
+            yvals = np.repeat(num, len(meds)) + yjitter
+            # ax.plot(meds, yvals, color='gray', alpha=.25, zorder=2)
+            ax.scatter(meds, yvals, c=color, edgecolors='none', marker='o', zorder=3, alpha=.5)
             ax.plot([low, high], [num, num], color='k', zorder=4)
             ax.scatter(np.nanmean(meds, axis=-1), num, color='k', marker='o', edgecolors='w', linewidths=2, zorder=5)
         # formatting:
@@ -2249,7 +2303,7 @@ class TrackingExperiment():
         # for ax in scatter_axes:
         #     ax.set_xlim(xmin, np.pi)
         # xmin = np.pi / 16
-        xmin = np.pi/128
+        xmin = 1 * np.pi / 180
         xmax = 2*np.pi
         for ax in np.append(scatter_axes, [bottom_ax]):
             ax.set_xlim(xmin, xmax)
@@ -2257,8 +2311,9 @@ class TrackingExperiment():
         for ax, ylim in zip(right_col, ylims):
             ax.set_ylim(ylim[0], ylim[1])
         # remove the bottom spines of both scatter axes
-        for ax, lbl in zip(scatter_axes, ["duration (s)", "peak speed ($\degree$/s)"]):
-            ax.set_xticks([])
+        for ax, lbl in zip(scatter_axes, ["duration (s)", r"peak speed ($\degree$/s)"]):
+            # ax.set_xticks([])
+            ax.set_xticklabels([])
             # ax.set_yticks([])
             sbn.despine(ax=ax, bottom=True, trim=False)
             # label the y-axis
@@ -2269,14 +2324,26 @@ class TrackingExperiment():
         sbn.despine(ax=right_col[0], bottom=True, left=True, trim=True)
         # remove the left spines of the top right axis
         right_col[1].set_xticks(range(len(group_vals)), group_vals)
-        right_col[1].set_yticks([])
+        # right_col[1].set_yticks([])
+        right_col[1].set_yticklabels([])
         # label the x-axis
         right_col[1].set_xlabel(group_var.replace("_", " "))
         sbn.despine(ax=right_col[1], bottom=False, left=True, trim=True)
         # trim spines for the bottom ax
         bottom_ax.set_yticks(range(len(group_vals)), group_vals)
-        # bottom_ax.set_xticks([np.pi/16, np.pi/8, np.pi/4, np.pi/2, np.pi, 2*np.pi], ['$\pi$/16', '$\pi$/8', '$\pi$/4', '$\pi$/2', '$\pi$', '2$\pi$'])
-        bottom_ax.set_xticks([np.pi/64, np.pi/32, np.pi/16, np.pi/8, np.pi/4, np.pi/2, np.pi], ['$\pi$/64', '$\pi$/32', '$\pi$/16', '$\pi$/8', '$\pi$/4', '$\pi$/2', '$\pi$'])
+        # bottom_ax.set_xticks(
+        #     [np.pi/16, np.pi/8, np.pi/4, np.pi/2, np.pi, 2*np.pi],
+        #     [r'$\pi$/16', r'$\pi$/8', r'$\pi$/4', r'$\pi$/2', r'$\pi$', r'2$\pi$']
+        # )
+        xticks = np.pi / np.array([64, 32, 16, 8, 4, 2, 1])
+        bottom_ax.set_xticks(
+            xticks,
+            [r'$\pi$/64', r'$\pi$/32', r'$\pi$/16', r'$\pi$/8', r'$\pi$/4', r'$\pi$/2', r'$\pi$']
+        )
+        bottom_ax.set_xticks(
+            xticks,
+            np.around(xticks * 180 / np.pi, 1).astype(str),
+        )
         # bottom_ax.set_xlim(xmin, xmax)
         # label the bottom axis
         bottom_ax.set_xlabel("magnitude")
@@ -2291,6 +2358,7 @@ class TrackingExperiment():
                      xlim=None, ylim=None, xticks=None, yticks=None, 
                      logx=False, logy=False, display=None,
                      summary_func=np.nanmean, xlabel=None, ylabel=None,
+                     color='k',
                      plot_type='line', bins=100, use_density=False,
                      confidence_interval=False, confidence=.84,
                      scale=1.5, plot_kwargs={}, **query_kwargs):
@@ -2345,7 +2413,18 @@ class TrackingExperiment():
         scale : float, default=1.5
             Scale parameter for setting the figsize.
         plot_kwargs : dict, default={}
-            Additional keyword arguments to pass to the plotting function.
+            Additional keyword arguments to pass to the plotting function. These include:
+                - 'color': the color of the lines in the trace plots
+                - 'alpha': the transparency of the lines in the trace plots
+                - 'linewidth': the width of the lines in the trace plots
+                - 'marker': the marker style for the scatter plots in the trace plots
+                - 'markersize': the size of the markers in the scatter plots in the trace plots
+                - 'edgecolor': the edge color of the markers in the scatter plots in the trace plots
+                - 'cmap': the colormap to use for the 2D histogram
+                - 'bins': the number of bins to use for the 2D histogram
+        color : str or tuple, default='k'
+            The color to use for the lines in the trace plots. If a colormap is provided
+            it will be used instead.
         **query_kwargs
             These get passed to the query 
         """
@@ -2363,15 +2442,13 @@ class TrackingExperiment():
         col_vals = np.unique(np.concatenate(col_vals))
         new_row_vals, new_col_vals = [], []
         for num, (vals, storage) in enumerate(zip([row_vals, col_vals], [new_row_vals, new_col_vals])):
+            # non_nans = np.ones_like(vals, dtype=bool)
             if vals.dtype.type == np.bytes_:
                 non_nans = vals != b'nan'
-            elif vals.dtype.type in [np.string_, np.str_]:
+            elif vals.dtype.type in [np.bytes_, np.str_, ]:
                 non_nans = vals != 'nan'
             else:
-                try:
-                    non_nans = np.isnan(vals) == False
-                except:
-                    breakpoint()
+                non_nans = np.isnan(vals) == False
             storage += [arr for arr in vals[non_nans]]
         row_vals, col_vals = np.array(new_row_vals), np.array(new_col_vals)
         num_rows, num_cols = len(row_vals), len(col_vals)
@@ -2415,7 +2492,12 @@ class TrackingExperiment():
         elif len(colors['rows']) == num_rows:
             color_arr = np.repeat(colors['rows'][:, np.newaxis], num_cols, axis=1)
         else:
-            color_arr = np.zeros((num_rows, num_cols, 3), dtype='uint8')
+            # color_arr = np.zeros((num_rows, num_cols, 3), dtype='uint8')
+            color_arr = np.zeros((num_rows, num_cols, 3), dtype='float')
+            if color != 'k':
+                # replace with the specified color (r, g, b)
+                # color_arr[:] = (255*np.array(color)).astype('uint8')
+                color_arr[:] = np.array(color)
         # test: check that the colors are aligned properly. we want this array shape to be num_rows X num_cols
         # add a row or column if plotting in the margins
         if bottom_margin:
@@ -2500,8 +2582,8 @@ class TrackingExperiment():
                             no_nans = no_nans * (np.isnan(new_ys) == False)
                             hist, xedges, yedges = np.histogram2d(new_xs[no_nans], new_ys[no_nans], bins=bins, density=use_density)
                             self.hist, self.xedges, self.yedges = hist, xedges, yedges
-                            # cmap = matplotlib.colors.LinearSegmentedColormap.from_list("", [(1,1,1), color])
-                            cmap = matplotlib.colors.LinearSegmentedColormap.from_list("", [(1,1,1), (0, 0, 0)])
+                            cmap = matplotlib.colors.LinearSegmentedColormap.from_list("", [(1,1,1), color])
+                            # cmap = matplotlib.colors.LinearSegmentedColormap.from_list("", [(1,1,1), (0, 0, 0)])
                             max_val = hist.max()
                             if 'vmax' in plot_kwargs:
                                 max_val = plot_kwargs['vmax']
@@ -3144,7 +3226,7 @@ class SummaryDisplay():
                 val = val.decode('utf-8')
             lbl = ax.get_ylabel()
             if isinstance(val, (float, int)):
-                ax.set_ylabel(f"{val:.1f}\n\n{lbl}")
+                ax.set_ylabel(f"{val:.2f}\n\n{lbl}")
             else:
                 ax.set_ylabel(f"{val}\n\n{lbl}")
         # add the column values below the xlabels of the bottom row
@@ -3159,7 +3241,7 @@ class SummaryDisplay():
                 val = val.decode('utf-8')
             lbl = ax.get_xlabel()
             if isinstance(val, float):
-                ax.set_xlabel(f"{lbl}\n\n{val:.1f}")
+                ax.set_xlabel(f"{lbl}\n\n{val:.2f}")
             else:
                 ax.set_xlabel(f"{lbl}\n\n{val}")
         # adjust the subplots to fit the row or column label
@@ -3498,8 +3580,8 @@ class TrackingTrial():
                 bout.process_saccades(**saccade_kwargs)
                 bout.get_stats()
                 self.bouts += [bout]
-            if len(self.bouts) < 5:
-                breakpoint()
+            # if len(self.bouts) < 5:
+            #     breakpoint()
             self.bouts = np.array(self.bouts)
             # use pickle to save the list of bouts for next time 
             bout_fn = self.filename.replace(".h5", "_bouts.pkl")
@@ -4143,8 +4225,8 @@ class Bout():
             #     return np.sum((arr[0] - vals_filtered)**2)
             # res = minimize(cost_function, kalman_filter_params, method='Nelder-Mead', bounds=((0, 1000000), (1, 100)), options={'maxiter': 1000})
             # vals_filtered = np.unwrap(kfilter.generate_vals(res.x[0], res.x[1]*10), axis=-1)
-            vals_filtered = butterworth_filter(arr, low=0, high=10, sample_rate=self.framerate)
-            vals_filtered_rev = butterworth_filter(arr[:, ::-1], low=0, high=10, sample_rate=self.framerate)
+            vals_filtered = butterworth_filter(arr, low=0, high=15, sample_rate=self.framerate)
+            vals_filtered_rev = butterworth_filter(arr[:, ::-1], low=0, high=15, sample_rate=self.framerate)
             vals_filtered = (vals_filtered + vals_filtered_rev[:, ::-1]) / 2
             vals_filtered = np.unwrap(vals_filtered[0], axis=-1)
             # plt.plot(range(len(arr[0])), arr[0]) 
@@ -4159,11 +4241,11 @@ class Bout():
             # find peak velocities using a peak finding algorithm
             # find the number of frames corresponding to 100 ms, because saccades are 
             # unlikely to occur that frequently
-            dist = .5 * self.framerate
-            peaks = scipy.signal.find_peaks(np.abs(velocity), distance=dist/4, width=3, prominence=prominance, wlen=dist)
-            # # test:
+            dist = .25 * self.framerate
+            peaks = scipy.signal.find_peaks(np.abs(velocity), distance=dist/4, width=3, prominence=prominance, wlen=dist, )
+            # test:
             # fig, axes = plt.subplots(nrows=2, sharex=True)
-            # axes[0].plot(arr[0])
+            # axes[0].plot(vals_filtered)
             # # plt.sca(axes[1])
             # plt.plot(velocity, zorder=2)
             # velos = velocity[peaks[0]]
@@ -4172,15 +4254,22 @@ class Bout():
             # # plt.scatter(neg_peaks[0], velos, marker='o', color=red, zorder=3)
             # for lb, ub in zip(peaks[1]['left_ips'], peaks[1]['right_ips']): axes[0].axvspan(lb, ub, color='gray', alpha=.3, zorder=1); axes[1].axvspan(lb, ub, color='gray', alpha=.3, zorder=1)
             # plt.show()
-            # remove outlier peaks
+            # # remove outlier peaks
             starts, stops = peaks[1]['left_ips'], peaks[1]['right_ips']
-            # find the rolling CI of the mean based on the past 5 velocities
-            # series = pd.Series(velocity)
+            # # find the rolling CI of the mean based on the past 5 velocities
+            # series = pd.Series(np.abs(velocity))
             # window = 5
-            # rolling_mean = series.rolling(window, center=False).mean()
-            # rolling_median = series.rolling(window, center=True).median()
+            # # rolling_mean = series.rolling(window, center=False).mean()
+            # # rolling_median = series.rolling(window, center=True).median()
             # rolling_std = series.rolling(window, center=False).std()
-            # lower, upper = velocity - 2*rolling_std, velocity + 2*rolling_std
+            # lower, upper = - 2*rolling_std, 2*rolling_std
+            # # plot the velocity and the lower and upper bounds
+            # fig = plt.figure()
+            # plt.plot(np.abs(velocity), color='k', label='velocity')
+            # plt.plot(lower, color='red', label='lower bound')
+            # plt.plot(upper, color='green', label='upper bound')
+            # plt.show()
+
             # lower, upper = lower[:-1], upper[:-1]
             # upward = velocity[1:] > upper
             # downward = velocity[1:] < lower
@@ -4271,13 +4360,15 @@ class Bout():
                 if saccade_kwargs['display']:
                     fig, axes = plt.subplots(nrows=3, sharex=True)
                     axes[0].plot(self.time, np.gradient(velocity), color='k', marker='.')
-                    axes[1].plot(self.time, velocity, color='k', marker='.')
+                    axes[1].plot(self.time, velocity * 180 / np.pi, color='k', marker='.')
                     axes[2].plot(self.time, arr[0])
                     # axes[1].fill_between(self.time + self.time[1], velocity - 2*rolling_std, velocity + 2*rolling_std, color='gray')
                     # axes[0].plot(self.time, rolling_median)
                     for peak in peaks[0]: axes[1].axvline(self.time[peak], color='r')
-                    for saccade in self.saccades: axes[2].axvspan(self.time[saccade.start], self.time[saccade.stop], color='gray', alpha=.2)
-                    for start, stop in zip(np.round(starts).astype(int), np.round(stops).astype(int)): plt.axvspan(self.time[start], self.time[stop], color='gray', alpha=.2)
+                    for saccade in self.saccades: axes[2].axvspan(self.time[saccade.start], self.time[saccade.stop], color=blue, alpha=.2)
+                    for start, stop in zip(np.round(starts).astype(int), np.round(stops).astype(int)): axes[0].axvspan(self.time[start], self.time[stop], color='gray', alpha=.2)
+                    for start, stop in zip(np.round(starts).astype(int), np.round(stops).astype(int)): axes[1].axvspan(self.time[start], self.time[stop], color='gray', alpha=.2)
+                    for start, stop in zip(np.round(starts).astype(int), np.round(stops).astype(int)): axes[2].axvspan(self.time[start], self.time[stop], color='gray', alpha=.2)
                     plt.show()
                     breakpoint()
         elif kalman_method:
@@ -4383,7 +4474,6 @@ class Bout():
             for saccade in self.saccades:
                 plt.axvspan(saccade.start, saccade.stop, color='gray', alpha=.25)
             plt.show()
-            breakpoint()
         else:
             # from Bender and Dickinson (2006)
             # 0. median filter
@@ -4596,10 +4686,14 @@ class Saccade():
         # calculate the amplitude and duration  
         # self.amplitude = self.arr.ptp()
         self.amplitude = self.stop_angle - self.start_angle
-        self.duration = (self.stop - self.start) / self.framerate
+        self.duration = self.stop_time - self.start_time
         # store the velocity time series
         self.velocity = np.gradient(self.original_arr)
         self.velocity *= self.framerate
+        # get the peak index and velocity
+        peak_ind = np.argmax(abs(self.velocity[self.start: self.stop+1]))
+        self.peak_ind = peak_ind + self.start
+        self.peak_velocity = self.velocity[self.peak_ind]
         # store the acceleration time series
         self.acceleration = np.gradient(self.velocity)
         self.acceleration *= self.framerate
@@ -4620,6 +4714,7 @@ class Saccade():
             # for the start of the saccade
             velos_included = self.velocity[start_frame:self.start]
             # assume the velocity is normally distributed
+            self.success = False
             if len(velos_included) > 0:
                 velo_mean, velo_std = np.nanmean(velos_included), np.nanstd(velos_included)
                 velo_floor, velo_ceiling = velo_mean - 2 * velo_std, velo_mean + 2 * velo_std
@@ -4638,49 +4733,80 @@ class Saccade():
                     axes[1].axhline(velo_ceiling * 180 / np.pi, color='k', linestyle='--')
                     axes[1].axhline(velo_floor * 180 / np.pi, color='k', linestyle='--')
                     axes[2].axvspan(0, self.duration, color='gray', alpha=.25)
-                    # plt.show()
+                    # todo: why are the start and stop time points offset from those that I input?
                 # todo: get the initial velocity and use this to update the start and stop points
                 # the new start is the frame before the first frame with a high speed
                 # the new stop is the first frame below threshold
                 self.success = True
                 if baseline_comparison:
-                    breakpoint()
                     offset = -5
                     xmin = max(0, self.start + offset)
                     xmax = min(len(self.velocity), self.stop + 10)
                     if self.peak_velocity > 0:
-                        saccading = np.where(self.velocity[xmin: xmax] > velo_ceiling)[0]
-                        not_saccading = np.where(self.velocity[xmin: xmax] <= velo_ceiling)[0]
+                        saccading = np.where(self.velocity[xmin: xmax] > velo_ceiling)
+                        not_saccading = np.where(self.velocity[xmin: xmax] <= velo_ceiling)
                     else:
-                        saccading = np.where(self.velocity[xmin: xmax] < velo_floor)[0]
-                        not_saccading = np.where(self.velocity[xmin: xmax] >= velo_floor)[0]
-                    not_saccading += self.start + offset
-                    saccading += self.start + offset
+                        saccading = np.where(self.velocity[xmin: xmax] < velo_floor)
+                        not_saccading = np.where(self.velocity[xmin: xmax] >= velo_floor)
+                    saccading, not_saccading = saccading[0], not_saccading[0]
+                    not_saccading += xmin
+                    saccading += xmin
+                    # check if there are any breaks in the saccading frames. We want to use the segment that still includes the peak velocity
+                    diffs = np.diff(saccading)
+                    if np.any(diffs > 1):
+                        # split up saccading into segments including only 
+                        splits = np.where(diffs > 1)[0] + 1
+                        saccading_split = np.split(saccading, splits)
+                        # use just the segment that includes the start index
+                        peak_included = [sacc for sacc in saccading_split if self.peak_ind in sacc]
+                        if len(peak_included) > 0:
+                            saccading = peak_included[0]
+                        else:
+                            saccading = []
                     if len(saccading) > 0:
-                        self.start = saccading.min()
-                        self.start_angle = self.original_arr[self.start]
-                    # else:
-                    #     self.success = False
-                    if len(saccading) > 0 and np.any(not_saccading > self.start):
-                        self.stop = not_saccading[not_saccading > self.start].min()
-                        self.stop_angle = self.original_arr[self.stop]
-                    self.duration = (self.stop - self.start) / self.framerate
-                    if self.stop - self.start < 2 or self.duration > 1.5:
+                        self.start, self.stop = saccading.min(), min(saccading.max() + 1, len(self.original_arr) - 1)
+                        self.start_angle, self.stop_angle = self.original_arr[self.start], self.original_arr[self.stop]
+                        # re-calculate the saccade parameters
+                        # subset the original array to the new start and stop points
+                        self.arr = np.copy(self.original_arr)[self.start:self.stop+1]
+                        # re-calculate the time series
+                        self.time = np.arange(len(self.original_arr)).astype(float)
+                        self.time -= self.start
+                        self.time /= self.framerate
+                        # re-calculate the start and stop times
+                        self.start_time, self.stop_time = self.start / self.framerate, self.stop / self.framerate
+                        # re-calculate the peak velocity and relative time
+                        try:
+                            peak_ind = np.argmax(abs(self.velocity[self.start: self.stop]))
+                        except:
+                            breakpoint()
+                        self.peak_velocity = self.velocity[self.start: self.stop][peak_ind]
+                        # re-calculate the relative time
+                        self.peak_time = self.time[self.start: self.stop][peak_ind]
+                        self.relative_time = np.copy(self.time)
+                        self.relative_time -= self.peak_time
+                        # re-calculate the amplitude
+                        self.amplitude = self.stop_angle - self.start_angle
+                        # re-calculate the relative heading array
+                        self.arr_relative = self.original_arr - self.start_angle
+                        # re-calculate the duration
+                        self.duration = (self.stop - self.start) / self.framerate
+                        if self.stop - self.start < 2 or self.duration > 1.5:
+                            self.success = False
+                        # optionally, check if the new peak velocity is within the bounds
+                        if baseline_test:
+                            # check if peak velocity is outside of the velocity bounds
+                            if self.peak_velocity < 0 and self.peak_velocity > velo_floor:
+                                self.success = False
+                            elif self.peak_velocity > 0 and self.peak_velocity < velo_ceiling:
+                                self.success = False
+                        if self.success and display:
+                            # plot the new saccade spans
+                            axes[0].axvspan(self.time[self.start], self.time[self.stop], color='gray', alpha=.5)
+                            axes[1].axvspan(self.time[self.start], self.time[self.stop], color='gray', alpha=.5)
+                            axes[2].axvspan(self.time[self.start], self.time[self.stop], color='gray', alpha=.5)
+                    else:
                         self.success = False
-                    self.amplitude = self.stop_angle - self.start_angle
-                if baseline_test:
-                    # check if peak velocity is outside of the velocity bounds
-                    if self.peak_velocity < 0 and self.peak_velocity > velo_floor:
-                        self.success = False
-                    elif self.peak_velocity > 0 and self.peak_velocity < velo_ceiling:
-                        self.success = False
-                if self.success and display:
-                    # plot the new saccade spans
-                    axes[0].axvspan(self.time[self.start], self.time[self.stop], color='gray', alpha=.5)
-                    axes[1].axvspan(self.time[self.start], self.time[self.stop], color='gray', alpha=.5)
-                    axes[2].axvspan(self.time[self.start], self.time[self.stop], color='gray', alpha=.5)
-            else:
-                self.success = False
         else:
             peak_ind = np.argmax(abs(self.velocity[self.start: self.stop]))
             self.peak_velocity = self.velocity[self.start: self.stop][peak_ind]
