@@ -1870,7 +1870,7 @@ class TrackingExperiment():
                               fig=None, right_margin=True, bottom_margin=True, scale=1.5, 
                               reversal_split=False, output='start', 
                               heading_var='camera_heading', reference_var=None, saccade_var='amplitude',
-                              bins=21, min_speed=350, max_speed=np.inf, scatter=False, 
+                              bins=21, min_speed=50, max_speed=3000, scatter=False, 
                               xlim=None, ylim=None, xticks=None, yticks=None,
                               jitter_std=0.1,
                               **query_kwargs):
@@ -1917,11 +1917,11 @@ class TrackingExperiment():
         subset = copy.copy(query_kwargs['subset'])
         # get the values used for coloring each subplot
         if row_var is not None:
-            row_vals = self.query(output=row_var, sort_by=row_var, subset=subset)
+            row_vals = self.query(output=row_var, sort_by=row_var, subset=subset, skip_empty=True, same_size=False)
         else:
             row_vals = [None]
         if col_var is not None:
-            col_vals = self.query(output=col_var, sort_by=col_var, subset=subset)
+            col_vals = self.query(output=col_var, sort_by=col_var, subset=subset, skip_empty=True, same_size=False)
         else:
             col_vals = [None]
         assert len(col_vals) > 0 or len(row_vals) > 0, "The subset is empty!"
@@ -1932,7 +1932,7 @@ class TrackingExperiment():
         for num, (vals, storage) in enumerate(zip([row_vals, col_vals], [new_row_vals, new_col_vals])):
             if vals.dtype.type == np.bytes_:
                 non_nans = vals != b'nan'
-            elif vals.dtype.type in [np.string_, np.str_]:
+            elif vals.dtype.type == np.str_:
                 non_nans = vals != 'nan'
             else:
                 non_nans = np.isnan(vals) == False
@@ -2095,8 +2095,39 @@ class TrackingExperiment():
                     if scatter:
                         ax.scatter(position, amplitude, marker='o', alpha=.25, color='k', edgecolor='none')
                     else:
-                        ax.hist2d(position, amplitude, bins=bins, 
-                            range=[[xlim[0], xlim[1]],[-max_speed * np.pi / 180, max_speed * np.pi / 180]], cmap='Greys')
+                        if xlim is None:
+                            xlim = (-180, 180)
+                        if ylim is None:
+                            if saccade_var == 'amplitude':
+                                ylim = (-180, 180)
+                            elif saccade_var == 'peak_velocity':
+                                ylim = (-max_speed, max_speed)
+                        # if the saccade_var is amplitude, convert to degrees
+                        if saccade_var == 'amplitude':
+                            amplitude *= 180 / np.pi
+                        ax.hist2d(position * 180 / np.pi, amplitude, bins=bins, 
+                            range=[[xlim[0], xlim[1]],[ylim[0], ylim[1]]], cmap='Greys')
+                    # let's also get the correlation between position and amplitude and display it
+                    valid = np.isfinite(position) * np.isfinite(amplitude)
+                    if np.sum(valid) > 2:
+                        # corr, pval = scipy.stats.pearsonr(position[valid], amplitude[valid])
+                        # spearman_corr, spearman_pval = scipy.stats.spearmanr(position[valid], amplitude[valid])
+                        corr = mardia_circ_lin(position[valid]*np.pi/180, amplitude[valid])
+                        # use bootstrapping to get a p-value
+                        # so, let's make 10000 re-samples with replacement of the amplitude and position data
+                        num_samples = len(position[valid])
+                        reps = 10000
+                        rand_inds = np.random.randint(0, num_samples, (reps, num_samples))
+                        rand_position, rand_amplitude = position[valid][rand_inds], amplitude[valid][rand_inds]
+                        rand_corrs = np.array([mardia_circ_lin(rand_position[i]*np.pi/180, rand_amplitude[i]) for i in range(reps)])
+                        # get the 95% confidence interval of the null distribution
+                        lower, mid, upper = np.percentile(rand_corrs, [2.5, 50, 97.5])
+                        if mid < 0:
+                            pval = np.sum(rand_corrs <= corr) / reps
+                        else:
+                            pval = np.sum(rand_corrs >= corr) / reps
+                        # plot the correlation, it's confidence interval, and p-value
+                        ax.set_title(f"r={corr:.2f} ({lower:.2f}, {upper:.2f}) {sigAsterisk(pval)}", fontsize=8)
                     # ax.set_xlabel(None)
                     # ax.set_ylabel(None)
                     # ax.set_xlabel('position')
@@ -2125,9 +2156,9 @@ class TrackingExperiment():
             self.display.corner_ax.axis('off')
         self.display.label_margins(row_vals, row_var, col_vals, col_var)
         # add the sample size to the first subplot
-        self.display.fig.suptitle(f"N={sample_size}")
+        # self.display.fig.suptitle(f"N={sample_size}")
 
-    def main_sequence_analysis(self, group_var='bg_gain', cmap='viridis', scale=1, subset={}, **plot_kwargs):
+    def main_sequence_analysis(self, group_var='bg_gain', cmap='viridis', scale=1, subset={}, colors=None, **plot_kwargs):
         """Plot the relation between saccade peak velocity, duration, and magnitude. 
         
         Parameters
@@ -2140,6 +2171,8 @@ class TrackingExperiment():
             Scale parameter for determining the figure size. 1 results in a 3x5 figure.
         subset : dict, default={}
             Optionally filter data before plotting. See TrackingTrial.query for more info.
+        colors : list, np.ndarray, or tuple, default=None
+            A list of colors to use for each group. If None, the colors will be generated. 
         **plot_kwargs
             Additional keyword arguments passed to plt.subplots.
         """
@@ -2147,22 +2180,25 @@ class TrackingExperiment():
         if 'jitter_std' in plot_kwargs:
             jitter_std = plot_kwargs.pop('jitter_std')
         # allow for filtering of the data using subset
-        group_vals = np.unique(self.query(output=group_var, sort_by=group_var, subset=subset))
+        group_vals = np.unique(self.query(output=group_var, sort_by=group_var, subset=subset, skip_empty=True, same_size=False))
         # get the color for each group
-        if isinstance(cmap, str):
-            vals = group_vals
-            if isinstance(vals[0], (str, bytes)):
-                # if values are strings, sort them in alphabetical order and use their index for the colors
-                vals = np.argsort(vals)
-            norm = matplotlib.colors.Normalize(vals.min(), vals.max())
-            cmap = matplotlib.cm.ScalarMappable(norm=norm, cmap=cmap)
-            colors = cmap.to_rgba(vals)[:, :-1]
-        elif callable(cmap):
-            colors = cmap(group_vals)
-        elif isinstance(cmap, (list, np.ndarray, tuple)):
-            assert len(cmap) == len(group_vals), (
-                f"Colormap list has {len(cmap)} elements but there are {len(group_vals)} colors listed.")
-            colors = cmap
+        if colors is None:
+            if isinstance(cmap, str):
+                vals = group_vals
+                if isinstance(vals[0], (str, bytes)):
+                    # if values are strings, sort them in alphabetical order and use their index for the colors
+                    vals = np.argsort(vals)
+                norm = matplotlib.colors.Normalize(vals.min(), vals.max())
+                cmap = matplotlib.cm.ScalarMappable(norm=norm, cmap=cmap)
+                colors = cmap.to_rgba(vals)[:, :-1]
+            elif callable(cmap):
+                colors = cmap(group_vals)
+            elif isinstance(cmap, (list, np.ndarray, tuple)):
+                assert len(cmap) == len(group_vals), (
+                    f"Colormap list has {len(cmap)} elements but there are {len(group_vals)} colors listed.")
+                colors = cmap
+        assert len(colors) == len(group_vals), (
+            f"There are {len(group_vals)} group values but {len(colors)} colors specified.")
         # make a plot with subplots for saccade peak velocity and duration
         # but also include marginal plots for boxplot comparisons
         fig, axes = plt.subplots(nrows=3, ncols=2, width_ratios=[1, 1], height_ratios=[1, 1, 1], figsize=(4*scale, 6*scale))
@@ -2201,17 +2237,26 @@ class TrackingExperiment():
                 if 'alpha' in plot_kwargs:
                     alpha = plot_kwargs['alpha']
                 if len(sizes) > 1:
+                    breakpoint()
                     for yvals, amp in zip(ys, amplitude):
                         # add y-jitter
-                        yjitter = np.random.normal(0, jitter_std, size=len(yvals))
-                        ax.scatter(amp, yvals + yjitter, color=color, marker=marker, edgecolor=edgecolor, alpha=alpha)
+                        # yjitter = np.random.normal(0, jitter_std, size=len(yvals))
+                        ax.scatter(amp, yvals, color=color, marker=marker, edgecolor=edgecolor, alpha=alpha)
                 else:
                     # remove unnecessary nesting
                     ys = np.squeeze(ys)
                     amplitude = np.squeeze(amplitude)
                     # add y-jitter
-                    yjitter = np.random.normal(0, jitter_std, size=len(ys))
-                    ax.scatter(amplitude, ys + yjitter, color=color, marker=marker, edgecolor=edgecolor, alpha=alpha)
+                    # yjitter = np.random.normal(0, jitter_std, size=len(ys))
+                    # get the pearson correlation coefficient and p-value
+                    # use only the non-NaN values
+                    non_nans = np.isnan(ys) == False
+                    try:
+                        corr, pval = scipy.stats.pearsonr(amplitude[non_nans], ys[non_nans])
+                        label = f"{corr:.2f} {sigAsterisk(pval)}"
+                    except:
+                        label = ""
+                    ax.scatter(amplitude, ys, color=color, marker=marker, edgecolor=edgecolor, alpha=alpha, label=label)
                 # jitterplot of yvalues in the right axis
                 # xjitter = np.random.normal(0, .1, size=len(ys))
                 # xvals = num + xjitter
@@ -2224,6 +2269,8 @@ class TrackingExperiment():
         # plot the medians:
         # dur_meds, speed_meds, mag_meds = np.array(dur_meds), np.array(speed_meds), np.array(mag_meds)
         # get the bootstrapped 95% CI for each group val by randomly sampling on a per-subject basis
+        for ax in scatter_axes:
+            ax.legend(fontsize=6)
         dur_lows, dur_mids, dur_highs = [], [], []
         speed_lows, speed_mids, speed_highs = [], [], []
         mag_lows, mag_mids, mag_highs = [], [], []
@@ -2281,7 +2328,17 @@ class TrackingExperiment():
         # formatting:
         # transform the x-axes to log scale
         for ax in [scatter_axes[0], scatter_axes[1], bottom_ax]:
+            xticks = np.pi / np.array([64, 32, 16, 8, 4, 2, 1])
+            xticks = np.array([1, 2, 4, 8, 16, 32, 64, 128])
+            # ax.set_xticks(
+            #     xticks,
+            #     [r'$\pi$/64', r'$\pi$/32', r'$\pi$/16', r'$\pi$/8', r'$\pi$/4', r'$\pi$/2', r'$\pi$']
+            # )
             ax.set_xscale('log')
+            ax.set_xticks(
+                xticks * np.pi / 180.,
+                xticks.astype(str),
+            )
         # transform the y-axes to log scale
         for ax in [scatter_axes[0], scatter_axes[1], right_col[0], right_col[1]]:
         # for ax in [scatter_axes[0], right_col[0]]:
@@ -2305,11 +2362,13 @@ class TrackingExperiment():
         # xmin = np.pi / 16
         xmin = 1 * np.pi / 180
         xmax = 2*np.pi
-        for ax in np.append(scatter_axes, [bottom_ax]):
-            ax.set_xlim(xmin, xmax)
+        bottom_ax.set_xlim(xmin, xmax)
+        # for ax in np.append(scatter_axes, [bottom_ax]):
+        #     ax.set_xlim(xmin, xmax)
         # set limits on the marginal plots to match the scatterplots
-        for ax, ylim in zip(right_col, ylims):
-            ax.set_ylim(ylim[0], ylim[1])
+        # for ax, ylim in zip(right_col, ylims):
+        #     ax.set_ylim(ylim[0], ylim[1])
+        #     ax.set_xticklabels([])
         # remove the bottom spines of both scatter axes
         for ax, lbl in zip(scatter_axes, ["duration (s)", r"peak speed ($\degree$/s)"]):
             # ax.set_xticks([])
@@ -2318,14 +2377,21 @@ class TrackingExperiment():
             sbn.despine(ax=ax, bottom=True, trim=False)
             # label the y-axis
             ax.set_ylabel(lbl)
+        # make right_col[0] share the y-axis with scatter_axes[0],
+        # right_col[1] share the y-axis with scatter_axes[1],
+        # and scatter_axes[0], scatter_axes[1], and bottom_ax share the x-axis
+        right_col[0].sharey(scatter_axes[0])
+        right_col[1].sharey(scatter_axes[1])
+        scatter_axes[0].sharex(bottom_ax)
+        scatter_axes[1].sharex(bottom_ax)
         # remove the bottom spines of the top right axis
-        right_col[0].set_xticks([])
-        right_col[0].set_yticks([])
+        # right_col[0].set_xticks([])
+        # right_col[0].set_yticks([])
         sbn.despine(ax=right_col[0], bottom=True, left=True, trim=True)
         # remove the left spines of the top right axis
         right_col[1].set_xticks(range(len(group_vals)), group_vals)
         # right_col[1].set_yticks([])
-        right_col[1].set_yticklabels([])
+        # right_col[1].set_yticklabels([])
         # label the x-axis
         right_col[1].set_xlabel(group_var.replace("_", " "))
         sbn.despine(ax=right_col[1], bottom=False, left=True, trim=True)
@@ -2335,18 +2401,18 @@ class TrackingExperiment():
         #     [np.pi/16, np.pi/8, np.pi/4, np.pi/2, np.pi, 2*np.pi],
         #     [r'$\pi$/16', r'$\pi$/8', r'$\pi$/4', r'$\pi$/2', r'$\pi$', r'2$\pi$']
         # )
-        xticks = np.pi / np.array([64, 32, 16, 8, 4, 2, 1])
-        bottom_ax.set_xticks(
-            xticks,
-            [r'$\pi$/64', r'$\pi$/32', r'$\pi$/16', r'$\pi$/8', r'$\pi$/4', r'$\pi$/2', r'$\pi$']
-        )
-        bottom_ax.set_xticks(
-            xticks,
-            np.around(xticks * 180 / np.pi, 1).astype(str),
-        )
+        # xticks = np.pi / np.array([64, 32, 16, 8, 4, 2, 1])
+        # bottom_ax.set_xticks(
+        #     xticks,
+        #     [r'$\pi$/64', r'$\pi$/32', r'$\pi$/16', r'$\pi$/8', r'$\pi$/4', r'$\pi$/2', r'$\pi$']
+        # )
+        # bottom_ax.set_xticks(
+        #     xticks,
+        #     np.around(xticks * 180 / np.pi, 1).astype(str),
+        # )
         # bottom_ax.set_xlim(xmin, xmax)
         # label the bottom axis
-        bottom_ax.set_xlabel("magnitude")
+        bottom_ax.set_xlabel(r"magnitude ($\degree$)")
         bottom_ax.set_ylabel(group_var.replace("_", " "))
         sbn.despine(ax=bottom_ax, trim=True)
         plt.tight_layout()
@@ -4956,12 +5022,12 @@ def print_progress(part, whole):
     sys.stdout.flush()
 
 def sigAsterisk(p):
+    ret = 'ns'
     l = [[.0001, '****'],[.001, '***'],[.01, '**'],[.05, '*']]
-    for v in l:
+    for v in l[::-1]:
         if p <= v[0]:
-            return v[1]
-        else:
-            return "ns"
+            ret = v[1]
+    return ret
 
 def plot_diff_brackets(label, x1, x2, y1, y2, y_label, col='k',
                        vert=False, ax=None, lw=1, size='medium'):
@@ -5039,6 +5105,35 @@ def interprate_inequality(string):
             val = string
     # return the partial function
     return logic, val
+
+def mardia_circ_lin(circular_data, linear_data):
+    """
+    Computes Mardia's rank correlation coefficient for circular-linear data.
+
+    Args:
+        circular_data (np.ndarray): Circular data in radians, range [0, 2*pi].
+        linear_data (np.ndarray): Linear data.
+
+    Returns:
+        float: Mardia's rank correlation coefficient.
+    """
+    if len(circular_data) != len(linear_data):
+        raise ValueError("Inputs must have the same length.")
+    # Sort the circular data to get ranks
+    circular_ranks = circular_data.argsort().argsort() + 1
+    # Sort the linear data to get ranks
+    linear_ranks = linear_data.argsort().argsort() + 1
+    n = len(circular_data)
+    # Calculate the numerator
+    numerator = np.sum(np.sin(2 * np.pi * circular_ranks / n) * np.sin(2 * np.pi * linear_ranks / n))
+    # Calculate the denominator
+    denominator = np.sqrt(np.sum(np.sin(2 * np.pi * circular_ranks / n)**2) * np.sum(np.sin(2 * np.pi * linear_ranks / n)**2))
+    # Handle the case where denominator is zero
+    if denominator == 0:
+        return 0.0
+    # Calculate and return the correlation coefficient
+    corr = numerator / denominator
+    return corr
 
 if __name__ == "__main__":
     tracker = OfflineTracker("..\\arena\\fourier feedback")
