@@ -1165,12 +1165,11 @@ class TrackingExperiment():
         # load a TrackingTrial for each h5 file
         self.trials = []
         for fn in self.h5_files:
-            try:
-                trial = TrackingTrial(fn, **trial_kwargs)
-                if trial.load_success:
-                    self.trials += [trial]
-            except:
-                breakpoint()
+            trial = TrackingTrial(fn, **trial_kwargs)
+            if trial.load_success:
+                self.trials += [trial]
+            # except:
+            #     breakpoint()
         if remove_incompletes:
             self.remove_incompletes()
 
@@ -1440,7 +1439,7 @@ class TrackingExperiment():
                       xlim=(-np.pi, np.pi), ylim=(.5, -.5), xticks=None, yticks=None, 
                       positive_amplitude=False, scale=1.5, reversal_split=False,
                       saccade_var='arr_relative', min_speed=350, max_speed=np.inf,
-                      mean_bins=25, bins=100, line_color='k',
+                      mean_bins=25, bins=100, line_color='k', line_alpha=.25,
                       **query_kwargs):
         """Plot saccade data in one big grid as in the plot summary below.
         
@@ -1694,7 +1693,7 @@ class TrackingExperiment():
                                 else:
                                     same_direction += [True]
                                     ax = col
-                                ax.plot(heading, time, color=muted_color, lw=.25, alpha=.25, zorder=1)
+                                ax.plot(heading, time, color=muted_color, lw=.25, alpha=line_alpha, zorder=1)
                                 ax.plot(heading[saccade.start:saccade.stop], time[saccade.start:saccade.stop], color=line_color, lw=.25, alpha=.5, zorder=2)
                                 lines_plotted += 1
                                 # plot the stop coordinate
@@ -3589,23 +3588,34 @@ class TrackingTrial():
             # make a count of each frame in order from start to end
             self.frame_ind_offline = np.arange(self.num_tests * self.num_frames_offline).reshape(
                 self.num_tests, self.num_frames_offline)
-        # measure the framerate directly
-        if 'duration' in dir(self):
-            duration = self.duration
-        else:
-            duration = self.stop_exp - self.start_exp
-        self.holocube_framerate = self.camera_heading.size / duration
-        # store the approximate times
+        # we need to generate a time array for easy plotting, but not all files will have the
+        # same attributes like duration and framerate. So, let's default to the frame numbers
+        # and then upgrade to more specific values if the appropriate variables were stored
+        # 0. default to an array of frame numbers
         if 'num_frames' in dir(self):
             self.test_ind = np.arange(self.num_tests)
             # make a count of each frame in order from start to end
             self.frame_ind = np.arange(self.num_tests * self.num_frames).reshape(
                 self.num_tests, self.num_frames)
-            # convert to time points using the framerate
-            self.time = self.frame_ind * (1./ self.holocube_framerate)
-            # success
-            self.load_success = True
-        # todo: check if the pickled bouts were saved
+            # if there's only one test, the camera_headings array might be 1D, so let's make them match
+            if self.camera_heading.ndim == 1:
+                self.camera_heading = self.camera_heading[np.newaxis, :]
+            # if the duration is absent, estimate it
+            if 'duration' not in dir(self):
+                # 1. if stop_exp and start_exp are present, calculate the duration
+                if 'stop_exp' in dir(self) and 'start_exp' in dir(self):
+                    self.duration = self.stop_exp - self.start_exp
+                # 2. if the framerate is present, calculate the duration from the number of frames
+                elif 'framerate' in dir(self):
+                    self.duration = self.num_frames / self.framerate
+            # 3. if duration is present, calculate the framerate from the number of frames
+            if 'duration' in dir(self):
+                self.time = self.frame_ind * (self.duration / self.num_frames)
+                self.holocube_framerate = self.camera_heading.size / self.duration
+                self.load_success = True
+            else:
+                print("Could not determine the duration of the trial. Please add a 'duration' or 'framerate' attributes to properly calculate frame timing.")
+        # check if the pickled bouts were saved
         bouts_fn = self.filename.replace(".h5", "_bouts.pkl")
         if os.path.exists(bouts_fn):
             self.bouts = pickle.load(open(bouts_fn, 'rb'))
@@ -3614,6 +3624,9 @@ class TrackingTrial():
                 bout.trial = self
         else:
             self.bouts = None
+        # todo: if no is_test dataset was added, assume all bouts were tests
+        if 'is_test' not in dir(self):
+            self.is_test = np.ones(self.num_tests, dtype=bool)
 
     def get_saccade_stats(self, key='camera_heading', time_var='time', rerun=False, **saccade_kwargs):
         """List saccades for each trial using peak angular velocities.
