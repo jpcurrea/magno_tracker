@@ -2339,9 +2339,12 @@ class TrackingExperiment():
                 xticks.astype(str),
             )
         # transform the y-axes to log scale
-        for ax in [scatter_axes[0], scatter_axes[1], right_col[0], right_col[1]]:
+        for ax, ylim in zip(
+            [scatter_axes[0], scatter_axes[1], right_col[0], right_col[1]],
+            [(.01, .5), (1, 2000), (.01, .5), (1, 2000)]):
         # for ax in [scatter_axes[0], right_col[0]]:
             ax.set_yscale('log')
+            ax.set_ylim(ylim)
         # remove the minor ticks
         for ax in [right_col[0], right_col[1], bottom_ax]:
             ax.minorticks_off()
@@ -2349,7 +2352,7 @@ class TrackingExperiment():
             ax.tick_params(axis='x', which='minor', bottom=False)
         # set limits on the scatterplots
         ylims = []
-        scatter_axes[1].set_ylim(0)
+        # scatter_axes[1].set_ylim(0)
         # xmin = scatter_axes[0].get_xlim()[0]
         for ax in scatter_axes:
             # ax.set_xlim(0)
