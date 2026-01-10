@@ -2588,7 +2588,7 @@ class TrackingExperiment():
                 bottom_margin=bottom_margin, figsize=figsize)
         else:
             self.display = display
-            format_axes = False
+            format_axes = True
         trace_axes = self.display.trace_axes
         # plot the data
         num_frames = self.trials[0].num_frames
@@ -3014,8 +3014,11 @@ class TrackingExperiment():
                                 if num == 0:
                                     ax.set_ylabel("time")
                                 ax.invert_yaxis()
-            # add the row values
-            self.display.label_margins(row_vals, row_var, col_vals, col_var)
+            # add the row 
+            col_label = plot_kwargs.get('col_label', col_var)
+            row_label = plot_kwargs.get('row_label', row_var)
+            
+            self.display.label_margins(row_vals, row_label, col_vals, col_label)
             # add the sample size to the first subplot
             # self.display.fig.suptitle(f"N={sample_size}, {min(repetitions)}–{max(repetitions)} traces per subplot")
         # plt.show()
@@ -3239,8 +3242,6 @@ class TrackingExperiment():
             self.display.fig.suptitle(f"N={min(repetitions)}–{max(repetitions)} traces per subplot")
         # plt.show()
     
-
-
 class SummaryDisplay():
     def __init__(self, num_rows=1, num_cols=1, right_margin=True, bottom_margin=True,
                  **fig_kwargs):
@@ -3260,8 +3261,18 @@ class SummaryDisplay():
             num_rows = 1
         if num_cols == 0:
             num_cols = 1
-        self.fig, self.axes = plt.subplots(num_rows, num_cols, layout='constrained',
-                                           **fig_kwargs)
+        if 'fig' in fig_kwargs:
+            self.fig = fig_kwargs.pop('fig')
+        else:
+            self.fig = plt.figure(**fig_kwargs)
+        # else:
+        #     self.fig, self.axes = plt.subplots(num_rows, num_cols, layout='constrained',
+        #                                     **fig_kwargs)
+        if isinstance(self.fig, plt.Figure):
+            # make it a subfigure
+            self.fig = self.fig.subfigures(1, 1)
+        self.axes = self.fig.subplots(num_rows, num_cols, 
+                                        **fig_kwargs)
         if num_rows == 1 and num_cols == 1:
             self.axes = np.array([self.axes])[:, np.newaxis]
         elif num_rows == 1:
@@ -3299,30 +3310,96 @@ class SummaryDisplay():
             self.bottom[-1, -1] = False
             self.bottom[-2, -1] = True
             self.corner_ax = self.axes[-1, -1]
-        # keep track of the left and bottom bounds for adding row and column labels
-        self.left_bound = 0
-        self.bottom_bound = 0
+        # completely hide the corner_ax
+        if hasattr(self, 'corner_ax'):
+            self.corner_ax.set_visible(False)
+        # store transform and artist references for dynamic updates
+        self._margin_label_cids = []
+        self._row_label_artists = None
+        self._col_label_artists = None
+
+    def _get_fig_size_inches(self):
+        """Robustly compute size in inches for Figure or SubFigure."""
+        if isinstance(self.fig, plt.Figure):
+            # Figure supports get_size_inches
+            w, h = self.fig.get_size_inches()
+            return float(w), float(h)
+        else:
+            # SubFigure: derive from bbox and parent figure DPI
+            parent = self._get_parent_figure()
+            dpi = getattr(parent, 'dpi', 100.0)
+            bbox = getattr(self.fig, 'bbox', None)
+            if bbox is not None:
+                return bbox.width / dpi, bbox.height / dpi
+            # fallback to parent figure size
+            w, h = parent.get_size_inches()
+            return float(w), float(h)
+
+    def _get_parent_figure(self):
+        """Return the parent Figure for both Figure and SubFigure inputs."""
+        return getattr(self.fig, 'figure', self.fig)
+
+    def _get_coord_transform(self):
+        """Return the correct normalized coordinate transform for figure/subfigure."""
+        # SubFigure has transSubfigure; Figure has transFigure
+        return getattr(self.fig, 'transSubfigure', self._get_parent_figure().transFigure)
+
+    def _get_renderer(self):
+        """Get a renderer; force a draw if necessary."""
+        parent = self._get_parent_figure()
+        canvas = getattr(parent, 'canvas', None)
+        if canvas is None:
+            return None
+        try:
+            return canvas.get_renderer()
+        except Exception:
+            try:
+                canvas.draw()
+                return canvas.get_renderer()
+            except Exception:
+                return None
+
+    def _label_bboxes_in_subfig_coords(self, axes_list, which='x'):
+        """Return label bboxes (x0, y0, x1, y1) in subfigure-normalized coords.
+        which: 'x' for xlabel bboxes; 'y' for ylabel bboxes.
+        """
+        renderer = self._get_renderer()
+        sub_trans = self._get_coord_transform()
+        inv_sub = sub_trans.inverted()
+        bboxes = []
+        for ax in axes_list:
+            while isinstance(ax, np.ndarray):
+                ax = ax[0]
+            label = ax.xaxis.label if which == 'x' else ax.yaxis.label
+            try:
+                bbox = label.get_window_extent(renderer=renderer)
+            except Exception:
+                # force a draw and retry once
+                renderer = self._get_renderer()
+                bbox = label.get_window_extent(renderer=renderer)
+            # transform bbox corners from display to subfig coords
+            p0 = inv_sub.transform((bbox.x0, bbox.y0))
+            p1 = inv_sub.transform((bbox.x1, bbox.y1))
+            x0 = min(p0[0], p1[0])
+            y0 = min(p0[1], p1[1])
+            x1 = max(p0[0], p1[0])
+            y1 = max(p0[1], p1[1])
+            bboxes.append((x0, y0, x1, y1))
+        return np.array(bboxes)
+
+    def _label_centers_in_subfig_coords(self, axes_list, which='x'):
+        """Return label centers (x, y) in subfigure-normalized coords."""
+        b = self._label_bboxes_in_subfig_coords(axes_list, which=which)
+        if len(b) == 0:
+            return np.empty((0, 2))
+        centers = np.column_stack(((b[:, 0] + b[:, 2]) * 0.5, (b[:, 1] + b[:, 3]) * 0.5))
+        return centers
 
     def label_margins(self, row_vals=None, row_label=None, col_vals=None, col_label=None):
-        """Add values and a label to indicate differences across rows.
-
-        Parameters
-        ----------
-        row_vals : array-like (optional)
-            The values to add to each row, left of the ylabel. 
-        row_label : str (optional)
-            The variable label applied to the row values. If the bottom 
-            margin is used, the label will be centered between the trace axes. 
-        col_vals : array-like (optional)
-            The values to add to each column, below the xlabel. 
-        col_label : str (optional)
-            The variable label applied to the column values. If the right
-            margin is used, the label will still be centered between the trace axes. 
-        """
+        """Add values and a label to indicate differences across rows/cols using actual label bboxes."""
         # add the row values to the ylabels of the left column
         left_col = self.trace_axes[:, 0]
-        for ax, val in zip(left_col, row_vals):
-            # convert bytes to string 
+        for ax, val in zip(left_col, row_vals or []):
             if isinstance(val, bytes):
                 val = val.decode('utf-8')
             lbl = ax.get_ylabel()
@@ -3334,10 +3411,9 @@ class SummaryDisplay():
         bottom_row = self.axes[-1]
         if self.right_margin:
             bottom_row = bottom_row[:-1]
-        for ax, val in zip(bottom_row, col_vals):
+        for ax, val in zip(bottom_row, col_vals or []):
             while isinstance(ax, np.ndarray):
                 ax = ax[0]
-            # convert bytes to string 
             if isinstance(val, bytes):
                 val = val.decode('utf-8')
             lbl = ax.get_xlabel()
@@ -3345,109 +3421,166 @@ class SummaryDisplay():
                 ax.set_xlabel(f"{lbl}\n\n{val:.2f}")
             else:
                 ax.set_xlabel(f"{lbl}\n\n{val}")
+
+        coord_trans = self._get_coord_transform()
+        self._row_label_artists = None
+        self._col_label_artists = None
+        self.adjusted_left = False
+        self.adjusted_bottom = False
         # adjust the subplots to fit the row or column label
-        adjustment = .25
-        fig_width, fig_height = self.fig.get_size_inches()
+        fig_width, fig_height = self._get_fig_size_inches()
+        # we want to keep a fixed amount of space on the left and bottom for labels
+        # let's make it 1 inch for both bottom and left
+        self.left_bound = 0
+        self.bottom_bound = 0
         if row_label is not None:
-            # the adjustment should be a fixed amount. width=12 and lb=.02 => adjustment=.02*12=.24
-            prop = adjustment / fig_width
-            self.left_bound += prop
+            self.left_bound = 1.0 / fig_width
+            self.adjusted_left = True
         if col_label is not None:
-            prop = adjustment / fig_height
-            self.bottom_bound += prop
-        try:
-            self.fig.tight_layout(
-                rect=[self.left_bound, self.bottom_bound, 
-                      1 - self.left_bound, 1 - self.bottom_bound])
-        except:
-            pass
+            self.bottom_bound = 1.0 / fig_height
+            self.adjusted_bottom = True
+        if self.adjusted_left or self.adjusted_bottom:
+            self.fig.subplots_adjust(left=self.left_bound, bottom=self.bottom_bound)
+
+        # Row label and spine using ylabel bboxes
         if row_label is not None:
-            # calculate the y locations to add spines to
-            yvals = []
-            for ax in left_col: 
-                yvals += [np.mean(np.asarray(ax.get_position())[:, 1])]
-            yvals = np.array(yvals)
-            # add row label to the center of the others
+            y_b = self._label_bboxes_in_subfig_coords(left_col, which='y')
+            y_c = self._label_centers_in_subfig_coords(left_col, which='y')
+            y_center = float(np.mean(y_c[:, 1])) if len(y_c) else 0.5
+            # place to the left of the left-most ylabel bbox
+            x_ref = float(np.min(y_b[:, 0])) if len(y_b) else 0.05
+            spine_x = .4 / fig_width
+            tick_len = 0.05 / fig_width
             label = row_label.replace("_", " ")
-            txt_pos = (.02 * 12) / fig_width
-            self.fig.text(txt_pos, yvals.mean(), label, va='center', ha='center', rotation='vertical')
-            # plot a straight line from the bottom to the top yvals, just below the label
-            if len(yvals) > 0:
-                x = (.05 * 12) / fig_width
-                line = matplotlib.lines.Line2D(
-                    [x, x], [yvals.min(), yvals.max()], lw=1, color='k')
-                self.fig.add_artist(line)
-                # get tick size based on absolute length
-                tick_length = (.005 * 12) / fig_width
-                for yval in yvals:
-                    tick = matplotlib.lines.Line2D(
-                        [x, x + tick_length], [yval, yval], lw=1, color='k')
-                    self.fig.add_artist(tick)
+            txt_x = 0
+            row_text = self.fig.text(txt_x, y_center, label, va='center', ha='left', rotation='vertical', transform=coord_trans)
+            ymins = float(np.min(y_c[:, 1])) if len(y_c) else 0.2
+            ymaxs = float(np.max(y_c[:, 1])) if len(y_c) else 0.8
+            row_spine = matplotlib.lines.Line2D([spine_x, spine_x], [ymins, ymaxs], lw=1, color='k')
+            row_spine.set_transform(coord_trans)
+            self.fig.add_artist(row_spine)
+            row_ticks = []
+            for yv in (y_c[:, 1] if len(y_c) else [y_center]):
+                t = matplotlib.lines.Line2D([spine_x, spine_x + tick_len], [float(yv), float(yv)], lw=1, color='k')
+                t.set_transform(coord_trans)
+                self.fig.add_artist(t)
+                row_ticks.append(t)
+            self._row_label_artists = {'text': row_text, 'spine': row_spine, 'ticks': row_ticks}
+
+        # Column label and spine using xlabel bboxes
         if col_label is not None:
-            # calculate the y locations to add spines to
-            xvals = []
-            for ax in bottom_row: 
-                while isinstance(ax, np.ndarray):
-                    ax = ax[0]
-                xvals += [np.mean(np.asarray(ax.get_position())[:, 0])]
-            xvals = np.array(xvals)
-            # add row label to the center of the others
+            x_b = self._label_bboxes_in_subfig_coords(bottom_row, which='x')
+            x_c = self._label_centers_in_subfig_coords(bottom_row, which='x')
+            x_center = float(np.mean(x_c[:, 0])) if len(x_c) else 0.5
+            # baseline slightly below the lowest xlabel bbox
+            y_ref = float(np.min(x_b[:, 1])) if len(x_b) else 0.07
+            # txt_y = y_ref - 0.035
+            txt_y = .1 / fig_height
+            # spine_y = y_ref - 0.018
+            spine_y = .5 / fig_height
+            tick_len_y = 0.05 / fig_height
             label = col_label.replace("_", " ")
-            txt_height = (.025 * 12) / fig_height
-            self.fig.text(xvals.mean(), txt_height, label, va='center', ha='center', rotation='horizontal')
-            # plot a straight line from the bottom to the top yvals, just below the label
-            if len(xvals) > 0:
-                y = (.055 * 12) / fig_height
-                line = matplotlib.lines.Line2D(
-                    [xvals.min(), xvals.max()], [y, y], lw=1, color='k')
-                self.fig.add_artist(line)
-                tick_length = (.005 * 10) / fig_height
-                for xval in xvals:
-                    tick = matplotlib.lines.Line2D(
-                        [xval, xval], [y, y + tick_length], lw=1, color='k')
-                    self.fig.add_artist(tick)
+            col_text = self.fig.text(x_center, txt_y, label, va='bottom', ha='center', rotation='horizontal', transform=coord_trans)
+            xmins = float(np.min(x_c[:, 0])) if len(x_c) else 0.2
+            xmaxs = float(np.max(x_c[:, 0])) if len(x_c) else 0.8
+            col_spine = matplotlib.lines.Line2D([xmins, xmaxs], [spine_y, spine_y], lw=1, color='k')
+            col_spine.set_transform(coord_trans)
+            self.fig.add_artist(col_spine)
+            col_ticks = []
+            for xv in (x_c[:, 0] if len(x_c) else [x_center]):
+                t = matplotlib.lines.Line2D([float(xv), float(xv)], [spine_y, spine_y + tick_len_y], lw=1, color='k')
+                t.set_transform(coord_trans)
+                self.fig.add_artist(t)
+                col_ticks.append(t)
+            self._col_label_artists = {'text': col_text, 'spine': col_spine, 'ticks': col_ticks}
+
+        # connect dynamic updater to draw events (resize/redraw)
+        if len(self._margin_label_cids) == 0:
+            try:
+                cid = self.fig.canvas.mpl_connect('draw_event', self._update_margin_labels)
+                self._margin_label_cids.append(cid)
+            except Exception:
+                pass
+
+    def _update_margin_labels(self, event=None):
+        """Update margin label and tick positions on draw/resize using label bboxes."""
+        bottom_row = self.axes[-1]
+        if self.right_margin:
+            bottom_row = bottom_row[:-1]
+        left_col = self.trace_axes[:, 0]
+        # adjust the subplots to fit the row or column label
+        fig_width, fig_height = self._get_fig_size_inches()
+        # we want to keep a fixed amount of space on the left and bottom for labels
+        # let's make it 1 inch for both bottom and left
+        if self.adjusted_left:
+            self.left_bound = 1.0 / fig_width
+        if self.adjusted_bottom:
+            self.bottom_bound = 1.0 / fig_height
+        if self.adjusted_left or self.adjusted_bottom:
+            self.fig.subplots_adjust(left=self.left_bound, bottom=self.bottom_bound)
+        coord_trans = self._get_coord_transform()
+        # row updates
+        if self._row_label_artists is not None:
+            y_b = self._label_bboxes_in_subfig_coords(left_col, which='y')
+            y_c = self._label_centers_in_subfig_coords(left_col, which='y')
+            y_center = float(np.mean(y_c[:, 1])) if len(y_c) else 0.5
+            x_ref = float(np.min(y_b[:, 0])) if len(y_b) else 0.05
+            # txt_x = x_ref - 0.03
+            txt_x = 0
+            spine_x = .4 / fig_width
+            tick_len = 0.05 / fig_width
+            self._row_label_artists['text'].set_position((txt_x, y_center))
+            self._row_label_artists['text'].set_transform(coord_trans)
+            ymins = float(np.min(y_c[:, 1])) if len(y_c) else 0.2
+            ymaxs = float(np.max(y_c[:, 1])) if len(y_c) else 0.8
+            print(spine_x)
+            self._row_label_artists['spine'].set_data([spine_x, spine_x], [ymins, ymaxs])
+            self._row_label_artists['spine'].set_transform(coord_trans)
+            ticks = self._row_label_artists['ticks']
+            if len(ticks) == (len(y_c) if len(y_c) else 1):
+                vals = (y_c[:, 1] if len(y_c) else [y_center])
+                for t, yv in zip(ticks, vals):
+                    t.set_data([spine_x, spine_x + tick_len], [float(yv), float(yv)])
+                    t.set_transform(coord_trans)
+        # column updates
+        if self._col_label_artists is not None:
+            x_b = self._label_bboxes_in_subfig_coords(bottom_row, which='x')
+            x_c = self._label_centers_in_subfig_coords(bottom_row, which='x')
+            x_center = float(np.mean(x_c[:, 0])) if len(x_c) else 0.5
+            y_ref = float(np.min(x_b[:, 1])) if len(x_b) else 0.07
+            # txt_y = y_ref - 0.035
+            txt_y = .1 / fig_height
+            spine_y = .5 / fig_height
+            tick_len_y = 0.05 / fig_height
+            self._col_label_artists['text'].set_position((x_center, txt_y))
+            self._col_label_artists['text'].set_transform(coord_trans)
+            xmins = float(np.min(x_c[:, 0])) if len(x_c) else 0.2
+            xmaxs = float(np.max(x_c[:, 0])) if len(x_c) else 0.8
+            self._col_label_artists['spine'].set_data([xmins, xmaxs], [spine_y, spine_y])
+            self._col_label_artists['spine'].set_transform(coord_trans)
+            ticks = self._col_label_artists['ticks']
+            if len(ticks) == (len(x_c) if len(x_c) else 1):
+                vals = (x_c[:, 0] if len(x_c) else [x_center])
+                for t, xv in zip(ticks, vals):
+                    t.set_data([float(xv), float(xv)], [spine_y, spine_y + tick_len_y])
+                    t.set_transform(coord_trans)
 
     def format(self, xlim=None, ylim=None, xticks=None, yticks=None, 
                xlabel=None, ylabel=None, special_bottom_left=False, 
                logx=False, logy=False, despine_right=True):
-        """Format the subplots and figure.
-        
-        Parameters
-        ----------
-        xlim, ylim : tuple=(min, max), default=None
-            The tuple of the minimum and maximum values for that dimension.
-        xticks, yticks : tuple=(tickvalues, ticklabels), default=None
-            The tuple specifying the tickvalues to plot on the corresponding x- or y-axis.
-        xlabel, ylabel : str, default=None
-            The label for the corresponding x- or y-axis.
-        special_bottom_left : bool, default=False
-            Whether to exclude the bottom left subplot.
-        logx, logy : bool, default=False
-            Whether to format the x or y-axis along a log scale.
-        despine_right : bool, default=True
-            Whether to remove the left spine from the right column subplots.
-        """
-        # account for the bottom right subplot when plotting in the right margin
+        """Format the subplots and figure."""
         inds = np.arange(len(self.axes.flatten()))
         if self.right_margin:
             inds = inds[:-1]
-        # for ax in self.axes.flatten()[inds]:
-        #     # plot the x=0 and y=0 lines 
-        #     ax.axhline(0, linestyle='--', color='k', zorder=1, lw=.5)
-        #     ax.axvline(0, linestyle='--', color='k', zorder=1, lw=.5)
-        # optionally, we can choose not to despine the left spine of the right column
         if not despine_right:
             if self.bottom_margin:
                 self.left[:-1, -1] = True
             else:
                 self.left[:, -1] = True
-        num_rows, num_cols = len(self.axes), len(self.axes[0])
-        for row_num, (row, are_left, are_bottom) in enumerate(zip(self.axes, self.left, self.bottom)):
-            for col_num, (ax, is_left, is_bottom) in enumerate(zip(row, are_left, are_bottom)):
-                # if axis has empty dimensions, grab the first element until it's a subplot
+        for row, are_left, are_bottom in zip(self.axes, self.left, self.bottom):
+            for ax, is_left, is_bottom in zip(row, are_left, are_bottom):
                 while isinstance(ax, np.ndarray): 
                     ax = ax[0]
-                # set the plot limits if they were specified
                 if xlim is not None:
                     try:
                         ax.set_xlim(xlim[0], xlim[1])
@@ -3456,7 +3589,6 @@ class SummaryDisplay():
                 if ylim is not None:
                     if not (special_bottom_left and is_bottom and is_left):
                         ax.set_ylim(ylim[0], ylim[1])
-                # change the x or y scale
                 if logx:
                     ax.set_xscale('log')
                     if not is_bottom:
@@ -3465,31 +3597,24 @@ class SummaryDisplay():
                     ax.set_yscale('log')
                     if not is_left:
                         ax.tick_params(axis="y", which="minor", left=False)
-
                 if (logx or logy) and not (is_left or is_bottom):
                     ax.minorticks_off()
-                # if in the bottom row and xticks were provided, plot the xticks
                 if is_bottom:
                     if xlabel is not None:
                         ax.set_xlabel(xlabel)
                     if xticks is not None:
                         ax.set_xticks(xticks[0], xticks[1])
-                # otherwise, clean up the ticks
                 else:
                     ax.set_xticks([])
-                # if in the left row and yticks are provided, plot the yticks
                 if is_left:
                     if not (special_bottom_left and is_bottom): 
                         if ylabel is not None:
                             ax.set_ylabel(ylabel)
                         if yticks is not None:
                             ax.set_yticks(yticks[0], yticks[1])
-                # otherwise, clean up the ticks
-                else:                    
+                else:
                     ax.set_yticks([])
-                # despine the axes
                 sbn.despine(ax=ax, left=is_left==False, bottom=is_bottom==False, trim=True)
-
 
 class TrackingTrial():
     def __init__(self, filename, holocube_framerate=120):
@@ -5100,7 +5225,7 @@ def butterworth_filter(vals, low=1, high=6, sample_rate=60):
 def print_progress(part, whole):
     prop = float(part) / float(whole)
     sys.stdout.write('\r')
-    sys.stdout.write('[%-20s] %d%%' % ('=' * int(20 * prop), 100 * prop))
+    sys.stdout.write('[%-20s] %d    %%' % ('=' * int(20 * prop), 100 * prop))
     sys.stdout.flush()
 
 def sigAsterisk(p):
