@@ -1165,12 +1165,11 @@ class TrackingExperiment():
         # load a TrackingTrial for each h5 file
         self.trials = []
         for fn in self.h5_files:
-            try:
-                trial = TrackingTrial(fn, **trial_kwargs)
-                if trial.load_success:
-                    self.trials += [trial]
-            except:
-                breakpoint()
+            trial = TrackingTrial(fn, **trial_kwargs)
+            if trial.load_success:
+                self.trials += [trial]
+            # except:
+            #     breakpoint()
         if remove_incompletes:
             self.remove_incompletes()
 
@@ -1440,7 +1439,7 @@ class TrackingExperiment():
                       xlim=(-np.pi, np.pi), ylim=(.5, -.5), xticks=None, yticks=None, 
                       positive_amplitude=False, scale=1.5, reversal_split=False,
                       saccade_var='arr_relative', min_speed=350, max_speed=np.inf,
-                      mean_bins=25, bins=100, line_color='k',
+                      mean_bins=25, bins=100, line_color='k', line_alpha=.25,
                       **query_kwargs):
         """Plot saccade data in one big grid as in the plot summary below.
         
@@ -1694,7 +1693,7 @@ class TrackingExperiment():
                                 else:
                                     same_direction += [True]
                                     ax = col
-                                ax.plot(heading, time, color=muted_color, lw=.25, alpha=.25, zorder=1)
+                                ax.plot(heading, time, color=muted_color, lw=.25, alpha=line_alpha, zorder=1)
                                 ax.plot(heading[saccade.start:saccade.stop], time[saccade.start:saccade.stop], color=line_color, lw=.25, alpha=.5, zorder=2)
                                 lines_plotted += 1
                                 # plot the stop coordinate
@@ -2340,9 +2339,12 @@ class TrackingExperiment():
                 xticks.astype(str),
             )
         # transform the y-axes to log scale
-        for ax in [scatter_axes[0], scatter_axes[1], right_col[0], right_col[1]]:
+        for ax, ylim in zip(
+            [scatter_axes[0], scatter_axes[1], right_col[0], right_col[1]],
+            [(.01, .5), (1, 2000), (.01, .5), (1, 2000)]):
         # for ax in [scatter_axes[0], right_col[0]]:
             ax.set_yscale('log')
+            ax.set_ylim(ylim)
         # remove the minor ticks
         for ax in [right_col[0], right_col[1], bottom_ax]:
             ax.minorticks_off()
@@ -2350,7 +2352,7 @@ class TrackingExperiment():
             ax.tick_params(axis='x', which='minor', bottom=False)
         # set limits on the scatterplots
         ylims = []
-        scatter_axes[1].set_ylim(0)
+        # scatter_axes[1].set_ylim(0)
         # xmin = scatter_axes[0].get_xlim()[0]
         for ax in scatter_axes:
             # ax.set_xlim(0)
@@ -2426,6 +2428,7 @@ class TrackingExperiment():
                      summary_func=np.nanmean, xlabel=None, ylabel=None,
                      color='k',
                      plot_type='line', bins=100, use_density=False,
+                     omit_too_fast=True,
                      confidence_interval=False, confidence=.84,
                      scale=1.5, plot_kwargs={}, **query_kwargs):
         """Plot experimental data in one big grid.
@@ -2478,6 +2481,8 @@ class TrackingExperiment():
             Whether to plot the density instead of the count in the 2d histogram.
         scale : float, default=1.5
             Scale parameter for setting the figsize.
+        omit_too_fast : bool, default=True
+            Assuming xvar represents fly heading data, omit segments that are impossible, replacing with NaNs so that aren't plotted.
         plot_kwargs : dict, default={}
             Additional keyword arguments to pass to the plotting function. These include:
                 - 'color': the color of the lines in the trace plots
@@ -2534,10 +2539,10 @@ class TrackingExperiment():
                     colors[key] = cmap.to_rgba(vals)[:, :-1]
                 elif callable(cmap):
                     colors[key] = cmap(vals)
-                elif isinstance(row_cmap, (list, np.ndarray, tuple)):
+                elif isinstance(cmap, (list, np.ndarray, tuple)):
                     assert len(cmap) == len(vals), (
                         f"Colormap list has {len(cmap)} elements but {len(vals)} {key}.")
-                    colors[key] = row_cmap
+                    colors[key] = cmap
                 else:
                     colors[key] = []
             else:
@@ -2554,8 +2559,12 @@ class TrackingExperiment():
             # elif colors['rows'] is not None:
             #     color_arr = np.repeat(colors['rows'][:, np.newaxis], num_cols, axis=0)
         elif len(colors['columns']) == num_cols:
+            if isinstance(colors['columns'], list):
+                colors['columns'] = np.array(colors['columns'])
             color_arr = np.repeat(colors['columns'][np.newaxis], num_rows, axis=0)
         elif len(colors['rows']) == num_rows:
+            if isinstance(colors['rows'], list):
+                colors['rows'] = np.array(colors['rows'])
             color_arr = np.repeat(colors['rows'][:, np.newaxis], num_cols, axis=1)
         else:
             # color_arr = np.zeros((num_rows, num_cols, 3), dtype='uint8')
@@ -2579,7 +2588,7 @@ class TrackingExperiment():
                 bottom_margin=bottom_margin, figsize=figsize)
         else:
             self.display = display
-            format_axes = False
+            format_axes = True
         trace_axes = self.display.trace_axes
         # plot the data
         num_frames = self.trials[0].num_frames
@@ -2827,27 +2836,21 @@ class TrackingExperiment():
                                 stops = np.logical_not(too_fast[1:]) * too_fast[:-1]
                                 for start, stop in zip(np.where(starts)[0], np.where(stops)[0]): 
                                     ax_mean[start:stop] = np.nan
-                                breakpoint()
-                                try:
-                                    ax.plot(ax_mean, y, color='w', zorder=4, lw=1)
-                                except:
-                                    breakpoint()
+                                ax.plot(ax_mean, y, color='w', zorder=4, lw=1)
                                 ax.plot(ax_mean, y, color=color, zorder=5)
                         # plot the mean in the two summary plots
                         if row_summ_ax is not None:
                             if plot_type in ['hist2d', 'line']:
                                 if callable(summary_func):
                                     summary = summary_func(xs, axis=0)
-                                    diffs = np.append([0], np.diff(summary))
-                                    too_fast = abs(diffs) > np.pi/2
-                                    starts = too_fast[1:] * np.logical_not(too_fast[:-1])
-                                    stops = np.logical_not(too_fast[1:]) * too_fast[:-1]
-                                    for start, stop in zip(np.where(starts)[0], np.where(stops)[0]): 
-                                        summary[start:stop] = np.nan
-                                    try:
-                                        row_summ_ax.plot(summary, y, color=color, zorder=1)
-                                    except:
-                                        breakpoint()
+                                    if omit_too_fast:
+                                        diffs = np.append([0], np.diff(summary))
+                                        too_fast = abs(diffs) > np.pi/2
+                                        starts = too_fast[1:] * np.logical_not(too_fast[:-1])
+                                        stops = np.logical_not(too_fast[1:]) * too_fast[:-1]
+                                        for start, stop in zip(np.where(starts)[0], np.where(stops)[0]): 
+                                            summary[start:stop] = np.nan
+                                    row_summ_ax.plot(summary, y, color=color, zorder=1)
                                     if confidence_interval:
                                         # todo: get the 84% C.I. for each time point using bootstrapping
                                         tot = xs.shape[0]
@@ -2885,7 +2888,29 @@ class TrackingExperiment():
                             if plot_type in ['hist2d', 'line']:
                                 if callable(summary_func):
                                     summary = summary_func(xs, axis=0)
-                                    col_summ_ax.plot(summary, y, color=color)
+                                    diffs = np.append([0], np.diff(summary))
+                                    too_fast = abs(diffs) > np.pi/2
+                                    starts = too_fast[1:] * np.logical_not(too_fast[:-1])
+                                    stops = np.logical_not(too_fast[1:]) * too_fast[:-1]
+                                    for start, stop in zip(np.where(starts)[0], np.where(stops)[0]): 
+                                        summary[start:stop] = np.nan
+                                    col_summ_ax.plot(summary, y, color=color, zorder=1)
+                                # repeat the same confidence interval process as the row_summ_ax above
+                                if confidence_interval:
+                                    # get the C.I. for each time point using bootstrapping
+                                    tot = xs.shape[0]
+                                    rand_samples = np.random.randint(0, tot-1, (tot, 1000))
+                                    lows, highs = [], []
+                                    delta = (1 - confidence)/2
+                                    for frame_vals in xs.T:
+                                        pseudo_distro = frame_vals[rand_samples]
+                                        summary = summary_func(pseudo_distro, axis=0)
+                                        lb, ub = 100*delta, 100*(1-delta)
+                                        low, high = np.percentile(summary, (lb, ub))
+                                        lows += [low]
+                                        highs += [high]
+                                    lows, highs = np.array(lows), np.array(highs)
+                                    col_summ_ax.fill_betweenx(y, lows, highs, color=color, alpha=.3, zorder=2, linewidth=0)
                             else:
                                 y = new_ys[0]
                                 # measure the radial distance travelled
@@ -2989,8 +3014,11 @@ class TrackingExperiment():
                                 if num == 0:
                                     ax.set_ylabel("time")
                                 ax.invert_yaxis()
-            # add the row values
-            self.display.label_margins(row_vals, row_var, col_vals, col_var)
+            # add the row 
+            col_label = plot_kwargs.get('col_label', col_var)
+            row_label = plot_kwargs.get('row_label', row_var)
+            
+            self.display.label_margins(row_vals, row_label, col_vals, col_label)
             # add the sample size to the first subplot
             # self.display.fig.suptitle(f"N={sample_size}, {min(repetitions)}–{max(repetitions)} traces per subplot")
         # plt.show()
@@ -3062,7 +3090,7 @@ class TrackingExperiment():
         for num, (vals, storage) in enumerate(zip([row_vals, col_vals], [new_row_vals, new_col_vals])):
             if vals.dtype.type == np.bytes_:
                 non_nans = vals != b'nan'
-            elif vals.dtype.type in [np.string_, np.str_]:
+            elif vals.dtype.type in [np.str_]:
                 non_nans = vals != 'nan'
             else:
                 non_nans = np.isnan(vals) == False
@@ -3164,7 +3192,15 @@ class TrackingExperiment():
                         xs = xs.reshape(-1, xs.shape[-1])
                         nans = np.isnan(xs)
                         not_all_nans = nans.mean(1) < 1
-                        counts, _, _ = ax.hist(xs[not_all_nans].flatten(), color=color, alpha=1, density=use_probability, bins=bins, histtype='stepfilled')
+                        # get the histogram and then normalize to probability
+                        counts, edges = np.histogram(xs[not_all_nans].flatten(), bins=bins)
+                        if use_probability:
+                            counts = counts / counts.sum()
+                        # now plot the histogram as a step plot
+                        # counts, _, _ = ax.hist(xs[not_all_nans].flatten(), color=color, alpha=1, bins=bins, histtype='stepfilled')
+                        mid_points = (edges[:-1] + np.diff(edges)/2)
+                        # hist = ax.step(mid_points, counts, where='mid', color=color, zorder=1)
+                        hist = ax.bar(mid_points, counts, color=color, zorder=1, width=np.diff(edges), align='center')
                         self.histograms[xvar][(row_val, col_val)] = counts
                         if callable(summary_func):
                             no_nans = np.isnan(xs) == False
@@ -3180,7 +3216,9 @@ class TrackingExperiment():
                                     no_nans = np.isnan(xs) == False
                                     summary = summary_func(xs[no_nans])
                                     alpha = 1./float(len(vals))
-                                    ax.hist(xs.flatten(), color=color, zorder=1, alpha=1, bins=bins, histtype='step', density=use_probability)
+                                    # get the histogram first and then apply normalization if specified
+                                    # ax.hist(xs.flatten(), color=color, zorder=1, alpha=1, bins=bins, histtype='step', density=use_probability)
+                                    ax.step(mid_points, counts, color=color, zorder=1, alpha=alpha, where='mid')
                                     ax.axvline(summary, color='w', zorder=4, lw=4)
                                     ax.axvline(summary, color=color, zorder=4)
                         # if col_summ_ax is not None:
@@ -3204,8 +3242,6 @@ class TrackingExperiment():
             self.display.fig.suptitle(f"N={min(repetitions)}–{max(repetitions)} traces per subplot")
         # plt.show()
     
-
-
 class SummaryDisplay():
     def __init__(self, num_rows=1, num_cols=1, right_margin=True, bottom_margin=True,
                  **fig_kwargs):
@@ -3225,8 +3261,18 @@ class SummaryDisplay():
             num_rows = 1
         if num_cols == 0:
             num_cols = 1
-        self.fig, self.axes = plt.subplots(num_rows, num_cols, layout='constrained',
-                                           **fig_kwargs)
+        if 'fig' in fig_kwargs:
+            self.fig = fig_kwargs.pop('fig')
+        else:
+            self.fig = plt.figure(**fig_kwargs)
+        # else:
+        #     self.fig, self.axes = plt.subplots(num_rows, num_cols, layout='constrained',
+        #                                     **fig_kwargs)
+        if isinstance(self.fig, plt.Figure):
+            # make it a subfigure
+            self.fig = self.fig.subfigures(1, 1)
+        self.axes = self.fig.subplots(num_rows, num_cols, 
+                                        **fig_kwargs)
         if num_rows == 1 and num_cols == 1:
             self.axes = np.array([self.axes])[:, np.newaxis]
         elif num_rows == 1:
@@ -3264,30 +3310,96 @@ class SummaryDisplay():
             self.bottom[-1, -1] = False
             self.bottom[-2, -1] = True
             self.corner_ax = self.axes[-1, -1]
-        # keep track of the left and bottom bounds for adding row and column labels
-        self.left_bound = 0
-        self.bottom_bound = 0
+        # completely hide the corner_ax
+        if hasattr(self, 'corner_ax'):
+            self.corner_ax.set_visible(False)
+        # store transform and artist references for dynamic updates
+        self._margin_label_cids = []
+        self._row_label_artists = None
+        self._col_label_artists = None
+
+    def _get_fig_size_inches(self):
+        """Robustly compute size in inches for Figure or SubFigure."""
+        if isinstance(self.fig, plt.Figure):
+            # Figure supports get_size_inches
+            w, h = self.fig.get_size_inches()
+            return float(w), float(h)
+        else:
+            # SubFigure: derive from bbox and parent figure DPI
+            parent = self._get_parent_figure()
+            dpi = getattr(parent, 'dpi', 100.0)
+            bbox = getattr(self.fig, 'bbox', None)
+            if bbox is not None:
+                return bbox.width / dpi, bbox.height / dpi
+            # fallback to parent figure size
+            w, h = parent.get_size_inches()
+            return float(w), float(h)
+
+    def _get_parent_figure(self):
+        """Return the parent Figure for both Figure and SubFigure inputs."""
+        return getattr(self.fig, 'figure', self.fig)
+
+    def _get_coord_transform(self):
+        """Return the correct normalized coordinate transform for figure/subfigure."""
+        # SubFigure has transSubfigure; Figure has transFigure
+        return getattr(self.fig, 'transSubfigure', self._get_parent_figure().transFigure)
+
+    def _get_renderer(self):
+        """Get a renderer; force a draw if necessary."""
+        parent = self._get_parent_figure()
+        canvas = getattr(parent, 'canvas', None)
+        if canvas is None:
+            return None
+        try:
+            return canvas.get_renderer()
+        except Exception:
+            try:
+                canvas.draw()
+                return canvas.get_renderer()
+            except Exception:
+                return None
+
+    def _label_bboxes_in_subfig_coords(self, axes_list, which='x'):
+        """Return label bboxes (x0, y0, x1, y1) in subfigure-normalized coords.
+        which: 'x' for xlabel bboxes; 'y' for ylabel bboxes.
+        """
+        renderer = self._get_renderer()
+        sub_trans = self._get_coord_transform()
+        inv_sub = sub_trans.inverted()
+        bboxes = []
+        for ax in axes_list:
+            while isinstance(ax, np.ndarray):
+                ax = ax[0]
+            label = ax.xaxis.label if which == 'x' else ax.yaxis.label
+            try:
+                bbox = label.get_window_extent(renderer=renderer)
+            except Exception:
+                # force a draw and retry once
+                renderer = self._get_renderer()
+                bbox = label.get_window_extent(renderer=renderer)
+            # transform bbox corners from display to subfig coords
+            p0 = inv_sub.transform((bbox.x0, bbox.y0))
+            p1 = inv_sub.transform((bbox.x1, bbox.y1))
+            x0 = min(p0[0], p1[0])
+            y0 = min(p0[1], p1[1])
+            x1 = max(p0[0], p1[0])
+            y1 = max(p0[1], p1[1])
+            bboxes.append((x0, y0, x1, y1))
+        return np.array(bboxes)
+
+    def _label_centers_in_subfig_coords(self, axes_list, which='x'):
+        """Return label centers (x, y) in subfigure-normalized coords."""
+        b = self._label_bboxes_in_subfig_coords(axes_list, which=which)
+        if len(b) == 0:
+            return np.empty((0, 2))
+        centers = np.column_stack(((b[:, 0] + b[:, 2]) * 0.5, (b[:, 1] + b[:, 3]) * 0.5))
+        return centers
 
     def label_margins(self, row_vals=None, row_label=None, col_vals=None, col_label=None):
-        """Add values and a label to indicate differences across rows.
-
-        Parameters
-        ----------
-        row_vals : array-like (optional)
-            The values to add to each row, left of the ylabel. 
-        row_label : str (optional)
-            The variable label applied to the row values. If the bottom 
-            margin is used, the label will be centered between the trace axes. 
-        col_vals : array-like (optional)
-            The values to add to each column, below the xlabel. 
-        col_label : str (optional)
-            The variable label applied to the column values. If the right
-            margin is used, the label will still be centered between the trace axes. 
-        """
+        """Add values and a label to indicate differences across rows/cols using actual label bboxes."""
         # add the row values to the ylabels of the left column
         left_col = self.trace_axes[:, 0]
-        for ax, val in zip(left_col, row_vals):
-            # convert bytes to string 
+        for ax, val in zip(left_col, row_vals or []):
             if isinstance(val, bytes):
                 val = val.decode('utf-8')
             lbl = ax.get_ylabel()
@@ -3299,10 +3411,9 @@ class SummaryDisplay():
         bottom_row = self.axes[-1]
         if self.right_margin:
             bottom_row = bottom_row[:-1]
-        for ax, val in zip(bottom_row, col_vals):
+        for ax, val in zip(bottom_row, col_vals or []):
             while isinstance(ax, np.ndarray):
                 ax = ax[0]
-            # convert bytes to string 
             if isinstance(val, bytes):
                 val = val.decode('utf-8')
             lbl = ax.get_xlabel()
@@ -3310,109 +3421,166 @@ class SummaryDisplay():
                 ax.set_xlabel(f"{lbl}\n\n{val:.2f}")
             else:
                 ax.set_xlabel(f"{lbl}\n\n{val}")
+
+        coord_trans = self._get_coord_transform()
+        self._row_label_artists = None
+        self._col_label_artists = None
+        self.adjusted_left = False
+        self.adjusted_bottom = False
         # adjust the subplots to fit the row or column label
-        adjustment = .25
-        fig_width, fig_height = self.fig.get_size_inches()
+        fig_width, fig_height = self._get_fig_size_inches()
+        # we want to keep a fixed amount of space on the left and bottom for labels
+        # let's make it 1 inch for both bottom and left
+        self.left_bound = 0
+        self.bottom_bound = 0
         if row_label is not None:
-            # the adjustment should be a fixed amount. width=12 and lb=.02 => adjustment=.02*12=.24
-            prop = adjustment / fig_width
-            self.left_bound += prop
+            self.left_bound = 1.0 / fig_width
+            self.adjusted_left = True
         if col_label is not None:
-            prop = adjustment / fig_height
-            self.bottom_bound += prop
-        try:
-            self.fig.tight_layout(
-                rect=[self.left_bound, self.bottom_bound, 
-                      1 - self.left_bound, 1 - self.bottom_bound])
-        except:
-            pass
+            self.bottom_bound = 1.0 / fig_height
+            self.adjusted_bottom = True
+        if self.adjusted_left or self.adjusted_bottom:
+            self.fig.subplots_adjust(left=self.left_bound, bottom=self.bottom_bound)
+
+        # Row label and spine using ylabel bboxes
         if row_label is not None:
-            # calculate the y locations to add spines to
-            yvals = []
-            for ax in left_col: 
-                yvals += [np.mean(np.asarray(ax.get_position())[:, 1])]
-            yvals = np.array(yvals)
-            # add row label to the center of the others
+            y_b = self._label_bboxes_in_subfig_coords(left_col, which='y')
+            y_c = self._label_centers_in_subfig_coords(left_col, which='y')
+            y_center = float(np.mean(y_c[:, 1])) if len(y_c) else 0.5
+            # place to the left of the left-most ylabel bbox
+            x_ref = float(np.min(y_b[:, 0])) if len(y_b) else 0.05
+            spine_x = .4 / fig_width
+            tick_len = 0.05 / fig_width
             label = row_label.replace("_", " ")
-            txt_pos = (.02 * 12) / fig_width
-            self.fig.text(txt_pos, yvals.mean(), label, va='center', ha='center', rotation='vertical')
-            # plot a straight line from the bottom to the top yvals, just below the label
-            if len(yvals) > 0:
-                x = (.05 * 12) / fig_width
-                line = matplotlib.lines.Line2D(
-                    [x, x], [yvals.min(), yvals.max()], lw=1, color='k')
-                self.fig.add_artist(line)
-                # get tick size based on absolute length
-                tick_length = (.005 * 12) / fig_width
-                for yval in yvals:
-                    tick = matplotlib.lines.Line2D(
-                        [x, x + tick_length], [yval, yval], lw=1, color='k')
-                    self.fig.add_artist(tick)
+            txt_x = 0
+            row_text = self.fig.text(txt_x, y_center, label, va='center', ha='left', rotation='vertical', transform=coord_trans)
+            ymins = float(np.min(y_c[:, 1])) if len(y_c) else 0.2
+            ymaxs = float(np.max(y_c[:, 1])) if len(y_c) else 0.8
+            row_spine = matplotlib.lines.Line2D([spine_x, spine_x], [ymins, ymaxs], lw=1, color='k')
+            row_spine.set_transform(coord_trans)
+            self.fig.add_artist(row_spine)
+            row_ticks = []
+            for yv in (y_c[:, 1] if len(y_c) else [y_center]):
+                t = matplotlib.lines.Line2D([spine_x, spine_x + tick_len], [float(yv), float(yv)], lw=1, color='k')
+                t.set_transform(coord_trans)
+                self.fig.add_artist(t)
+                row_ticks.append(t)
+            self._row_label_artists = {'text': row_text, 'spine': row_spine, 'ticks': row_ticks}
+
+        # Column label and spine using xlabel bboxes
         if col_label is not None:
-            # calculate the y locations to add spines to
-            xvals = []
-            for ax in bottom_row: 
-                while isinstance(ax, np.ndarray):
-                    ax = ax[0]
-                xvals += [np.mean(np.asarray(ax.get_position())[:, 0])]
-            xvals = np.array(xvals)
-            # add row label to the center of the others
+            x_b = self._label_bboxes_in_subfig_coords(bottom_row, which='x')
+            x_c = self._label_centers_in_subfig_coords(bottom_row, which='x')
+            x_center = float(np.mean(x_c[:, 0])) if len(x_c) else 0.5
+            # baseline slightly below the lowest xlabel bbox
+            y_ref = float(np.min(x_b[:, 1])) if len(x_b) else 0.07
+            # txt_y = y_ref - 0.035
+            txt_y = .1 / fig_height
+            # spine_y = y_ref - 0.018
+            spine_y = .5 / fig_height
+            tick_len_y = 0.05 / fig_height
             label = col_label.replace("_", " ")
-            txt_height = (.025 * 12) / fig_height
-            self.fig.text(xvals.mean(), txt_height, label, va='center', ha='center', rotation='horizontal')
-            # plot a straight line from the bottom to the top yvals, just below the label
-            if len(xvals) > 0:
-                y = (.055 * 12) / fig_height
-                line = matplotlib.lines.Line2D(
-                    [xvals.min(), xvals.max()], [y, y], lw=1, color='k')
-                self.fig.add_artist(line)
-                tick_length = (.005 * 10) / fig_height
-                for xval in xvals:
-                    tick = matplotlib.lines.Line2D(
-                        [xval, xval], [y, y + tick_length], lw=1, color='k')
-                    self.fig.add_artist(tick)
+            col_text = self.fig.text(x_center, txt_y, label, va='bottom', ha='center', rotation='horizontal', transform=coord_trans)
+            xmins = float(np.min(x_c[:, 0])) if len(x_c) else 0.2
+            xmaxs = float(np.max(x_c[:, 0])) if len(x_c) else 0.8
+            col_spine = matplotlib.lines.Line2D([xmins, xmaxs], [spine_y, spine_y], lw=1, color='k')
+            col_spine.set_transform(coord_trans)
+            self.fig.add_artist(col_spine)
+            col_ticks = []
+            for xv in (x_c[:, 0] if len(x_c) else [x_center]):
+                t = matplotlib.lines.Line2D([float(xv), float(xv)], [spine_y, spine_y + tick_len_y], lw=1, color='k')
+                t.set_transform(coord_trans)
+                self.fig.add_artist(t)
+                col_ticks.append(t)
+            self._col_label_artists = {'text': col_text, 'spine': col_spine, 'ticks': col_ticks}
+
+        # connect dynamic updater to draw events (resize/redraw)
+        if len(self._margin_label_cids) == 0:
+            try:
+                cid = self.fig.canvas.mpl_connect('draw_event', self._update_margin_labels)
+                self._margin_label_cids.append(cid)
+            except Exception:
+                pass
+
+    def _update_margin_labels(self, event=None):
+        """Update margin label and tick positions on draw/resize using label bboxes."""
+        bottom_row = self.axes[-1]
+        if self.right_margin:
+            bottom_row = bottom_row[:-1]
+        left_col = self.trace_axes[:, 0]
+        # adjust the subplots to fit the row or column label
+        fig_width, fig_height = self._get_fig_size_inches()
+        # we want to keep a fixed amount of space on the left and bottom for labels
+        # let's make it 1 inch for both bottom and left
+        if self.adjusted_left:
+            self.left_bound = 1.0 / fig_width
+        if self.adjusted_bottom:
+            self.bottom_bound = 1.0 / fig_height
+        if self.adjusted_left or self.adjusted_bottom:
+            self.fig.subplots_adjust(left=self.left_bound, bottom=self.bottom_bound)
+        coord_trans = self._get_coord_transform()
+        # row updates
+        if self._row_label_artists is not None:
+            y_b = self._label_bboxes_in_subfig_coords(left_col, which='y')
+            y_c = self._label_centers_in_subfig_coords(left_col, which='y')
+            y_center = float(np.mean(y_c[:, 1])) if len(y_c) else 0.5
+            x_ref = float(np.min(y_b[:, 0])) if len(y_b) else 0.05
+            # txt_x = x_ref - 0.03
+            txt_x = 0
+            spine_x = .4 / fig_width
+            tick_len = 0.05 / fig_width
+            self._row_label_artists['text'].set_position((txt_x, y_center))
+            self._row_label_artists['text'].set_transform(coord_trans)
+            ymins = float(np.min(y_c[:, 1])) if len(y_c) else 0.2
+            ymaxs = float(np.max(y_c[:, 1])) if len(y_c) else 0.8
+            print(spine_x)
+            self._row_label_artists['spine'].set_data([spine_x, spine_x], [ymins, ymaxs])
+            self._row_label_artists['spine'].set_transform(coord_trans)
+            ticks = self._row_label_artists['ticks']
+            if len(ticks) == (len(y_c) if len(y_c) else 1):
+                vals = (y_c[:, 1] if len(y_c) else [y_center])
+                for t, yv in zip(ticks, vals):
+                    t.set_data([spine_x, spine_x + tick_len], [float(yv), float(yv)])
+                    t.set_transform(coord_trans)
+        # column updates
+        if self._col_label_artists is not None:
+            x_b = self._label_bboxes_in_subfig_coords(bottom_row, which='x')
+            x_c = self._label_centers_in_subfig_coords(bottom_row, which='x')
+            x_center = float(np.mean(x_c[:, 0])) if len(x_c) else 0.5
+            y_ref = float(np.min(x_b[:, 1])) if len(x_b) else 0.07
+            # txt_y = y_ref - 0.035
+            txt_y = .1 / fig_height
+            spine_y = .5 / fig_height
+            tick_len_y = 0.05 / fig_height
+            self._col_label_artists['text'].set_position((x_center, txt_y))
+            self._col_label_artists['text'].set_transform(coord_trans)
+            xmins = float(np.min(x_c[:, 0])) if len(x_c) else 0.2
+            xmaxs = float(np.max(x_c[:, 0])) if len(x_c) else 0.8
+            self._col_label_artists['spine'].set_data([xmins, xmaxs], [spine_y, spine_y])
+            self._col_label_artists['spine'].set_transform(coord_trans)
+            ticks = self._col_label_artists['ticks']
+            if len(ticks) == (len(x_c) if len(x_c) else 1):
+                vals = (x_c[:, 0] if len(x_c) else [x_center])
+                for t, xv in zip(ticks, vals):
+                    t.set_data([float(xv), float(xv)], [spine_y, spine_y + tick_len_y])
+                    t.set_transform(coord_trans)
 
     def format(self, xlim=None, ylim=None, xticks=None, yticks=None, 
                xlabel=None, ylabel=None, special_bottom_left=False, 
                logx=False, logy=False, despine_right=True):
-        """Format the subplots and figure.
-        
-        Parameters
-        ----------
-        xlim, ylim : tuple=(min, max), default=None
-            The tuple of the minimum and maximum values for that dimension.
-        xticks, yticks : tuple=(tickvalues, ticklabels), default=None
-            The tuple specifying the tickvalues to plot on the corresponding x- or y-axis.
-        xlabel, ylabel : str, default=None
-            The label for the corresponding x- or y-axis.
-        special_bottom_left : bool, default=False
-            Whether to exclude the bottom left subplot.
-        logx, logy : bool, default=False
-            Whether to format the x or y-axis along a log scale.
-        despine_right : bool, default=True
-            Whether to remove the left spine from the right column subplots.
-        """
-        # account for the bottom right subplot when plotting in the right margin
+        """Format the subplots and figure."""
         inds = np.arange(len(self.axes.flatten()))
         if self.right_margin:
             inds = inds[:-1]
-        # for ax in self.axes.flatten()[inds]:
-        #     # plot the x=0 and y=0 lines 
-        #     ax.axhline(0, linestyle='--', color='k', zorder=1, lw=.5)
-        #     ax.axvline(0, linestyle='--', color='k', zorder=1, lw=.5)
-        # optionally, we can choose not to despine the left spine of the right column
         if not despine_right:
             if self.bottom_margin:
                 self.left[:-1, -1] = True
             else:
                 self.left[:, -1] = True
-        num_rows, num_cols = len(self.axes), len(self.axes[0])
-        for row_num, (row, are_left, are_bottom) in enumerate(zip(self.axes, self.left, self.bottom)):
-            for col_num, (ax, is_left, is_bottom) in enumerate(zip(row, are_left, are_bottom)):
-                # if axis has empty dimensions, grab the first element until it's a subplot
+        for row, are_left, are_bottom in zip(self.axes, self.left, self.bottom):
+            for ax, is_left, is_bottom in zip(row, are_left, are_bottom):
                 while isinstance(ax, np.ndarray): 
                     ax = ax[0]
-                # set the plot limits if they were specified
                 if xlim is not None:
                     try:
                         ax.set_xlim(xlim[0], xlim[1])
@@ -3421,7 +3589,6 @@ class SummaryDisplay():
                 if ylim is not None:
                     if not (special_bottom_left and is_bottom and is_left):
                         ax.set_ylim(ylim[0], ylim[1])
-                # change the x or y scale
                 if logx:
                     ax.set_xscale('log')
                     if not is_bottom:
@@ -3430,31 +3597,24 @@ class SummaryDisplay():
                     ax.set_yscale('log')
                     if not is_left:
                         ax.tick_params(axis="y", which="minor", left=False)
-
                 if (logx or logy) and not (is_left or is_bottom):
                     ax.minorticks_off()
-                # if in the bottom row and xticks were provided, plot the xticks
                 if is_bottom:
                     if xlabel is not None:
                         ax.set_xlabel(xlabel)
                     if xticks is not None:
                         ax.set_xticks(xticks[0], xticks[1])
-                # otherwise, clean up the ticks
                 else:
                     ax.set_xticks([])
-                # if in the left row and yticks are provided, plot the yticks
                 if is_left:
                     if not (special_bottom_left and is_bottom): 
                         if ylabel is not None:
                             ax.set_ylabel(ylabel)
                         if yticks is not None:
                             ax.set_yticks(yticks[0], yticks[1])
-                # otherwise, clean up the ticks
-                else:                    
+                else:
                     ax.set_yticks([])
-                # despine the axes
                 sbn.despine(ax=ax, left=is_left==False, bottom=is_bottom==False, trim=True)
-
 
 class TrackingTrial():
     def __init__(self, filename, holocube_framerate=120):
@@ -3501,7 +3661,16 @@ class TrackingTrial():
         # then add the dataset
         if name in self.h5_file.keys():
             del self.h5_file[name]
-        self.h5_file.create_dataset(name=name, data=arr)
+
+        # if the array is of type string, we need to store using a special dtype
+        if arr.dtype.type in [np.str_, np.bytes_]:
+            dt = h5py.string_dtype(encoding='utf-8')
+            try:
+                self.h5_file.create_dataset(name=name, data=arr.astype(np.bytes_), dtype=dt)
+            except:
+                breakpoint()
+        else:
+            self.h5_file.create_dataset(name=name, data=arr)
         del self.h5_file
         # finally, reload the file and datsets in read mode
         self.h5_file = h5py.File(self.filename, 'r')
@@ -3589,23 +3758,34 @@ class TrackingTrial():
             # make a count of each frame in order from start to end
             self.frame_ind_offline = np.arange(self.num_tests * self.num_frames_offline).reshape(
                 self.num_tests, self.num_frames_offline)
-        # measure the framerate directly
-        if 'duration' in dir(self):
-            duration = self.duration
-        else:
-            duration = self.stop_exp - self.start_exp
-        self.holocube_framerate = self.camera_heading.size / duration
-        # store the approximate times
+        # we need to generate a time array for easy plotting, but not all files will have the
+        # same attributes like duration and framerate. So, let's default to the frame numbers
+        # and then upgrade to more specific values if the appropriate variables were stored
+        # 0. default to an array of frame numbers
         if 'num_frames' in dir(self):
             self.test_ind = np.arange(self.num_tests)
             # make a count of each frame in order from start to end
             self.frame_ind = np.arange(self.num_tests * self.num_frames).reshape(
                 self.num_tests, self.num_frames)
-            # convert to time points using the framerate
-            self.time = self.frame_ind * (1./ self.holocube_framerate)
-            # success
-            self.load_success = True
-        # todo: check if the pickled bouts were saved
+            # if there's only one test, the camera_headings array might be 1D, so let's make them match
+            if self.camera_heading.ndim == 1:
+                self.camera_heading = self.camera_heading[np.newaxis, :]
+            # if the duration is absent, estimate it
+            if 'duration' not in dir(self):
+                # 1. if stop_exp and start_exp are present, calculate the duration
+                if 'stop_exp' in dir(self) and 'start_exp' in dir(self):
+                    self.duration = self.stop_exp - self.start_exp
+                # 2. if the framerate is present, calculate the duration from the number of frames
+                elif 'framerate' in dir(self):
+                    self.duration = self.num_frames / self.framerate
+            # 3. if duration is present, calculate the framerate from the number of frames
+            if 'duration' in dir(self):
+                self.time = self.frame_ind * (self.duration / self.num_frames)
+                self.holocube_framerate = self.camera_heading.size / self.duration
+                self.load_success = True
+            else:
+                print("Could not determine the duration of the trial. Please add a 'duration' or 'framerate' attributes to properly calculate frame timing.")
+        # check if the pickled bouts were saved
         bouts_fn = self.filename.replace(".h5", "_bouts.pkl")
         if os.path.exists(bouts_fn):
             self.bouts = pickle.load(open(bouts_fn, 'rb'))
@@ -3614,6 +3794,9 @@ class TrackingTrial():
                 bout.trial = self
         else:
             self.bouts = None
+        # todo: if no is_test dataset was added, assume all bouts were tests
+        if 'is_test' not in dir(self):
+            self.is_test = np.ones(self.num_tests, dtype=bool)
 
     def get_saccade_stats(self, key='camera_heading', time_var='time', rerun=False, **saccade_kwargs):
         """List saccades for each trial using peak angular velocities.
@@ -3771,7 +3954,7 @@ class TrackingTrial():
         key : str, default='camera_heading'
             The variable to center.
         """
-        vals = self.query(key, sort_by='test_ind')
+        vals = self.query(key, sort_by='test_ind', subset={})
         starts = vals[..., 0]
         vals -= starts[..., np.newaxis]
         self.add_dataset(key + "_centered", vals)
@@ -3934,7 +4117,7 @@ class TrackingTrial():
         lbl += f" {method}"
         self.add_dataset(lbl, new_headings)
 
-    def query(self, output='camera_heading', sort_by='test_ind', subset={'is_test': True}):
+    def query(self, output='camera_heading', sort_by='test_ind', subset={}):
         """Return the trials indexed by a given attribute.
 
         Parameters  
@@ -3943,7 +4126,7 @@ class TrackingTrial():
             The parameter to output indexed by key.
         sort_by : str, default = 'time'
             The parameter to use for sorting the trials.
-        subset : dict, default = {'is_test': True}
+        subset : dict, default = {}
             The subset of parameters to include in the output.
         """
         if output == 'bouts':
@@ -4026,6 +4209,7 @@ class TrackingTrial():
         # index the return array using the include array
         if sort_by.ndim == 1:
             # todo: does this algorithm work for sort_by arrays of higher dimension (like time)?
+            # TODO: sometimes test_inds is bigger than the queried 
             sort_by_inds = np.argsort(sort_by)
             new_ret = []
             try:
@@ -4308,7 +4492,7 @@ class Bout():
             # find the number of frames corresponding to 100 ms, because saccades are 
             # unlikely to occur that frequently
             dist = .25 * self.framerate
-            peaks = scipy.signal.find_peaks(np.abs(velocity), distance=dist/4, width=3, prominence=prominance, wlen=dist, )
+            peaks = scipy.signal.find_peaks(np.abs(velocity), distance=dist/4, width=2, prominence=prominance, wlen=dist)
             # test:
             # fig, axes = plt.subplots(nrows=2, sharex=True)
             # axes[0].plot(vals_filtered)
@@ -4321,7 +4505,7 @@ class Bout():
             # for lb, ub in zip(peaks[1]['left_ips'], peaks[1]['right_ips']): axes[0].axvspan(lb, ub, color='gray', alpha=.3, zorder=1); axes[1].axvspan(lb, ub, color='gray', alpha=.3, zorder=1)
             # plt.show()
             # # remove outlier peaks
-            starts, stops = peaks[1]['left_ips'], peaks[1]['right_ips']
+            starts, stops = peaks[1]['left_bases'], peaks[1]['right_bases']
             # # find the rolling CI of the mean based on the past 5 velocities
             # series = pd.Series(np.abs(velocity))
             # window = 5
@@ -4384,9 +4568,10 @@ class Bout():
             velos = [max(abs(np.gradient(saccade.arr))) * 60 for saccade in self.saccades]
             for start, stop in zip(starts, stops):
                 saccade = Saccade(self.arr, self, self.framerate, start, stop, **saccade_kwargs)
-                velos = np.gradient(saccade.arr) * self.framerate
-                peak_velo = abs(velos).max()
-                if peak_velo < threshold_speed * np.pi / 180.:
+                # velos = np.gradient(saccade.arr) * self.framerate
+                # peak_velo = abs(velos).max()
+                peak_velo = abs(saccade.peak_velocity) * 180 / np.pi
+                if peak_velo < threshold_speed:
                     saccade.success = False
                 if saccade.success:
                     self.saccades += [saccade]
@@ -4770,6 +4955,7 @@ class Saccade():
             interp_func = scipy.interpolate.interp1d(self.time[start_frame: stop_frame], self.velocity[start_frame: stop_frame], kind='cubic')
             # new_times = np.linspace(self.time[start_frame], self.time[stop_frame-1], 1000)
             new_times = np.linspace(0, self.duration, 1000)
+            new_times = new_times[new_times <= self.time[start_frame:stop_frame].max()]
             new_velocity = interp_func(new_times)
             peak_ind = np.argmax(abs(new_velocity))
             self.peak_velocity = new_velocity[peak_ind]
@@ -4830,7 +5016,14 @@ class Saccade():
                         else:
                             saccading = []
                     if len(saccading) > 0:
-                        self.start, self.stop = saccading.min(), min(saccading.max() + 1, len(self.original_arr) - 1)
+                        self.start_original, self.stop_original = self.start, self.stop
+                        self.start, self.stop = max(0, saccading.min() - 1), min(saccading.max() + 1, len(self.original_arr) - 1)
+                        if self.start == self.stop:
+                            self.success = False
+                            # if self.stop == len(self.original_arr) - 1:
+                            #     self.start -= 1
+                            # else:
+                            #     self.stop += 1
                         self.start_angle, self.stop_angle = self.original_arr[self.start], self.original_arr[self.stop]
                         # re-calculate the saccade parameters
                         # subset the original array to the new start and stop points
@@ -4841,22 +5034,35 @@ class Saccade():
                         self.time /= self.framerate
                         # re-calculate the start and stop times
                         self.start_time, self.stop_time = self.start / self.framerate, self.stop / self.framerate
-                        # re-calculate the peak velocity and relative time
-                        try:
-                            peak_ind = np.argmax(abs(self.velocity[self.start: self.stop]))
-                        except:
-                            breakpoint()
-                        self.peak_velocity = self.velocity[self.start: self.stop][peak_ind]
-                        # re-calculate the relative time
-                        self.peak_time = self.time[self.start: self.stop][peak_ind]
-                        self.relative_time = np.copy(self.time)
-                        self.relative_time -= self.peak_time
                         # re-calculate the amplitude
                         self.amplitude = self.stop_angle - self.start_angle
                         # re-calculate the relative heading array
                         self.arr_relative = self.original_arr - self.start_angle
                         # re-calculate the duration
                         self.duration = (self.stop - self.start) / self.framerate
+                        # re-calculate the peak velocity and relative time
+                        if interpolate_velocity:
+                            # start_frame, stop_frame = max(self.start - 10, 0), min(self.stop+10, len(self.time))
+                            interp_func = scipy.interpolate.interp1d(self.time[start_frame: stop_frame], self.velocity[start_frame: stop_frame], kind='cubic')
+                            # new_times = np.linspace(self.time[start_frame], self.time[stop_frame-1], 1000)
+                            new_times = np.linspace(0, self.duration, 1000)
+                            new_times = new_times[new_times <= self.time[start_frame:stop_frame].max()]
+                            new_velocity = interp_func(new_times)
+                            peak_ind = np.argmax(abs(new_velocity))
+                            self.peak_velocity = new_velocity[peak_ind]
+                            self.peak_time = new_times[peak_ind]
+                            self.relative_time = np.copy(self.time)
+                            self.relative_time -= self.peak_time
+                        else:
+                            # try:    
+                            peak_ind = np.argmax(abs(self.velocity[self.start: self.stop]))
+                            self.peak_velocity = self.velocity[self.start: self.stop][peak_ind]
+                            # except:
+                            #     print("peak_ind seems to be larger than self.velocity")
+                            # re-calculate the relative time
+                            self.peak_time = self.time[self.start: self.stop][peak_ind]
+                            self.relative_time = np.copy(self.time)
+                            self.relative_time -= self.peak_time
                         if self.stop - self.start < 2 or self.duration > 1.5:
                             self.success = False
                         # optionally, check if the new peak velocity is within the bounds
@@ -4868,9 +5074,10 @@ class Saccade():
                                 self.success = False
                         if self.success and display:
                             # plot the new saccade spans
-                            axes[0].axvspan(self.time[self.start], self.time[self.stop], color='gray', alpha=.5)
-                            axes[1].axvspan(self.time[self.start], self.time[self.stop], color='gray', alpha=.5)
-                            axes[2].axvspan(self.time[self.start], self.time[self.stop], color='gray', alpha=.5)
+                            offset = self.time[self.start] - self.time[self.start_original]
+                            axes[0].axvspan(self.time[self.start] + offset, self.time[self.stop] + offset, color=blue, alpha=.5)
+                            axes[1].axvspan(self.time[self.start] + offset, self.time[self.stop] + offset, color=blue, alpha=.5)
+                            axes[2].axvspan(self.time[self.start] + offset, self.time[self.stop] + offset, color=blue, alpha=.5)
                     else:
                         self.success = False
         else:
@@ -5018,7 +5225,7 @@ def butterworth_filter(vals, low=1, high=6, sample_rate=60):
 def print_progress(part, whole):
     prop = float(part) / float(whole)
     sys.stdout.write('\r')
-    sys.stdout.write('[%-20s] %d%%' % ('=' * int(20 * prop), 100 * prop))
+    sys.stdout.write('[%-20s] %d    %%' % ('=' * int(20 * prop), 100 * prop))
     sys.stdout.flush()
 
 def sigAsterisk(p):
