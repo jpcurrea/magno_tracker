@@ -8,6 +8,13 @@ TrialsDataset
     Loads a whole set of TrackingTrial instances, allowing queries and
     statistical analyses along experimental parameters.
 """
+
+
+import numpy as np
+import matplotlib
+import matplotlib.pyplot as plt
+import warnings
+
 import copy
 import numpy as np
 import numpy
@@ -46,6 +53,210 @@ blue, green, yellow, orange, red, purple = [
     (0.78, 0.50, 0.16), (0.77, 0.31, 0.32), (0.44, 0.22, 0.78)]
 
 
+# === Phase 1 Helper Functions ===
+def resolve_colors(row_cmap, col_cmap, row_vals, col_vals, default_color='k'):
+    """
+    Generate a (num_rows, num_cols, 3) array of RGB colors for a grid.
+
+    Parameters
+    ----------
+    row_cmap : matplotlib colormap, list, or None
+        Colormap or list of colors for rows.
+    col_cmap : matplotlib colormap, list, or None
+        Colormap or list of colors for columns.
+    row_vals : array-like
+        Unique values for grid rows.
+    col_vals : array-like
+        Unique values for grid columns.
+    default_color : str or tuple, optional
+        Default color if no colormap is provided (default is 'k').
+
+    Returns
+    -------
+    color_arr : ndarray
+        Array of shape (num_rows, num_cols, 3) with RGB values.
+    """
+    num_rows = len(row_vals)
+    num_cols = len(col_vals)
+    color_arr = np.empty((num_rows, num_cols, 3), dtype=float)
+
+    def to_rgb(c):
+        return matplotlib.colors.to_rgb(c)
+
+    # Consolidate row and col color logic into a loop
+    color_maps = [row_cmap, col_cmap]
+    sizes = [num_rows, num_cols]
+    color_lists = []
+    for cmap, n, label in zip(color_maps, sizes, ['row', 'col']):
+        # Determine the color list for rows or columns
+        if cmap is None:
+            colors = [to_rgb(default_color)] * n
+        elif hasattr(cmap, '__call__'):
+            colors = [cmap(i / max(n - 1, 1))[:3] for i in range(n)]
+        elif isinstance(cmap, (list, tuple, np.ndarray)):
+            colors = [to_rgb(c) for c in cmap]
+            if len(colors) != n:
+                raise ValueError(f"Length of {label}_cmap ({len(colors)}) does not match number of {label}s ({n}).")
+        else:
+            raise TypeError(f"{label}_cmap must be None, a colormap, or a list/tuple/array of colors.")
+        color_lists.append(colors)
+    row_colors, col_colors = color_lists
+
+    row_colors = np.asarray(row_colors)
+    col_colors = np.asarray(col_colors)
+
+    # Geometric mean color blending, matching plot_summary logic
+    if num_rows > 0 and num_cols > 0:
+        color_arr = np.sqrt(0.5 * (
+            row_colors[:, np.newaxis, :] ** 2 +
+            col_colors[np.newaxis, :, :] ** 2
+        ))
+    elif num_cols > 0:
+        color_arr = np.repeat(col_colors[np.newaxis, :, :], num_rows, axis=0)
+    elif num_rows > 0:
+        color_arr = np.repeat(row_colors[:, np.newaxis, :], num_cols, axis=1)
+    else:
+        # Fallback: fill with default color if both cmaps are None or grid is empty
+        color_arr = np.full((num_rows, num_cols, 3), to_rgb(default_color), dtype=float)
+
+    return color_arr
+
+
+def get_grid_vals(experiment, var, subset):
+    """
+    Return unique, non-NaN values for a grid variable, filtered by subset.
+
+    Parameters
+    ----------
+    experiment : TrackingExperiment
+        The experiment object containing data.
+    var : str
+        Name of the variable to extract.
+    subset : dict
+        Dictionary of filters to apply.
+
+    Returns
+    -------
+    vals : ndarray
+        1D array of unique, valid values for the variable.
+    """
+    arr = experiment.query(output=var, subset=subset, skip_empty=True)
+    # If arr is a list of arrays, flatten it
+    if isinstance(arr, (list, tuple)) and len(arr) > 0 and hasattr(arr[0], '__array__'):
+        arr = np.concatenate(arr)
+    arr = np.asarray(arr)
+    # Remove NaN and b'nan' (bytes)
+    if arr.dtype.kind in {'S', 'U'}:
+        arr = arr[arr != b'nan'] if arr.dtype.kind == 'S' else arr[arr != 'nan']
+    else:
+        arr = arr[~np.isnan(arr)]
+    vals = np.unique(arr)
+    return vals
+
+
+def omit_wrapping(arr, threshold=np.pi/2, return_mask=False):
+    """
+    Insert NaNs at discontinuities in a circular array to break plot lines.
+
+    Parameters
+    ----------
+    arr : ndarray
+        Input array of angles (1D or 2D).
+    threshold : float, optional
+        Discontinuity threshold (default is pi/2).
+    return_mask : bool, optional
+        If True, also return a boolean mask (True for valid, non-NaN entries).
+
+    Returns
+    -------
+    arr_out : ndarray
+        Copy of arr with NaNs inserted at discontinuities.
+    mask : ndarray, optional
+        Boolean mask, True for valid (non-NaN) entries. Only if return_mask=True.
+    """
+    arr = np.asarray(arr)
+    if arr.ndim == 1:
+        diffs = np.abs(np.diff(arr))
+        idx = np.where(diffs > threshold)[0] + 1
+        arr_out = arr.astype(float).copy()
+        if idx.size > 0:
+            arr_out = np.insert(arr_out, idx, np.nan)
+        if return_mask:
+            mask = ~np.isnan(arr_out)
+            return arr_out, mask
+        return arr_out
+    elif arr.ndim == 2:
+        arrs, masks = [], []
+        for row in arr:
+            if return_mask:
+                wrapped, mask = omit_wrapping(row, threshold=threshold, return_mask=True)
+                arrs.append(wrapped)
+                masks.append(mask)
+            else:
+                arrs.append(omit_wrapping(row, threshold=threshold))
+        # Pad to max length
+        maxlen = max(len(a) for a in arrs)
+        arr_out = np.full((len(arrs), maxlen), np.nan)
+        if return_mask:
+            mask_out = np.full((len(arrs), maxlen), False)
+        for i, a in enumerate(arrs):
+            arr_out[i, :len(a)] = a
+            if return_mask:
+                mask_out[i, :len(a)] = masks[i]
+        if return_mask:
+            return arr_out, mask_out
+        return arr_out
+    else:
+        raise ValueError('arr must be 1D or 2D')
+
+
+def bootstrap_ci(data, stat_func, confidence=0.84, n_boot=1000, axis=0, return_bootstrap=False):
+    """
+    Compute bootstrap confidence intervals for a statistic.
+
+    Parameters
+    ----------
+    data : ndarray
+        Input data array.
+    stat_func : callable
+        Function to compute the statistic (e.g., np.nanmean).
+    confidence : float, optional
+        Confidence level (default is 0.84).
+    n_boot : int, optional
+        Number of bootstrap samples (default is 1000).
+    axis : int, optional
+        Axis along which to compute the statistic (default is 0).
+    return_bootstrap : bool, optional
+        If True, also return the array of bootstrap statistics.
+
+    Returns
+    -------
+    low : ndarray
+        Lower bound(s) of the confidence interval.
+    high : ndarray
+        Upper bound(s) of the confidence interval.
+    boot_stats : ndarray, optional
+        Array of bootstrap statistics (only if return_bootstrap is True).
+    """
+    data = np.asarray(data)
+    rng = np.random.default_rng()
+    n = data.shape[axis]
+    boot_stats = []
+    for _ in range(n_boot):
+        idx = rng.integers(0, n, n)
+        sample = np.take(data, idx, axis=axis)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', category=RuntimeWarning)
+            stat = stat_func(sample, axis=axis)
+        boot_stats.append(stat)
+    boot_stats = np.stack(boot_stats, axis=0)
+    alpha = (1 - confidence) / 2
+    low = np.nanpercentile(boot_stats, 100 * alpha, axis=0)
+    high = np.nanpercentile(boot_stats, 100 * (1 - alpha), axis=0)
+    if return_bootstrap:
+        return low, high, boot_stats
+    return low, high
+
 class Kalman_Filter():
     '''
     2D Kalman filter, assuming constant acceleration.
@@ -75,7 +286,7 @@ class Kalman_Filter():
                  measurement_noise_x=5, measurement_noise_y=5,
                  width=None, height=None):
         self.width = width
-        self.height = height
+        self.height = height if height is not None else 0
         self.num_objects = num_objects
         self.num_frames = num_frames
         self.sampling_interval = sampling_interval
@@ -1525,101 +1736,9 @@ class TrackingExperiment():
         #         storage = vals
         # row_vals, col_vals = np.array(new_row_vals), np.array(new_col_vals)
         num_rows, num_cols = len(row_vals), len(col_vals)
-        # # get the colors from the specified colormaps
-        # colors = {}
-        # for cmap, vals, key in zip(
-        #     [row_cmap, col_cmap], 
-        #     [row_vals, col_vals],
-        #     ['rows', 'columns']):
-        #     if len(vals) > 0 and np.any(vals != [None]):
-        #         if isinstance(vals[0], (str, bytes)):
-        #             # if values are strings, sort them in alphabetical order and use their index for the colors
-        #             vals = np.argsort(vals)
-        #         if isinstance(cmap, str):
-        #             norm = matplotlib.colors.Normalize(vals.min(), vals.max())
-        #             cmap = matplotlib.cm.ScalarMappable(norm=norm, cmap=cmap)
-        #             colors[key] = cmap.to_rgba(vals)[:, :-1]
-        #         elif callable(cmap):
-        #             colors[key] = cmap(vals)
-        #         elif isinstance(cmap, (list, np.ndarray, tuple)):
-        #             if len(cmap) != len(vals):
-        #                 breakpoint()
-        #             assert len(cmap) == len(vals), (
-        #                 f"Colormap list has {len(cmap)} elements but {len(vals)} {key}.")
-        #             colors[key] = np.asarray(cmap)
-        # # combine the color lists to make an array specifying the color of each subplot
-        # # if len(colors['rows']) == num_rows and len(colors['columns']) == num_cols:
-        # if 'rows' in colors.keys() and 'columns' in colors.keys():
-        #     # get the mean comination of row and column colors
-        #     # try:
-        #     if num_rows > 0 and num_cols > 0:
-        #         color_mean = .5*(
-        #             colors['rows'][:, np.newaxis]**2 +
-        #             colors['columns'][np.newaxis, :]**2)
-        #     else:
-        #         max_ind = np.argmax([len(colors[key]) for key in colors.keys()])
-        #         color_mean = tuple(colors.values())[max_ind]
-        #         if num_cols == 0:
-        #             num_cols = 1
-        #         if num_rows == 0:
-        #             num_rows = 1
-        #     color_arr = np.sqrt(color_mean)
-        # elif 'columns' in colors.keys() and len(colors['columns']) == num_cols:
-        #     color_arr = np.repeat(colors['columns'][np.newaxis], num_rows, axis=0)
-        # elif 'rows' in colors.keys() and len(colors['rows']) == num_rows:
-        #     color_arr = np.repeat(colors['rows'][:, np.newaxis], num_cols, axis=1)
-        # else:
-        #     color_arr = np.zeros((num_rows, num_cols, 3), dtype='uint8')
-        # # get the colors from the specified colormaps
-        colors = {}
-        for cmap, vals, key in zip(
-            [row_cmap, col_cmap], 
-            [row_vals, col_vals],
-            ['rows', 'columns']):
-            if len(vals) > 0:
-                if isinstance(cmap, str):
-                    if isinstance(vals[0], (str, bytes)):
-                        # if values are strings, sort them in alphabetical order and use their index for the colors
-                        vals = np.argsort(vals)
-                    norm = matplotlib.colors.Normalize(vals.min(), vals.max())
-                    cmap = matplotlib.cm.ScalarMappable(norm=norm, cmap=cmap)
-                    colors[key] = cmap.to_rgba(vals)[:, :-1]
-                elif callable(cmap):
-                    colors[key] = cmap(vals)
-                elif isinstance(cmap, (list, np.ndarray, tuple)):
-                    assert len(cmap) == len(vals), (
-                        f"Colormap list has {len(cmap)} elements but {len(vals)} {key}.")
-                    colors[key] = cmap
-                else:
-                    colors[key] = []
-            else:
-                colors[key] = []
-        # combine the color lists to make an array specifying the color of each subplot
-        if len(colors['rows']) == num_rows and len(colors['columns']) == num_cols:
-            # get the mean combination of row and column colors
-            color_mean = .5*(
-                colors['rows'][:, np.newaxis]**2 +
-                colors['columns'][np.newaxis, :]**2)
-            color_arr = np.sqrt(color_mean)
-            # elif colors['columns'] is not None:
-            #     color_arr = np.repeat(colors['columns'][np.newaxis], num_rows, axis=0)
-            # elif colors['rows'] is not None:
-            #     color_arr = np.repeat(colors['rows'][:, np.newaxis], num_cols, axis=0)
-        elif len(colors['columns']) == num_cols:
-            if isinstance(colors['columns'], list):
-                colors['columns'] = np.array(colors['columns'])
-            color_arr = np.repeat(colors['columns'][np.newaxis], num_rows, axis=0)
-        elif len(colors['rows']) == num_rows:
-            if isinstance(colors['rows'], list):
-                colors['rows'] = np.array(colors['rows'])
-            color_arr = np.repeat(colors['rows'][:, np.newaxis], num_cols, axis=1)
-        else:
-            # color_arr = np.zeros((num_rows, num_cols, 3), dtype='uint8')
-            color_arr = np.zeros((num_rows, num_cols, 3), dtype='float')
-            if color != 'k':
-                # replace with the specified color (r, g, b)
-                # color_arr[:] = (255*np.array(color)).astype('uint8')
-                color_arr[:] = np.array(color)        # todo: add extra rows if split_reversal
+        # Use the resolve_colors helper to generate the color array
+        color_arr = resolve_colors(row_cmap, col_cmap, row_vals, col_vals)
+        # todo: add extra rows if split_reversal
         if reversal_split:
             num_rows *= 2
         # test: check that the colors are aligned properly. we want this array shape to be num_rows X num_cols
@@ -1691,16 +1810,11 @@ class TrackingExperiment():
                     muted_color = np.squeeze(muted_color)
                 for trial in self.trials:
                     lines_plotted = 0
-                    # todo: fix the subsetting for bouts and saccades
-                    # bouts = trial.query_bouts(sort_by=query_kwargs['sort_by'], subset=subset)
                     bouts = trial.query(output='bouts', sort_by=query_kwargs['sort_by'], subset=subset)
                     resps = trial.query(output=output_var, sort_by=query_kwargs['sort_by'], subset=subset)
                     for bout in bouts:
                         # filter saccades
                         time, saccades = bout.query_saccades(output='saccade', subset=subset, sort_by=query_kwargs['sort_by'])
-                        # if len(saccades) > 0:
-                        #     # test: is this list right? it includes all of the saccades
-                        #     # get the bar directions
                         if len(saccades) > 0:
                             sample_size += 1
                         for saccade in saccades:
@@ -1719,17 +1833,18 @@ class TrackingExperiment():
                                 inds = np.where(include)[0]
                                 pre_inds = inds[inds < start_ind]
                                 post_inds = inds[inds > start_ind]
-                                # if saccade.amplitude < 0 and positive_amplitude:
                                 if np.nanmean(heading[post_inds]) < 0 and positive_amplitude:
                                     heading *= -1
-                                # use this to average over the same time span for all saccades, allowing non-saccade values in the average
-                                # saccade_arr += [heading[include]]
-                                # time_arr += [time[include]]
-                                # but to get the average including only the saccade data:
-                                saccade_arr += [heading[include]]
-                                time_arr += [time[include]]
-                                # saccade_arr += [heading[saccade.start: saccade.stop]]
-                                # time_arr += [time[saccade.start: saccade.stop]]
+                                # Only keep included region
+                                heading = heading[include]
+                                time = time[include]
+                                # Insert NaNs at discontinuities in heading
+                                wrapped_heading, mask = omit_wrapping(heading, return_mask=True)
+                                # Mask time to match heading
+                                wrapped_time = np.full_like(wrapped_heading, np.nan)
+                                wrapped_time[mask] = time[:np.count_nonzero(mask)]
+                                saccade_arr += [wrapped_heading]
+                                time_arr += [wrapped_time]
                                 if reversal_split:
                                     # todo: this is half wrong when positive_amplitude is True
                                     # get the mean heading before 0
@@ -1737,7 +1852,6 @@ class TrackingExperiment():
                                     post_heading = np.nanmean(heading[post_inds])
                                     same_dir = (pre_heading > 0) != (post_heading > 0)
                                     same_direction += [same_dir]
-                                    # if pre_heading < 0:
                                     if same_dir:
                                         ax = same_ax
                                     else:
@@ -1745,24 +1859,16 @@ class TrackingExperiment():
                                 else:
                                     same_direction += [True]
                                     ax = col
-                                ax.plot(heading, time, color=muted_color, lw=.25, alpha=line_alpha, zorder=1)
+                                ax.plot(wrapped_heading, wrapped_time, color=muted_color, lw=.25, alpha=line_alpha, zorder=1)
+                                # Highlight saccade region (optional, not NaN-masked)
                                 ax.plot(heading[saccade.start:saccade.stop], time[saccade.start:saccade.stop], color=line_color, lw=.25, alpha=.5, zorder=2)
                                 lines_plotted += 1
                                 # plot the stop coordinate
                                 stop_ind = saccade.stop
-                                # ax.scatter(heading[stop_ind], time[stop_ind], marker='.', color='k', edgecolor='none', alpha=.5, zorder=2)
-                                # store for the scatter plot and bar plots in bottom margins
-                                stop_times += [time[stop_ind]]                                
-                                start_times += [time[start_ind]]                                
-                                stop_amps += [heading[stop_ind]]
-                                start_amps += [heading[start_ind]]
-                                # if time_var == 'relative_time':
-                                #     ax.scatter(heading[start_ind], time[start_ind], marker='.', color='k', edgecolor='none', alpha=.5, zorder=2)
-                                # if positive_amplitude:
-                                    # plot a single mean
-                                # else:
-                                    # todo: plot the mean in the trace subplot and the mean +/- CI in the right margin
-                                    # for each direction
+                                stop_times += [time[stop_ind] if stop_ind < len(time) else np.nan]
+                                start_times += [time[start_ind] if start_ind < len(time) else np.nan]
+                                stop_amps += [heading[stop_ind] if stop_ind < len(heading) else np.nan]
+                                start_amps += [heading[start_ind] if start_ind < len(heading) else np.nan]
                     if lines_plotted > 0:
                         sample_size += 1
                         total_lines += [lines_plotted]
@@ -1993,56 +2099,8 @@ class TrackingExperiment():
             storage += [arr for arr in vals[non_nans]]
         row_vals, col_vals = np.array(new_row_vals), np.array(new_col_vals)
         num_rows, num_cols = len(row_vals), len(col_vals)
-        # get the colors from the specified colormaps
-        # get the colors from the specified colormaps
-        colors = {}
-        for cmap, vals, key in zip(
-            [row_cmap, col_cmap], 
-            [row_vals, col_vals],
-            ['rows', 'columns']):
-            if len(vals) > 0 and cmap is not None:
-                if isinstance(cmap, str):
-                    if isinstance(vals[0], (str, bytes)):
-                        # if values are strings, sort them in alphabetical order and use their index for the colors
-                        vals = np.argsort(vals)
-                    norm = matplotlib.colors.Normalize(vals.min(), vals.max())
-                    cmap = matplotlib.cm.ScalarMappable(norm=norm, cmap=cmap)
-                    colors[key] = cmap.to_rgba(vals)[:, :-1]
-                elif callable(cmap):
-                    colors[key] = cmap(vals)
-                elif isinstance(row_cmap, (list, np.ndarray, tuple)):
-                    assert len(cmap) == len(vals), (
-                        f"Colormap list has {len(cmap)} elements but {len(vals)} {key}.")
-                    colors[key] = np.array(row_cmap)
-                else:
-                    colors[key] = []
-            else:
-                colors[key] = []
-        # combine the color lists to make an array specifying the color of each subplot
-        if len(colors['rows']) == num_rows and len(colors['columns']) == num_cols:
-            # get the mean comination of row and column colors
-            # try:
-            if num_rows > 0 and num_cols > 0:
-                color_mean = .5*(
-                    colors['rows'][:, np.newaxis]**2 +
-                    colors['columns'][np.newaxis, :]**2)
-            else:
-                max_ind = np.argmax([len(colors[key]) for key in colors.keys()])
-                color_mean = tuple(colors.values())[max_ind]
-                if num_cols == 0:
-                    num_cols = 1
-                if num_rows == 0:
-                    num_rows = 1
-            color_arr = np.sqrt(color_mean)
-        elif len(colors['columns']) == num_cols:
-            color_arr = np.repeat(colors['columns'][np.newaxis], num_rows, axis=0)
-        elif len(colors['rows']) == num_rows:
-            try:
-                color_arr = np.repeat(colors['rows'][:, np.newaxis], num_cols, axis=1)
-            except:
-                breakpoint()
-        else:
-            color_arr = np.zeros((num_rows, num_cols, 3), dtype='uint8')
+        # Use the resolve_colors helper to generate the color array
+        color_arr = resolve_colors(row_cmap, col_cmap, row_vals, col_vals)
         # todo: add extra rows if split_reversal
         # test: check that the colors are aligned properly. we want this array shape to be num_rows X num_cols
         # add a row or column if plotting in the margins
@@ -2145,13 +2203,12 @@ class TrackingExperiment():
                     col = [col]
                 amplitude = np.array(amps)
                 position = np.array(key_pos)
-                # position += np.pi
-                # position %= 2*np.pi
-                # position -= np.pi
+                # Insert NaNs at discontinuities in position (heading) for robust plotting
+                wrapped_position, mask = omit_wrapping(position, return_mask=True)
+                wrapped_amplitude = np.full_like(wrapped_position, np.nan)
+                wrapped_amplitude[mask] = amplitude[:np.count_nonzero(mask)]
                 for ax in col:
-                    data = {'amplitude':amplitude, 'position':position}
-                    # ax = plt.gca()
-                    # sbn.kdeplot(data=data, x='position', y='amplitude', ax=ax, levels=20, fill=True, cmap='Greys')
+                    data = {'amplitude': wrapped_amplitude, 'position': wrapped_position}
                     if scatter:
                         marker_size = plot_kwargs.get('ms', 1)
                         alpha = plot_kwargs.get('alpha', 0.25)
@@ -2165,12 +2222,14 @@ class TrackingExperiment():
                             elif saccade_var == 'peak_velocity':
                                 ylim = (-max_speed, max_speed)
                         # if the saccade_var is amplitude, convert to degrees
+                        plot_amplitude = wrapped_amplitude.copy()
+                        plot_position = wrapped_position.copy()
                         if saccade_var == 'amplitude':
-                            amplitude *= 180 / np.pi
+                            plot_amplitude *= 180 / np.pi
                         if log_cmap:
                             # use a logarithmic colormap to better visualize low density regions
                             hist, xedges, yedges = np.histogram2d(
-                                position * 180 / np.pi, amplitude, bins=bins, 
+                                position * 180 / np.pi, plot_amplitude, bins=bins, 
                                 range=[[xlim[0], xlim[1]],[ylim[0], ylim[1]]])
                             hist = np.log1p(hist)
                             xcenters = (xedges[:-1] + xedges[1:]) / 2
@@ -2178,7 +2237,7 @@ class TrackingExperiment():
                             X, Y = np.meshgrid(xcenters, ycenters)
                             pcm = ax.pcolormesh(X, Y, hist.T, cmap='Greys')
                         else:
-                            ax.hist2d(position * 180 / np.pi, amplitude, bins=bins, 
+                            ax.hist2d(plot_position * 180 / np.pi, plot_amplitude, bins=bins, 
                                 range=[[xlim[0], xlim[1]],[ylim[0], ylim[1]]], cmap='Greys')
                     # let's also get the correlation between position and amplitude and display it
                     if correlation:
@@ -2579,75 +2638,11 @@ class TrackingExperiment():
         if 'sort_by' not in query_kwargs:
             query_kwargs['sort_by'] = 'test_ind'
         subset = copy.copy(query_kwargs['subset'])
-        # get the values used for coloring each subplot
-        row_vals = self.query(output=row_var, sort_by=row_var, subset=subset, same_size=False)
-        col_vals = self.query(output=col_var, sort_by=col_var, subset=subset, same_size=False)
-        assert len(col_vals) > 0 or len(row_vals) > 0, "The subset is empty!"
-        # todo: what's up with the number of axes?
-        row_vals = np.unique(np.concatenate(row_vals))
-        col_vals = np.unique(np.concatenate(col_vals))
-        new_row_vals, new_col_vals = [], []
-        for num, (vals, storage) in enumerate(zip([row_vals, col_vals], [new_row_vals, new_col_vals])):
-            # non_nans = np.ones_like(vals, dtype=bool)
-            if vals.dtype.type == np.bytes_:
-                non_nans = vals != b'nan'
-            elif vals.dtype.type in [np.bytes_, np.str_, ]:
-                non_nans = vals != 'nan'
-            else:
-                non_nans = np.isnan(vals) == False
-            storage += [arr for arr in vals[non_nans]]
-        row_vals, col_vals = np.array(new_row_vals), np.array(new_col_vals)
+        # Use get_grid_vals helper for unique, valid row/col values
+        row_vals = get_grid_vals(self, row_var, subset) if row_var is not None else [None]
+        col_vals = get_grid_vals(self, col_var, subset) if col_var is not None else [None]
         num_rows, num_cols = len(row_vals), len(col_vals)
-        # get the colors from the specified colormaps
-        colors = {}
-        for cmap, vals, key in zip(
-            [row_cmap, col_cmap], 
-            [row_vals, col_vals],
-            ['rows', 'columns']):
-            if len(vals) > 0:
-                if isinstance(cmap, str):
-                    if isinstance(vals[0], (str, bytes)):
-                        # if values are strings, sort them in alphabetical order and use their index for the colors
-                        vals = np.argsort(vals)
-                    norm = matplotlib.colors.Normalize(vals.min(), vals.max())
-                    cmap = matplotlib.cm.ScalarMappable(norm=norm, cmap=cmap)
-                    colors[key] = cmap.to_rgba(vals)[:, :-1]
-                elif callable(cmap):
-                    colors[key] = cmap(vals)
-                elif isinstance(cmap, (list, np.ndarray, tuple)):
-                    assert len(cmap) == len(vals), (
-                        f"Colormap list has {len(cmap)} elements but {len(vals)} {key}.")
-                    colors[key] = cmap
-                else:
-                    colors[key] = []
-            else:
-                colors[key] = []
-        # combine the color lists to make an array specifying the color of each subplot
-        if len(colors['rows']) == num_rows and len(colors['columns']) == num_cols:
-            # get the mean combination of row and column colors
-            color_mean = .5*(
-                colors['rows'][:, np.newaxis]**2 +
-                colors['columns'][np.newaxis, :]**2)
-            color_arr = np.sqrt(color_mean)
-            # elif colors['columns'] is not None:
-            #     color_arr = np.repeat(colors['columns'][np.newaxis], num_rows, axis=0)
-            # elif colors['rows'] is not None:
-            #     color_arr = np.repeat(colors['rows'][:, np.newaxis], num_cols, axis=0)
-        elif len(colors['columns']) == num_cols:
-            if isinstance(colors['columns'], list):
-                colors['columns'] = np.array(colors['columns'])
-            color_arr = np.repeat(colors['columns'][np.newaxis], num_rows, axis=0)
-        elif len(colors['rows']) == num_rows:
-            if isinstance(colors['rows'], list):
-                colors['rows'] = np.array(colors['rows'])
-            color_arr = np.repeat(colors['rows'][:, np.newaxis], num_cols, axis=1)
-        else:
-            # color_arr = np.zeros((num_rows, num_cols, 3), dtype='uint8')
-            color_arr = np.zeros((num_rows, num_cols, 3), dtype='float')
-            if color != 'k':
-                # replace with the specified color (r, g, b)
-                # color_arr[:] = (255*np.array(color)).astype('uint8')
-                color_arr[:] = np.array(color)
+        color_arr = resolve_colors(row_cmap, col_cmap, row_vals, col_vals)
         # test: check that the colors are aligned properly. we want this array shape to be num_rows X num_cols
         # add a row or column if plotting in the margins
         if bottom_margin:
@@ -2875,14 +2870,15 @@ class TrackingExperiment():
                             # stops = np.logical_not(too_fast[1:]) * too_fast[:-1]
                             # starts, stops = np.array(np.where(starts)), np.array(np.where(stops))
                             # todo: instead of working on the array as a whole, do this for each trial
-                            for xvals in new_xs:
-                                diffs = np.append([0], np.diff(xvals))
-                                too_fast = abs(diffs) > np.pi/2
-                                starts = too_fast[1:] * np.logical_not(too_fast[:-1])
-                                stops = np.logical_not(too_fast[1:]) * too_fast[:-1]
-                                for start, stop in zip(np.where(starts)[0], np.where(stops)[0]): 
-                                    xvals[start:stop] = np.nan
-                            ax.plot(new_xs.T, new_ys.T, color='gray', lw=.5, alpha=.5)
+                            # Use omit_wrapping helper to insert NaNs at discontinuities and mask new_ys accordingly
+                            wrapped_xs, mask = omit_wrapping(new_xs, return_mask=True)
+                            # Mask new_ys to match wrapped_xs shape and NaN positions
+                            wrapped_ys = np.full_like(wrapped_xs, np.nan)
+                            for i in range(min(new_ys.shape[0], wrapped_ys.shape[0])):
+                                valid_len = min(new_ys.shape[1], wrapped_ys.shape[1])
+                                wrapped_ys[i, :valid_len] = new_ys[i, :valid_len]
+                            wrapped_ys[~mask] = np.nan
+                            ax.plot(wrapped_xs.T, wrapped_ys.T, color='gray', lw=.5, alpha=.5)
                             # if np.squeeze(xs).ndim > 1:
                             #     # ax.plot(xs.T, ys.T, color='gray', lw=.5, alpha=.5)
                             #     reps = 0
@@ -2929,20 +2925,7 @@ class TrackingExperiment():
                                             summary[start:stop] = np.nan
                                     row_summ_ax.plot(summary, y, color=color, zorder=1)
                                     if confidence_interval:
-                                        # todo: get the 84% C.I. for each time point using bootstrapping
-                                        tot = xs.shape[0]
-                                        # todo: use a for loop to avoid loading the full pseudo distribution
-                                        rand_samples = np.random.randint(0, tot-1, (tot, 1000))
-                                        lows, highs = [], []
-                                        delta = (1 - confidence)/2
-                                        for frame_vals in xs.T:
-                                            pseudo_distro = frame_vals[rand_samples]
-                                            summary = summary_func(pseudo_distro, axis=0)
-                                            lb, ub = 100*delta, 100*(1-delta)
-                                            low, high = np.percentile(summary, (lb, ub))
-                                            lows += [low]
-                                            highs += [high]
-                                        lows, highs = np.array(lows), np.array(highs)
+                                        lows, highs = bootstrap_ci(xs, summary_func, confidence=confidence, axis=0)
                                         row_summ_ax.fill_betweenx(y, lows, highs, color=color, alpha=.3, zorder=2, linewidth=0)
                             else:
                                 # if 'circ_hist' in plot_kwargs:
@@ -2974,19 +2957,7 @@ class TrackingExperiment():
                                     col_summ_ax.plot(summary, y, color=color, zorder=1)
                                 # repeat the same confidence interval process as the row_summ_ax above
                                 if confidence_interval:
-                                    # get the C.I. for each time point using bootstrapping
-                                    tot = xs.shape[0]
-                                    rand_samples = np.random.randint(0, tot-1, (tot, 1000))
-                                    lows, highs = [], []
-                                    delta = (1 - confidence)/2
-                                    for frame_vals in xs.T:
-                                        pseudo_distro = frame_vals[rand_samples]
-                                        summary = summary_func(pseudo_distro, axis=0)
-                                        lb, ub = 100*delta, 100*(1-delta)
-                                        low, high = np.percentile(summary, (lb, ub))
-                                        lows += [low]
-                                        highs += [high]
-                                    lows, highs = np.array(lows), np.array(highs)
+                                    lows, highs = bootstrap_ci(xs, summary_func, confidence=confidence, axis=0)
                                     col_summ_ax.fill_betweenx(y, lows, highs, color=color, alpha=.3, zorder=2, linewidth=0)
                             else:
                                 y = new_ys[0]
@@ -3428,8 +3399,11 @@ class SummaryDisplay():
         if isinstance(self.fig, plt.Figure):
             # make it a subfigure
             self.fig = self.fig.subfigures(1, 1)
+        subplot_kwargs = fig_kwargs.copy()
+        if 'figsize' in subplot_kwargs.keys():
+            subplot_kwargs.pop('figsize')
         self.axes = self.fig.subplots(num_rows, num_cols,
-                                        **fig_kwargs)
+                                        **subplot_kwargs)
         if num_rows == 1 and num_cols == 1:
             self.axes = np.array([self.axes])[:, np.newaxis]
         elif num_rows == 1:
@@ -3558,7 +3532,9 @@ class SummaryDisplay():
         """Add values and a label to indicate differences across rows/cols using actual label bboxes."""
         # add the row values to the ylabels of the left column
         left_col = self.trace_axes[:, 0]
-        for ax, val in zip(left_col, row_vals):
+        # Fix: avoid ambiguous truth value for numpy arrays
+        row_iter = row_vals if row_vals is not None else []
+        for ax, val in zip(left_col, row_iter):
             if isinstance(val, bytes):
                 val = val.decode('utf-8')
             lbl = ax.get_ylabel()
@@ -3570,7 +3546,9 @@ class SummaryDisplay():
         bottom_row = self.axes[-1]
         if self.right_margin:
             bottom_row = bottom_row[:-1]
-        for ax, val in zip(bottom_row, col_vals):
+        # Fix: avoid ambiguous truth value for numpy arrays
+        col_iter = col_vals if col_vals is not None else []
+        for ax, val in zip(bottom_row, col_iter):
             while isinstance(ax, np.ndarray):
                 ax = ax[0]
             if isinstance(val, bytes):
@@ -4359,7 +4337,17 @@ class TrackingTrial():
                             pad = include.ndim - inds.ndim
                             index = [...]
                             index += [np.newaxis for p in range(pad)]
-                            include = include * inds[tuple(index)]
+                            # Shape check before mask application
+                            inds_mask = inds[tuple(index)]
+                            if include.shape != inds_mask.shape:
+                                import warnings
+                                warnings.warn(
+                                    f"[TrackingTrial.query] Shape mismatch applying mask for key '{key}', value '{val}': "
+                                    f"include.shape={include.shape}, inds_mask.shape={inds_mask.shape}. "
+                                    "This will likely cause a ValueError. Check your subset logic and data integrity.",
+                                    UserWarning
+                                )
+                            include = include * inds_mask
                     elif isinstance(var, (np.integer, np.floating, np.str_, np.bool_)):
                         include *= var == val
                     else:
@@ -4637,7 +4625,8 @@ class Bout():
 
     def process_saccades(self, threshold_speed=350, speed_noise_method=True, acceleration_method=False, 
                          maximum_saccade_frequency=3, kalman_method=False, de_lag=True,
-                         prominance=(1,30), kalman_filter_params=(100, .3), **saccade_kwargs):
+                         prominance=(1,30), relative_start_velo=False,
+                         **saccade_kwargs):
         """Find saccades in an array of values. 
         
         We used a variant of the procedure from Bender and Dickinson (2006):
@@ -4659,11 +4648,15 @@ class Bout():
         maximum_saccade_frequency : float, default=3
             The maximum saccade frequency used for finding peak velocities pertaining 
             to saccade torque spikes.
+        kalman_method : bool, default=False
+            Whether to use a Kalman filter for smoothing the data before finding saccades.
         de_lag : bool, default=True
             If using the acceleration method, whether to use cross-correlation to 
             avoid phase errors due to smoothing.
         prominance : tuple, default=(1, 30)
             The prominence of the peaks used for finding saccades.
+        relative_start_velo : bool, default=False
+            Whether to use relative start velocity for saccade detection.
         **saccade_kwargs
             Parameters for processing the saccades.
         """
