@@ -1167,9 +1167,10 @@ class TrackingExperiment():
         for fn in self.h5_files:
             trial = TrackingTrial(fn, **trial_kwargs)
             if trial.load_success:
-                self.trials += [trial]
-            # except:
-            #     breakpoint()
+                try:
+                    self.trials += [trial]
+                except:
+                    print('here')
         if remove_incompletes:
             self.remove_incompletes()
 
@@ -1298,10 +1299,12 @@ class TrackingExperiment():
 
     def remove_incompletes(self):
         """Use only trials with the maximum number of tests."""
-
         new_trials = []
         # find max number of tests
-        max_tests = max([trial.num_tests for trial in self.trials])
+        try:
+            max_tests = max([trial.num_tests for trial in self.trials])
+        except:
+            print("what's up with the num_tests attr for each trial? Oh, I see. The trials aren't importing at all.")
         for trial in self.trials:
             if trial.num_tests == max_tests:
                 new_trials += [trial]
@@ -1522,52 +1525,101 @@ class TrackingExperiment():
         #         storage = vals
         # row_vals, col_vals = np.array(new_row_vals), np.array(new_col_vals)
         num_rows, num_cols = len(row_vals), len(col_vals)
-        # get the colors from the specified colormaps
+        # # get the colors from the specified colormaps
+        # colors = {}
+        # for cmap, vals, key in zip(
+        #     [row_cmap, col_cmap], 
+        #     [row_vals, col_vals],
+        #     ['rows', 'columns']):
+        #     if len(vals) > 0 and np.any(vals != [None]):
+        #         if isinstance(vals[0], (str, bytes)):
+        #             # if values are strings, sort them in alphabetical order and use their index for the colors
+        #             vals = np.argsort(vals)
+        #         if isinstance(cmap, str):
+        #             norm = matplotlib.colors.Normalize(vals.min(), vals.max())
+        #             cmap = matplotlib.cm.ScalarMappable(norm=norm, cmap=cmap)
+        #             colors[key] = cmap.to_rgba(vals)[:, :-1]
+        #         elif callable(cmap):
+        #             colors[key] = cmap(vals)
+        #         elif isinstance(cmap, (list, np.ndarray, tuple)):
+        #             if len(cmap) != len(vals):
+        #                 breakpoint()
+        #             assert len(cmap) == len(vals), (
+        #                 f"Colormap list has {len(cmap)} elements but {len(vals)} {key}.")
+        #             colors[key] = np.asarray(cmap)
+        # # combine the color lists to make an array specifying the color of each subplot
+        # # if len(colors['rows']) == num_rows and len(colors['columns']) == num_cols:
+        # if 'rows' in colors.keys() and 'columns' in colors.keys():
+        #     # get the mean comination of row and column colors
+        #     # try:
+        #     if num_rows > 0 and num_cols > 0:
+        #         color_mean = .5*(
+        #             colors['rows'][:, np.newaxis]**2 +
+        #             colors['columns'][np.newaxis, :]**2)
+        #     else:
+        #         max_ind = np.argmax([len(colors[key]) for key in colors.keys()])
+        #         color_mean = tuple(colors.values())[max_ind]
+        #         if num_cols == 0:
+        #             num_cols = 1
+        #         if num_rows == 0:
+        #             num_rows = 1
+        #     color_arr = np.sqrt(color_mean)
+        # elif 'columns' in colors.keys() and len(colors['columns']) == num_cols:
+        #     color_arr = np.repeat(colors['columns'][np.newaxis], num_rows, axis=0)
+        # elif 'rows' in colors.keys() and len(colors['rows']) == num_rows:
+        #     color_arr = np.repeat(colors['rows'][:, np.newaxis], num_cols, axis=1)
+        # else:
+        #     color_arr = np.zeros((num_rows, num_cols, 3), dtype='uint8')
+        # # get the colors from the specified colormaps
         colors = {}
         for cmap, vals, key in zip(
             [row_cmap, col_cmap], 
             [row_vals, col_vals],
             ['rows', 'columns']):
-            if len(vals) > 0 and np.any(vals != [None]):
-                if isinstance(vals[0], (str, bytes)):
-                    # if values are strings, sort them in alphabetical order and use their index for the colors
-                    vals = np.argsort(vals)
+            if len(vals) > 0:
                 if isinstance(cmap, str):
+                    if isinstance(vals[0], (str, bytes)):
+                        # if values are strings, sort them in alphabetical order and use their index for the colors
+                        vals = np.argsort(vals)
                     norm = matplotlib.colors.Normalize(vals.min(), vals.max())
                     cmap = matplotlib.cm.ScalarMappable(norm=norm, cmap=cmap)
                     colors[key] = cmap.to_rgba(vals)[:, :-1]
                 elif callable(cmap):
                     colors[key] = cmap(vals)
                 elif isinstance(cmap, (list, np.ndarray, tuple)):
-                    if len(cmap) != len(vals):
-                        breakpoint()
                     assert len(cmap) == len(vals), (
                         f"Colormap list has {len(cmap)} elements but {len(vals)} {key}.")
-                    colors[key] = np.asarray(cmap)
-        # combine the color lists to make an array specifying the color of each subplot
-        # if len(colors['rows']) == num_rows and len(colors['columns']) == num_cols:
-        if 'rows' in colors.keys() and 'columns' in colors.keys():
-            # get the mean comination of row and column colors
-            # try:
-            if num_rows > 0 and num_cols > 0:
-                color_mean = .5*(
-                    colors['rows'][:, np.newaxis]**2 +
-                    colors['columns'][np.newaxis, :]**2)
+                    colors[key] = cmap
+                else:
+                    colors[key] = []
             else:
-                max_ind = np.argmax([len(colors[key]) for key in colors.keys()])
-                color_mean = tuple(colors.values())[max_ind]
-                if num_cols == 0:
-                    num_cols = 1
-                if num_rows == 0:
-                    num_rows = 1
+                colors[key] = []
+        # combine the color lists to make an array specifying the color of each subplot
+        if len(colors['rows']) == num_rows and len(colors['columns']) == num_cols:
+            # get the mean combination of row and column colors
+            color_mean = .5*(
+                colors['rows'][:, np.newaxis]**2 +
+                colors['columns'][np.newaxis, :]**2)
             color_arr = np.sqrt(color_mean)
-        elif 'columns' in colors.keys() and len(colors['columns']) == num_cols:
+            # elif colors['columns'] is not None:
+            #     color_arr = np.repeat(colors['columns'][np.newaxis], num_rows, axis=0)
+            # elif colors['rows'] is not None:
+            #     color_arr = np.repeat(colors['rows'][:, np.newaxis], num_cols, axis=0)
+        elif len(colors['columns']) == num_cols:
+            if isinstance(colors['columns'], list):
+                colors['columns'] = np.array(colors['columns'])
             color_arr = np.repeat(colors['columns'][np.newaxis], num_rows, axis=0)
-        elif 'rows' in colors.keys() and len(colors['rows']) == num_rows:
+        elif len(colors['rows']) == num_rows:
+            if isinstance(colors['rows'], list):
+                colors['rows'] = np.array(colors['rows'])
             color_arr = np.repeat(colors['rows'][:, np.newaxis], num_cols, axis=1)
         else:
-            color_arr = np.zeros((num_rows, num_cols, 3), dtype='uint8')
-        # todo: add extra rows if split_reversal
+            # color_arr = np.zeros((num_rows, num_cols, 3), dtype='uint8')
+            color_arr = np.zeros((num_rows, num_cols, 3), dtype='float')
+            if color != 'k':
+                # replace with the specified color (r, g, b)
+                # color_arr[:] = (255*np.array(color)).astype('uint8')
+                color_arr[:] = np.array(color)        # todo: add extra rows if split_reversal
         if reversal_split:
             num_rows *= 2
         # test: check that the colors are aligned properly. we want this array shape to be num_rows X num_cols
@@ -1870,8 +1922,9 @@ class TrackingExperiment():
                               reversal_split=False, output='start', 
                               heading_var='camera_heading', reference_var=None, saccade_var='amplitude',
                               bins=21, min_speed=50, max_speed=3000, scatter=False, 
-                              xlim=None, ylim=None, xticks=None, yticks=None,
-                              jitter_std=0.1,
+                              xlim=None, ylim=None, xticks=None, yticks=None, display=None,
+                              log_cmap=False, jitter_std=0.1, correlation=False,
+                              plot_kwargs={},
                               **query_kwargs):
         """Plot saccade position (x) and amplitude (y) in a grid as in the plot summary below.
         
@@ -1903,6 +1956,8 @@ class TrackingExperiment():
             Whether to plot the data as a scatter plot or a 2D histogram.
         jitter_std : float, default=0.05
             The standard deviation of the jitter to add to each point for visualization.
+        display : SummaryDisplay, default=None
+            If provided, use this display instead of making a new one.
         **query_kwargs
             These get passed to the query 
         """
@@ -1997,9 +2052,14 @@ class TrackingExperiment():
             num_cols += 1
         # make the figure and axes with a grid defined by num_rows and num_cols
         figsize = (scale * num_cols + 1, scale*num_rows + 1)
-        self.display = SummaryDisplay(
-            num_rows=num_rows, num_cols=num_cols, right_margin=right_margin, 
-            bottom_margin=bottom_margin, figsize=figsize)
+        if display is not None:
+            self.display = display
+        else:
+            fig = plt.figure(figsize=figsize)
+            subfig = fig.subfigures(1,1)
+            self.display = SummaryDisplay(
+                num_rows=num_rows, num_cols=num_cols, right_margin=right_margin, 
+                bottom_margin=bottom_margin, fig=subfig)
         trace_axes = self.display.trace_axes
         # plot the data
         num_frames = self.trials[0].num_frames
@@ -2061,7 +2121,8 @@ class TrackingExperiment():
                             reference_position %= 2*np.pi
                             reference_position -= np.pi
                         # grab the subsetted saccades
-                        times, saccades = bout.query_saccades(output='saccade', sort_by=query_kwargs['sort_by'], subset=subset)
+                        # times, saccades = bout.query_saccades(output='saccade', sort_by=query_kwargs['sort_by'], subset=subset)
+                        times, saccades = bout.query_saccades(output='saccade', sort_by=query_kwargs['sort_by'], subset=subset, min_speed=min_speed)
                         # for each saccade, check if it's within the speed range and store the specified position
                         for saccade in saccades:
                             peak_speed = abs(saccade.peak_velocity) * 180 / np.pi
@@ -2092,7 +2153,9 @@ class TrackingExperiment():
                     # ax = plt.gca()
                     # sbn.kdeplot(data=data, x='position', y='amplitude', ax=ax, levels=20, fill=True, cmap='Greys')
                     if scatter:
-                        ax.scatter(position, amplitude, marker='o', alpha=.25, color='k', edgecolor='none')
+                        marker_size = plot_kwargs.get('ms', 1)
+                        alpha = plot_kwargs.get('alpha', 0.25)
+                        ax.scatter(position, amplitude, marker='o', alpha=alpha, color='k', edgecolor='none', s=marker_size)
                     else:
                         if xlim is None:
                             xlim = (-180, 180)
@@ -2104,29 +2167,41 @@ class TrackingExperiment():
                         # if the saccade_var is amplitude, convert to degrees
                         if saccade_var == 'amplitude':
                             amplitude *= 180 / np.pi
-                        ax.hist2d(position * 180 / np.pi, amplitude, bins=bins, 
-                            range=[[xlim[0], xlim[1]],[ylim[0], ylim[1]]], cmap='Greys')
-                    # let's also get the correlation between position and amplitude and display it
-                    valid = np.isfinite(position) * np.isfinite(amplitude)
-                    if np.sum(valid) > 2:
-                        # corr, pval = scipy.stats.pearsonr(position[valid], amplitude[valid])
-                        # spearman_corr, spearman_pval = scipy.stats.spearmanr(position[valid], amplitude[valid])
-                        corr = mardia_circ_lin(position[valid]*np.pi/180, amplitude[valid])
-                        # use bootstrapping to get a p-value
-                        # so, let's make 10000 re-samples with replacement of the amplitude and position data
-                        num_samples = len(position[valid])
-                        reps = 10000
-                        rand_inds = np.random.randint(0, num_samples, (reps, num_samples))
-                        rand_position, rand_amplitude = position[valid][rand_inds], amplitude[valid][rand_inds]
-                        rand_corrs = np.array([mardia_circ_lin(rand_position[i]*np.pi/180, rand_amplitude[i]) for i in range(reps)])
-                        # get the 95% confidence interval of the null distribution
-                        lower, mid, upper = np.percentile(rand_corrs, [2.5, 50, 97.5])
-                        if mid < 0:
-                            pval = np.sum(rand_corrs <= corr) / reps
+                        if log_cmap:
+                            # use a logarithmic colormap to better visualize low density regions
+                            hist, xedges, yedges = np.histogram2d(
+                                position * 180 / np.pi, amplitude, bins=bins, 
+                                range=[[xlim[0], xlim[1]],[ylim[0], ylim[1]]])
+                            hist = np.log1p(hist)
+                            xcenters = (xedges[:-1] + xedges[1:]) / 2
+                            ycenters = (yedges[:-1] + yedges[1:]) / 2
+                            X, Y = np.meshgrid(xcenters, ycenters)
+                            pcm = ax.pcolormesh(X, Y, hist.T, cmap='Greys')
                         else:
-                            pval = np.sum(rand_corrs >= corr) / reps
-                        # plot the correlation, it's confidence interval, and p-value
-                        ax.set_title(f"r={corr:.2f} ({lower:.2f}, {upper:.2f}) {sigAsterisk(pval)}", fontsize=8)
+                            ax.hist2d(position * 180 / np.pi, amplitude, bins=bins, 
+                                range=[[xlim[0], xlim[1]],[ylim[0], ylim[1]]], cmap='Greys')
+                    # let's also get the correlation between position and amplitude and display it
+                    if correlation:
+                        valid = np.isfinite(position) * np.isfinite(amplitude)
+                        if np.sum(valid) > 2:
+                            # corr, pval = scipy.stats.pearsonr(position[valid], amplitude[valid])
+                            # spearman_corr, spearman_pval = scipy.stats.spearmanr(position[valid], amplitude[valid])
+                            corr = mardia_circ_lin(position[valid]*np.pi/180, amplitude[valid])
+                            # use bootstrapping to get a p-value
+                            # so, let's make 10000 re-samples with replacement of the amplitude and position data
+                            num_samples = len(position[valid])
+                            reps = 10000
+                            rand_inds = np.random.randint(0, num_samples, (reps, num_samples))
+                            rand_position, rand_amplitude = position[valid][rand_inds], amplitude[valid][rand_inds]
+                            rand_corrs = np.array([mardia_circ_lin(rand_position[i]*np.pi/180, rand_amplitude[i]) for i in range(reps)])
+                            # get the 95% confidence interval of the null distribution
+                            lower, mid, upper = np.percentile(rand_corrs, [2.5, 50, 97.5])
+                            if mid < 0:
+                                pval = np.sum(rand_corrs >= 0) / reps
+                            else:
+                                pval = np.sum(rand_corrs <= 0) / reps
+                            # plot the correlation, it's confidence interval, and p-value
+                            ax.set_title(f"r={corr:.2f} ({lower:.2f}, {upper:.2f}) {sigAsterisk(pval)}", fontsize=8)
                     # ax.set_xlabel(None)
                     # ax.set_ylabel(None)
                     # ax.set_xlabel('position')
@@ -2583,9 +2658,10 @@ class TrackingExperiment():
         figsize = (scale * (num_cols + 1), scale*(num_rows + 1))
         format_axes = True
         if display is None:
+            fig = plt.figure(figsize=figsize)
             self.display = SummaryDisplay(
                 num_rows=num_rows, num_cols=num_cols, right_margin=right_margin, 
-                bottom_margin=bottom_margin, figsize=figsize)
+                bottom_margin=bottom_margin, fig=fig)
         else:
             self.display = display
             format_axes = True
@@ -2819,8 +2895,9 @@ class TrackingExperiment():
                             # else:
                         # use the y-values from the trial with the fewest NaNs
                         nans = np.isnan(ys)
-                        fewest_nans = nans.sum(1).argmin()
-                        y = ys[fewest_nans]
+                        fewest_nans = nans.sum(1).min()
+                        fewest_nans = nans.sum(1) == fewest_nans
+                        y = np.nanmean(ys[fewest_nans], axis=0)
                         if callable(summary_func) and plot_type in ['hist2d', 'line']:
                             ax_mean = summary_func(xs, axis=0)
                             # mean_vals = np.array(mean_vals)
@@ -3080,17 +3157,19 @@ class TrackingExperiment():
             query_kwargs['sort_by'] = 'test_ind'
         subset = copy.copy(query_kwargs['subset'])
         # get the values used for coloring each subplot
-        row_vals = self.query(output=row_var, sort_by=row_var)
-        col_vals = self.query(output=col_var, sort_by=col_var)
+        # get the values used for coloring each subplot
+        row_vals = self.query(output=row_var, sort_by=row_var, subset=subset, same_size=False)
+        col_vals = self.query(output=col_var, sort_by=col_var, subset=subset, same_size=False)
         assert len(col_vals) > 0 or len(row_vals) > 0, "The subset is empty!"
         # todo: what's up with the number of axes?
-        row_vals = np.unique(row_vals)
-        col_vals = np.unique(col_vals)
+        row_vals = np.unique(np.concatenate(row_vals))
+        col_vals = np.unique(np.concatenate(col_vals))
         new_row_vals, new_col_vals = [], []
         for num, (vals, storage) in enumerate(zip([row_vals, col_vals], [new_row_vals, new_col_vals])):
+            # non_nans = np.ones_like(vals, dtype=bool)
             if vals.dtype.type == np.bytes_:
                 non_nans = vals != b'nan'
-            elif vals.dtype.type in [np.str_]:
+            elif vals.dtype.type in [np.bytes_, np.str_, ]:
                 non_nans = vals != 'nan'
             else:
                 non_nans = np.isnan(vals) == False
@@ -3108,17 +3187,15 @@ class TrackingExperiment():
                     if isinstance(vals[0], (str, bytes)):
                         # if values are strings, sort them in alphabetical order and use their index for the colors
                         vals = np.argsort(vals)
-                    # add comments below
-                    # make a colormap
                     norm = matplotlib.colors.Normalize(vals.min(), vals.max())
                     cmap = matplotlib.cm.ScalarMappable(norm=norm, cmap=cmap)
                     colors[key] = cmap.to_rgba(vals)[:, :-1]
                 elif callable(cmap):
                     colors[key] = cmap(vals)
-                elif isinstance(row_cmap, (list, np.ndarray, tuple)):
+                elif isinstance(cmap, (list, np.ndarray, tuple)):
                     assert len(cmap) == len(vals), (
                         f"Colormap list has {len(cmap)} elements but {len(vals)} {key}.")
-                    colors[key] = row_cmap
+                    colors[key] = cmap
                 else:
                     colors[key] = []
             else:
@@ -3135,11 +3212,80 @@ class TrackingExperiment():
             # elif colors['rows'] is not None:
             #     color_arr = np.repeat(colors['rows'][:, np.newaxis], num_cols, axis=0)
         elif len(colors['columns']) == num_cols:
+            if isinstance(colors['columns'], list):
+                colors['columns'] = np.array(colors['columns'])
             color_arr = np.repeat(colors['columns'][np.newaxis], num_rows, axis=0)
         elif len(colors['rows']) == num_rows:
+            if isinstance(colors['rows'], list):
+                colors['rows'] = np.array(colors['rows'])
             color_arr = np.repeat(colors['rows'][:, np.newaxis], num_cols, axis=1)
         else:
-            color_arr = np.zeros((num_rows, num_cols, 3), dtype='uint8')
+            # color_arr = np.zeros((num_rows, num_cols, 3), dtype='uint8')
+            color_arr = np.zeros((num_rows, num_cols, 3), dtype='float')
+            if color != 'k':
+                # replace with the specified color (r, g, b)
+                # color_arr[:] = (255*np.array(color)).astype('uint8')
+                color_arr[:] = np.array(color)
+        # row_vals = self.query(output=row_var, sort_by=row_var)
+        # col_vals = self.query(output=col_var, sort_by=col_var)
+        # assert len(col_vals) > 0 or len(row_vals) > 0, "The subset is empty!"
+        # # todo: what's up with the number of axes?
+        # row_vals = np.unique(row_vals)
+        # col_vals = np.unique(col_vals)
+        # new_row_vals, new_col_vals = [], []
+        # for num, (vals, storage) in enumerate(zip([row_vals, col_vals], [new_row_vals, new_col_vals])):
+        #     if vals.dtype.type == np.bytes_:
+        #         non_nans = vals != b'nan'
+        #     elif vals.dtype.type in [np.str_]:
+        #         non_nans = vals != 'nan'
+        #     else:
+        #         non_nans = np.isnan(vals) == False
+        #     storage += [arr for arr in vals[non_nans]]
+        # row_vals, col_vals = np.array(new_row_vals), np.array(new_col_vals)
+        # num_rows, num_cols = len(row_vals), len(col_vals)
+        # # get the colors from the specified colormaps
+        # colors = {}
+        # for cmap, vals, key in zip(
+        #     [row_cmap, col_cmap], 
+        #     [row_vals, col_vals],
+        #     ['rows', 'columns']):
+        #     if len(vals) > 0:
+        #         if isinstance(cmap, str):
+        #             if isinstance(vals[0], (str, bytes)):
+        #                 # if values are strings, sort them in alphabetical order and use their index for the colors
+        #                 vals = np.argsort(vals)
+        #             # add comments below
+        #             # make a colormap
+        #             norm = matplotlib.colors.Normalize(vals.min(), vals.max())
+        #             cmap = matplotlib.cm.ScalarMappable(norm=norm, cmap=cmap)
+        #             colors[key] = cmap.to_rgba(vals)[:, :-1]
+        #         elif callable(cmap):
+        #             colors[key] = cmap(vals)
+        #         elif isinstance(row_cmap, (list, np.ndarray, tuple)):
+        #             assert len(row_cmap) == len(vals), (
+        #                 f"Colormap list has {len(row_cmap)} elements but {len(vals)} {key}.")
+        #             colors[key] = row_cmap
+        #         else:
+        #             colors[key] = []
+        #     else:
+        #         colors[key] = []
+        # # combine the color lists to make an array specifying the color of each subplot
+        # if len(colors['rows']) == num_rows and len(colors['columns']) == num_cols:
+        #     # get the mean combination of row and column colors
+        #     color_mean = .5*(
+        #         colors['rows'][:, np.newaxis]**2 +
+        #         colors['columns'][np.newaxis, :]**2)
+        #     color_arr = np.sqrt(color_mean)
+        #     # elif colors['columns'] is not None:
+        #     #     color_arr = np.repeat(colors['columns'][np.newaxis], num_rows, axis=0)
+        #     # elif colors['rows'] is not None:
+        #     #     color_arr = np.repeat(colors['rows'][:, np.newaxis], num_cols, axis=0)
+        # elif len(colors['columns']) == num_cols:
+        #     color_arr = np.repeat(colors['columns'][np.newaxis], num_rows, axis=0)
+        # elif len(colors['rows']) == num_rows:
+        #     color_arr = np.repeat(colors['rows'][:, np.newaxis], num_cols, axis=1)
+        # else:
+        #     color_arr = np.zeros((num_rows, num_cols, 3), dtype='uint8')
         # test: check that the colors are aligned properly. we want this array shape to be num_rows X num_cols
         # add a row or column if plotting in the margins
         if bottom_margin:
@@ -3241,9 +3387,20 @@ class TrackingExperiment():
             # add the sample size to the first subplot
             self.display.fig.suptitle(f"N={min(repetitions)}–{max(repetitions)} traces per subplot")
         # plt.show()
-    
+
+    def close(self):
+        """Close all trials and release resources."""
+        for trial in getattr(self, 'trials', []):
+            if hasattr(trial, 'close'):
+                trial.close()
+
+    def __del__(self):
+        self.close()
+
+
+
 class SummaryDisplay():
-    def __init__(self, num_rows=1, num_cols=1, right_margin=True, bottom_margin=True,
+    def __init__(self, num_rows=1, num_cols=1, right_margin=True, bottom_margin=True, figsize=None,
                  **fig_kwargs):
         """Setup a figure with a grid of subplots to iteratively populate.
         
@@ -3264,14 +3421,14 @@ class SummaryDisplay():
         if 'fig' in fig_kwargs:
             self.fig = fig_kwargs.pop('fig')
         else:
-            self.fig = plt.figure(**fig_kwargs)
+            self.fig = plt.figure(figsize=figsize, **fig_kwargs)
         # else:
         #     self.fig, self.axes = plt.subplots(num_rows, num_cols, layout='constrained',
         #                                     **fig_kwargs)
         if isinstance(self.fig, plt.Figure):
             # make it a subfigure
             self.fig = self.fig.subfigures(1, 1)
-        self.axes = self.fig.subplots(num_rows, num_cols, 
+        self.axes = self.fig.subplots(num_rows, num_cols,
                                         **fig_kwargs)
         if num_rows == 1 and num_cols == 1:
             self.axes = np.array([self.axes])[:, np.newaxis]
@@ -3317,6 +3474,8 @@ class SummaryDisplay():
         self._margin_label_cids = []
         self._row_label_artists = None
         self._col_label_artists = None
+        # let's add a re-entry guard to the update function
+        self._updating = False
 
     def _get_fig_size_inches(self):
         """Robustly compute size in inches for Figure or SubFigure."""
@@ -3399,7 +3558,7 @@ class SummaryDisplay():
         """Add values and a label to indicate differences across rows/cols using actual label bboxes."""
         # add the row values to the ylabels of the left column
         left_col = self.trace_axes[:, 0]
-        for ax, val in zip(left_col, row_vals or []):
+        for ax, val in zip(left_col, row_vals):
             if isinstance(val, bytes):
                 val = val.decode('utf-8')
             lbl = ax.get_ylabel()
@@ -3411,7 +3570,7 @@ class SummaryDisplay():
         bottom_row = self.axes[-1]
         if self.right_margin:
             bottom_row = bottom_row[:-1]
-        for ax, val in zip(bottom_row, col_vals or []):
+        for ax, val in zip(bottom_row, col_vals):
             while isinstance(ax, np.ndarray):
                 ax = ax[0]
             if isinstance(val, bytes):
@@ -3433,11 +3592,18 @@ class SummaryDisplay():
         # let's make it 1 inch for both bottom and left
         self.left_bound = 0
         self.bottom_bound = 0
+        # normalize by rcParams['axes.labelsize'] to account for different font sizes
+        labelsize = plt.rcParams.get('axes.labelsize', 10)
+        labelsize_conv = {'xx-small': 6, 'x-small': 7, 'small': 8, 'medium': 10,
+                          'large': 12, 'x-large': 14, 'xx-large': 16}
+        if labelsize in labelsize_conv:
+            labelsize = labelsize_conv[labelsize]
         if row_label is not None:
-            self.left_bound = 1.0 / fig_width
+            # self.left_bound = 1.0 / fig_width
+            self.left_bound =  labelsize / (8. * fig_width)
             self.adjusted_left = True
         if col_label is not None:
-            self.bottom_bound = 1.0 / fig_height
+            self.bottom_bound = .9 * labelsize / (8. * fig_height)
             self.adjusted_bottom = True
         if self.adjusted_left or self.adjusted_bottom:
             self.fig.subplots_adjust(left=self.left_bound, bottom=self.bottom_bound)
@@ -3449,11 +3615,15 @@ class SummaryDisplay():
             y_center = float(np.mean(y_c[:, 1])) if len(y_c) else 0.5
             # place to the left of the left-most ylabel bbox
             x_ref = float(np.min(y_b[:, 0])) if len(y_b) else 0.05
-            spine_x = .4 / fig_width
+            # spine_x = .4 / fig_width
+            spine_x = self.left_bound - ((.55 * 8.) / (labelsize * fig_width))
+            sub_trans = self._get_coord_transform()
+            inv_sub = sub_trans.inverted()
+
             tick_len = 0.05 / fig_width
             label = row_label.replace("_", " ")
             txt_x = 0
-            row_text = self.fig.text(txt_x, y_center, label, va='center', ha='left', rotation='vertical', transform=coord_trans)
+            row_text = self.fig.text(txt_x, y_center, label, va='center', ha='left', rotation='vertical', transform=coord_trans, fontsize=labelsize)
             ymins = float(np.min(y_c[:, 1])) if len(y_c) else 0.2
             ymaxs = float(np.max(y_c[:, 1])) if len(y_c) else 0.8
             row_spine = matplotlib.lines.Line2D([spine_x, spine_x], [ymins, ymaxs], lw=1, color='k')
@@ -3477,10 +3647,12 @@ class SummaryDisplay():
             # txt_y = y_ref - 0.035
             txt_y = .1 / fig_height
             # spine_y = y_ref - 0.018
-            spine_y = .5 / fig_height
+            # spine_y = .5 / fig_height
+            # spine_y = self.bottom_bound - (.33 / fig_height)
+            spine_y = self.bottom_bound - ((.21 * 8.) / (labelsize * fig_width))
             tick_len_y = 0.05 / fig_height
             label = col_label.replace("_", " ")
-            col_text = self.fig.text(x_center, txt_y, label, va='bottom', ha='center', rotation='horizontal', transform=coord_trans)
+            col_text = self.fig.text(x_center, txt_y, label, va='bottom', ha='center', rotation='horizontal', transform=coord_trans, fontsize=labelsize)
             xmins = float(np.min(x_c[:, 0])) if len(x_c) else 0.2
             xmaxs = float(np.max(x_c[:, 0])) if len(x_c) else 0.8
             col_spine = matplotlib.lines.Line2D([xmins, xmaxs], [spine_y, spine_y], lw=1, color='k')
@@ -3504,66 +3676,80 @@ class SummaryDisplay():
 
     def _update_margin_labels(self, event=None):
         """Update margin label and tick positions on draw/resize using label bboxes."""
-        bottom_row = self.axes[-1]
-        if self.right_margin:
-            bottom_row = bottom_row[:-1]
-        left_col = self.trace_axes[:, 0]
-        # adjust the subplots to fit the row or column label
-        fig_width, fig_height = self._get_fig_size_inches()
-        # we want to keep a fixed amount of space on the left and bottom for labels
-        # let's make it 1 inch for both bottom and left
-        if self.adjusted_left:
-            self.left_bound = 1.0 / fig_width
-        if self.adjusted_bottom:
-            self.bottom_bound = 1.0 / fig_height
-        if self.adjusted_left or self.adjusted_bottom:
-            self.fig.subplots_adjust(left=self.left_bound, bottom=self.bottom_bound)
-        coord_trans = self._get_coord_transform()
-        # row updates
-        if self._row_label_artists is not None:
-            y_b = self._label_bboxes_in_subfig_coords(left_col, which='y')
-            y_c = self._label_centers_in_subfig_coords(left_col, which='y')
-            y_center = float(np.mean(y_c[:, 1])) if len(y_c) else 0.5
-            x_ref = float(np.min(y_b[:, 0])) if len(y_b) else 0.05
-            # txt_x = x_ref - 0.03
-            txt_x = 0
-            spine_x = .4 / fig_width
-            tick_len = 0.05 / fig_width
-            self._row_label_artists['text'].set_position((txt_x, y_center))
-            self._row_label_artists['text'].set_transform(coord_trans)
-            ymins = float(np.min(y_c[:, 1])) if len(y_c) else 0.2
-            ymaxs = float(np.max(y_c[:, 1])) if len(y_c) else 0.8
-            print(spine_x)
-            self._row_label_artists['spine'].set_data([spine_x, spine_x], [ymins, ymaxs])
-            self._row_label_artists['spine'].set_transform(coord_trans)
-            ticks = self._row_label_artists['ticks']
-            if len(ticks) == (len(y_c) if len(y_c) else 1):
-                vals = (y_c[:, 1] if len(y_c) else [y_center])
-                for t, yv in zip(ticks, vals):
-                    t.set_data([spine_x, spine_x + tick_len], [float(yv), float(yv)])
-                    t.set_transform(coord_trans)
-        # column updates
-        if self._col_label_artists is not None:
-            x_b = self._label_bboxes_in_subfig_coords(bottom_row, which='x')
-            x_c = self._label_centers_in_subfig_coords(bottom_row, which='x')
-            x_center = float(np.mean(x_c[:, 0])) if len(x_c) else 0.5
-            y_ref = float(np.min(x_b[:, 1])) if len(x_b) else 0.07
-            # txt_y = y_ref - 0.035
-            txt_y = .1 / fig_height
-            spine_y = .5 / fig_height
-            tick_len_y = 0.05 / fig_height
-            self._col_label_artists['text'].set_position((x_center, txt_y))
-            self._col_label_artists['text'].set_transform(coord_trans)
-            xmins = float(np.min(x_c[:, 0])) if len(x_c) else 0.2
-            xmaxs = float(np.max(x_c[:, 0])) if len(x_c) else 0.8
-            self._col_label_artists['spine'].set_data([xmins, xmaxs], [spine_y, spine_y])
-            self._col_label_artists['spine'].set_transform(coord_trans)
-            ticks = self._col_label_artists['ticks']
-            if len(ticks) == (len(x_c) if len(x_c) else 1):
-                vals = (x_c[:, 0] if len(x_c) else [x_center])
-                for t, xv in zip(ticks, vals):
-                    t.set_data([float(xv), float(xv)], [spine_y, spine_y + tick_len_y])
-                    t.set_transform(coord_trans)
+        if self._updating:
+            return
+        try:
+            self._updating = True
+            bottom_row = self.axes[-1]
+            if self.right_margin:
+                bottom_row = bottom_row[:-1]
+            left_col = self.trace_axes[:, 0]
+            # adjust the subplots to fit the row or column label
+            fig_width, fig_height = self._get_fig_size_inches()
+            # we want to keep a fixed amount of space on the left and bottom for labels
+            # let's make it 1 inch for both bottom and left
+            labelsize = plt.rcParams.get('axes.labelsize', 10)
+            labelsize_conv = {'xx-small': 6, 'x-small': 7, 'small': 8, 'medium': 10,
+                            'large': 12, 'x-large': 14, 'xx-large': 16}
+            if labelsize in labelsize_conv:
+                labelsize = labelsize_conv[labelsize]
+            if self.adjusted_left:
+                # self.left_bound = 1.0 / fig_width
+                self.left_bound = float(labelsize) / (8. * fig_width)
+            if self.adjusted_bottom:
+                # self.bottom_bound = 1.0 / fig_height
+                self.bottom_bound = float(labelsize) / (8. * fig_height)
+            if self.adjusted_left or self.adjusted_bottom:
+                self.fig.subplots_adjust(left=self.left_bound, bottom=self.bottom_bound)
+            coord_trans = self._get_coord_transform()
+            # row updates
+            if self._row_label_artists is not None:
+                y_b = self._label_bboxes_in_subfig_coords(left_col, which='y')
+                y_c = self._label_centers_in_subfig_coords(left_col, which='y')
+                y_center = float(np.mean(y_c[:, 1])) if len(y_c) else 0.5
+                x_ref = float(np.min(y_b[:, 0])) if len(y_b) else 0.05
+                # txt_x = x_ref - 0.03
+                txt_x = 0
+                # spine_x = .4 / fig_width
+                spine_x = self.left_bound - (.63 / fig_width)
+                tick_len = 0.05 / fig_width
+                self._row_label_artists['text'].set_position((txt_x, y_center))
+                self._row_label_artists['text'].set_transform(coord_trans)
+                ymins = float(np.min(y_c[:, 1])) if len(y_c) else 0.2
+                ymaxs = float(np.max(y_c[:, 1])) if len(y_c) else 0.8
+                self._row_label_artists['spine'].set_data([spine_x, spine_x], [ymins, ymaxs])
+                self._row_label_artists['spine'].set_transform(coord_trans)
+                ticks = self._row_label_artists['ticks']
+                if len(ticks) == (len(y_c) if len(y_c) else 1):
+                    vals = (y_c[:, 1] if len(y_c) else [y_center])
+                    for t, yv in zip(ticks, vals):
+                        t.set_data([spine_x, spine_x + tick_len], [float(yv), float(yv)])
+                        t.set_transform(coord_trans)
+            # column updates
+            if self._col_label_artists is not None:
+                x_b = self._label_bboxes_in_subfig_coords(bottom_row, which='x')
+                x_c = self._label_centers_in_subfig_coords(bottom_row, which='x')
+                x_center = float(np.mean(x_c[:, 0])) if len(x_c) else 0.5
+                y_ref = float(np.min(x_b[:, 1])) if len(x_b) else 0.07
+                # txt_y = y_ref - 0.035
+                txt_y = .1 / fig_height
+                spine_y = .5 / fig_height
+                spine_y = self.bottom_bound - (.43 / fig_height)
+                tick_len_y = 0.05 / fig_height
+                self._col_label_artists['text'].set_position((x_center, txt_y))
+                self._col_label_artists['text'].set_transform(coord_trans)
+                xmins = float(np.min(x_c[:, 0])) if len(x_c) else 0.2
+                xmaxs = float(np.max(x_c[:, 0])) if len(x_c) else 0.8
+                self._col_label_artists['spine'].set_data([xmins, xmaxs], [spine_y, spine_y])
+                self._col_label_artists['spine'].set_transform(coord_trans)
+                ticks = self._col_label_artists['ticks']
+                if len(ticks) == (len(x_c) if len(x_c) else 1):
+                    vals = (x_c[:, 0] if len(x_c) else [x_center])
+                    for t, xv in zip(ticks, vals):
+                        t.set_data([float(xv), float(xv)], [spine_y, spine_y + tick_len_y])
+                        t.set_transform(coord_trans)
+        finally:
+            self._updating = False
 
     def format(self, xlim=None, ylim=None, xticks=None, yticks=None, 
                xlabel=None, ylabel=None, special_bottom_left=False, 
@@ -3796,7 +3982,10 @@ class TrackingTrial():
             self.bouts = None
         # todo: if no is_test dataset was added, assume all bouts were tests
         if 'is_test' not in dir(self):
-            self.is_test = np.ones(self.num_tests, dtype=bool)
+            try:
+                self.is_test = np.ones(self.num_tests, dtype=bool)
+            except:
+                breakpoint()
 
     def get_saccade_stats(self, key='camera_heading', time_var='time', rerun=False, **saccade_kwargs):
         """List saccades for each trial using peak angular velocities.
@@ -3955,9 +4144,10 @@ class TrackingTrial():
             The variable to center.
         """
         vals = self.query(key, sort_by='test_ind', subset={})
-        starts = vals[..., 0]
-        vals -= starts[..., np.newaxis]
-        self.add_dataset(key + "_centered", vals)
+        if vals.size > 0:
+            starts = vals[..., 0]
+            vals -= starts[..., np.newaxis]
+            self.add_dataset(key + "_centered", vals)
 
     def unwrap(self, key='camera_heading', lower=-np.pi, upper=np.pi):
         """Unwrap the given time series.
@@ -3983,8 +4173,6 @@ class TrackingTrial():
             interp = scipy.interpolate.interp1d(np.arange(val.size)[no_nans], val[no_nans], kind='nearest', fill_value='extrapolate')
             new_vals = np.copy(val)
             new_vals[nan] = interp(np.arange(val.size)[nan])
-            if nan.sum() > 0:
-                breakpoint()
             interpolated_vals += [new_vals]
         interpolated_vals = np.array(interpolated_vals)
         # shift up by pi so that the 2pi unwrapping is centered around 0
@@ -4306,6 +4494,20 @@ class TrackingTrial():
         # apply the filter and store with a new name
         self.__setattr__(key+"_smoothed", vals_smoothed)
 
+    def close(self):
+        """Close the h5 file and delete bouts if present."""
+        if hasattr(self, 'h5_file') and self.h5_file:
+            try:
+                self.h5_file.close()
+            except Exception:
+                pass
+            self.h5_file = None
+        if hasattr(self, 'bouts'):
+            del self.bouts
+
+    def __del__(self):
+        self.close()
+
 
 # todo: use nonlinear fitting to find the best jerk_std and measurement noise for a Kalman filter 
 class KalmanFitter():
@@ -4369,7 +4571,8 @@ class Bout():
         self.arr = arr
         self.time = time
         self.test_ind = test_ind
-        self.framerate = 1./(self.time[1] - self.time[0])
+        # self.framerate = 1./(self.time[1] - self.time[0])
+        self.framerate = 1./np.nanmean(np.diff(self.time))
         self.duration = self.time.max() - self.time.min()
 
     def get_stats(self, **saccade_kwargs):
@@ -4393,7 +4596,7 @@ class Bout():
         self.total_angle = self.arr[self.extreme_frame] - self.arr[0]
         # average velocity
         self.velocity = np.gradient(self.arr)
-        self.velocitsy_avg = self.velocity.mean()
+        self.velocity_avg = self.velocity.mean()
         self.velocity_std = self.velocity.std()
         # inter-saccade interval
         # measure the time from each stop to the next start
@@ -4403,6 +4606,12 @@ class Bout():
         for start, stop in zip(starts, stops):
             intervals += [(stop - start)/self.framerate]
         self.inter_saccade_intervals = intervals
+        if len(self.saccades) > 0:
+            # add the isi to each appropriate saccade
+            self.saccades[0].isi = np.nan
+        if len(self.saccades) > 1:
+            for isi, saccade in zip(intervals, self.saccades[1:]):
+                saccade.isi = isi
         self.inter_saccade_interval = np.mean(intervals)
         # saccade frequency
         self.saccade_frequency = len(self.saccades) / self.duration
@@ -4475,10 +4684,13 @@ class Bout():
             #     return np.sum((arr[0] - vals_filtered)**2)
             # res = minimize(cost_function, kalman_filter_params, method='Nelder-Mead', bounds=((0, 1000000), (1, 100)), options={'maxiter': 1000})
             # vals_filtered = np.unwrap(kfilter.generate_vals(res.x[0], res.x[1]*10), axis=-1)
-            vals_filtered = butterworth_filter(arr, low=0, high=15, sample_rate=self.framerate)
-            vals_filtered_rev = butterworth_filter(arr[:, ::-1], low=0, high=15, sample_rate=self.framerate)
-            vals_filtered = (vals_filtered + vals_filtered_rev[:, ::-1]) / 2
-            vals_filtered = np.unwrap(vals_filtered[0], axis=-1)
+            arr_clean, arr_mask, valid_start, valid_end = _handle_nans_for_filter(arr[0])
+            vals_filtered_fwd = butterworth_filter(arr_clean[np.newaxis], low=0, high=min(15, round(self.framerate/2)-1), sample_rate=self.framerate)
+            vals_filtered_rev = butterworth_filter(arr_clean[np.newaxis, ::-1], low=0, high=min(15, round(self.framerate/2)-1), sample_rate=self.framerate)
+            vals_filtered = np.zeros_like(arr[0])
+            vals_filtered.fill(np.nan)
+            vals_filtered[valid_start:valid_end] = np.unwrap((vals_filtered_fwd + vals_filtered_rev[:, ::-1]) / 2, axis=-1)
+            # vals_filtered = np.unwrap(vals_filtered, axis=-1)
             # plt.plot(range(len(arr[0])), arr[0]) 
             # plt.plot(vals_filtered)
             # plt.show()
@@ -4486,13 +4698,17 @@ class Bout():
             self.saccades = []
             # use raw velocity to get the confidence interval based on a rolling window of variance
             # velocity = np.gradient(arr[0])
+            # we need to account for NaNs when calculating the velocity, so we can use np.gradient on the filtered values instead
+            # and we'll calculate the gradient ourselves
             velocity = np.gradient(vals_filtered)
             velocity *= self.framerate
             # find peak velocities using a peak finding algorithm
             # find the number of frames corresponding to 100 ms, because saccades are 
             # unlikely to occur that frequently
             dist = .25 * self.framerate
-            peaks = scipy.signal.find_peaks(np.abs(velocity), distance=dist/4, width=2, prominence=prominance, wlen=dist)
+            # see if any of the find_peaks parameters were provided via saccade_kwargs
+            distance, width, prominance, wlen = saccade_kwargs.get('distance', dist/4), saccade_kwargs.get('width', 2), saccade_kwargs.get('prominence', (1, 30)), saccade_kwargs.get('wlen', dist)
+            peaks = scipy.signal.find_peaks(np.abs(velocity), distance=distance, width=width, prominence=prominance, wlen=wlen)
             # test:
             # fig, axes = plt.subplots(nrows=2, sharex=True)
             # axes[0].plot(vals_filtered)
@@ -4610,6 +4826,8 @@ class Bout():
             if 'display' in saccade_kwargs.keys():
                 if saccade_kwargs['display']:
                     fig, axes = plt.subplots(nrows=3, sharex=True)
+                    # for the gradients, we need to account for NaNs
+
                     axes[0].plot(self.time, np.gradient(velocity), color='k', marker='.')
                     axes[1].plot(self.time, velocity * 180 / np.pi, color='k', marker='.')
                     axes[2].plot(self.time, arr[0])
@@ -4844,6 +5062,11 @@ class Bout():
                                 key_vals = obj.__getattribute__(key)
                                 key_val = key_vals
                         if key_val is not None:
+                            if isinstance(key_vals, h5py.Dataset):
+                                # convert to a numpy array
+                                key_vals = np.array(key_vals)
+                                if key_vals.dtype.type == np.bytes_:
+                                    key_vals = np.array([k.decode('utf-8') for k in key_vals])
                             # if key_vals is an array, we need to use the reference time to subset
                             if isinstance(key_vals, np.ndarray):
                                 # if obj is a trial, we need to find the data specific to that bout
@@ -4876,7 +5099,7 @@ class Bout():
         return times, saccades
 
 class Saccade():
-    def __init__(self, arr, bout, framerate=1, start=0, stop=-1, interpolate_velocity=True, baseline_comparison=False, display=False, baseline_test=True):
+    def __init__(self, arr, bout, framerate=1, start=0, stop=-1, interpolate_velocity=True, baseline_comparison=False, baseline_z=2, baseline_padding=10, display=False, baseline_test=True, **kwargs):
         """Wrapper for saccade time series and measurements.
 
         Parameters
@@ -4895,6 +5118,10 @@ class Saccade():
         baseline_comparison : bool, default=True
             Whether to use the baseline distribution of velocities to correct the
             start and stop points of the saccade.
+        baseline_z : float, default=2
+            The z-score threshold for defining the baseline velocity distribution.
+        baseline_padding : int, default=10
+            The number of frames to include in the baseline velocity calculation.
         baseline_test : bool, default=True
             Whether to use the velocity noise distribution to verify if the saccade is valid.
         display : bool, default=False
@@ -4914,11 +5141,19 @@ class Saccade():
             The maximum discrete velocity measured in the time series.
         amplitude : float
             The total displacement from start to finish.
-        baseline_comparison : bool
+        baseline_comparison : bool, default=True
             Whether to re-calculate the start and stop frames using the baseline 
             velocity.
+        baseline_z : float, default=2
+            The z-score threshold for defining the baseline velocity distribution.
+        baseline_test : bool, default=True
+            Whether to use the velocity noise distribution to verify if the saccade is valid.
+        display : bool, default=False
+            Whether to display the resultant saccade start and stop points.
         """
         # store the original time series and time
+        self.baseline_z = baseline_z
+        self.baseline_padding = baseline_padding
         self.bout = bout
         arr = np.unwrap(arr)
         self.original_arr = arr
@@ -4950,7 +5185,7 @@ class Saccade():
         self.acceleration *= self.framerate
         if interpolate_velocity:
             # use a spline interpolation of the velocity to find the interpolated maximum
-            start_frame, stop_frame = max(self.start - 10, 0), min(self.stop+11, len(self.time))
+            start_frame, stop_frame = max(self.start - self.baseline_padding, 0), min(self.stop+1+self.baseline_padding, len(self.time))
             # start_frame, stop_frame = max(self.start - 10, 0), min(self.stop+10, len(self.time))
             interp_func = scipy.interpolate.interp1d(self.time[start_frame: stop_frame], self.velocity[start_frame: stop_frame], kind='cubic')
             # new_times = np.linspace(self.time[start_frame], self.time[stop_frame-1], 1000)
@@ -4969,7 +5204,7 @@ class Saccade():
             self.success = False
             if len(velos_included) > 0:
                 velo_mean, velo_std = np.nanmean(velos_included), np.nanstd(velos_included)
-                velo_floor, velo_ceiling = velo_mean - 2 * velo_std, velo_mean + 2 * velo_std
+                velo_floor, velo_ceiling = velo_mean - self.baseline_z * velo_std, velo_mean + self.baseline_z * velo_std
                 # test: plot the headings, velocity, and angular acceleration highlighting the saccade interval and peak velocity
                 ta, tb = max(0, self.start-10), min(len(self.velocity), self.stop + 11)
                 if display:
@@ -5018,6 +5253,7 @@ class Saccade():
                     if len(saccading) > 0:
                         self.start_original, self.stop_original = self.start, self.stop
                         self.start, self.stop = max(0, saccading.min() - 1), min(saccading.max() + 1, len(self.original_arr) - 1)
+                        start_frame, stop_frame = max(self.start - self.baseline_padding, 0), min(self.stop+ self.baseline_padding, len(self.time))
                         if self.start == self.stop:
                             self.success = False
                             # if self.stop == len(self.original_arr) - 1:
@@ -5048,7 +5284,10 @@ class Saccade():
                             new_times = np.linspace(0, self.duration, 1000)
                             new_times = new_times[new_times <= self.time[start_frame:stop_frame].max()]
                             new_velocity = interp_func(new_times)
-                            peak_ind = np.argmax(abs(new_velocity))
+                            try:
+                                peak_ind = np.argmax(abs(new_velocity))
+                            except:
+                                print("ValueError: attempt to get argmax of an empty sequence")
                             self.peak_velocity = new_velocity[peak_ind]
                             self.peak_time = new_times[peak_ind]
                             self.relative_time = np.copy(self.time)
@@ -5341,6 +5580,83 @@ def mardia_circ_lin(circular_data, linear_data):
     # Calculate and return the correlation coefficient
     corr = numerator / denominator
     return corr
+
+def _handle_nans_for_filter(data):
+    """
+    Prepare data for filtering by interpolating intermittent NaNs.
+    Preserves leading and trailing NaNs.
+    
+    Parameters
+    ----------
+    data : np.ndarray
+        Input array that may contain NaNs
+        
+    Returns
+    -------
+    filtered_data : np.ndarray
+        Data with intermittent NaNs interpolated, ready for filtering
+    valid_mask : np.ndarray
+        Boolean mask of originally valid (non-NaN) values
+    valid_start : int
+        Index where valid data starts
+    valid_end : int
+        Index where valid data ends (exclusive)
+    """
+    valid_mask = ~np.isnan(data)
+    
+    # Find the range of valid data (excluding leading/trailing NaNs)
+    valid_indices = np.where(valid_mask)[0]
+    
+    if len(valid_indices) == 0:
+        # All NaNs - return as is
+        return data.copy(), valid_mask, 0, 0
+    
+    valid_start = valid_indices[0]
+    valid_end = valid_indices[-1] + 1
+    
+    # Extract the data range that contains valid values
+    data_slice = data[valid_start:valid_end].copy()
+    
+    # Interpolate any intermittent NaNs within this range
+    if np.any(np.isnan(data_slice)):
+        # Find NaN positions in the slice
+        nan_mask = np.isnan(data_slice)
+        # Interpolate using linear interpolation
+        x = np.arange(len(data_slice))
+        data_slice[nan_mask] = np.interp(x[nan_mask], x[~nan_mask], data_slice[~nan_mask])
+    
+    return data_slice, valid_mask, valid_start, valid_end
+
+
+def _restore_nans_after_filter(filtered_slice, original_data, valid_start, valid_end):
+    """
+    Restore the original NaN pattern after filtering.
+    
+    Parameters
+    ----------
+    filtered_slice : np.ndarray
+        The filtered data slice
+    original_data : np.ndarray
+        Original data array with NaNs
+    valid_start : int
+        Start index of valid data
+    valid_end : int
+        End index of valid data (exclusive)
+        
+    Returns
+    -------
+    result : np.ndarray
+        Filtered data with original NaN pattern restored
+    """
+    result = np.full_like(original_data, np.nan)
+    result[valid_start:valid_end] = filtered_slice
+    
+    # Restore intermittent NaNs if they existed in the original
+    original_nans = np.isnan(original_data[valid_start:valid_end])
+    if np.any(original_nans):
+        result[valid_start:valid_end][original_nans] = np.nan
+    
+    return result
 
 if __name__ == "__main__":
     tracker = OfflineTracker("..\\arena\\fourier feedback")
