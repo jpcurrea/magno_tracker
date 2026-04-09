@@ -1,3 +1,4 @@
+# NOTE: When working through this todo list, changes should be made step-by-step. Discuss each step and check for conceptual errors before making code changes. This workflow should be followed in future sessions with an LLM to ensure correctness and maintainability.
 
 # tracking.py Refactor & Feature Additions Todo
 
@@ -126,13 +127,13 @@ interface works for all downstream plotting.
 
 ### Tasks
 
-- [ ] **3.1 Define which saccade attributes are "scalar" vs "time-series"**
+- [ ] **4.1 Define which saccade attributes are "scalar" vs "time-series"**
       Scalars: `amplitude`, `duration`, `peak_velocity`, `start_angle`, `stop_angle`,
       `start_time`, `stop_time`. Time-series: `arr_relative`, `velocity`, `time`,
       `relative_time`. Document these in a class-level dict or constant
       (e.g., `Saccade.SCALAR_ATTRS`, `Saccade.TIMESERIES_ATTRS`).
 
-- [ ] **3.2 Refactor `TrackingTrial.query_saccades()`**
+- [ ] **4.2 Refactor `TrackingTrial.query_saccades()`**
       New signature: `query_saccades(output, groupby='saccade', agg_func=np.nanmean,
       subset={}, sort_by='test_ind', min_speed=0, max_speed=np.inf)`.
       - Partition `subset` keys into trial/bout-level vs saccade-level.
@@ -143,7 +144,7 @@ interface works for all downstream plotting.
       - If `groupby='bout'`: apply `agg_func` per bout → one value per bout.
       - If `groupby='trial'`: apply `agg_func` across all saccades → one value.
 
-- [ ] **3.3 Update `Bout.query_saccades()` accordingly**
+- [ ] **4.3 Update `Bout.query_saccades()` accordingly**
       Currently walks `self.saccades` and checks subset keys against
       `self.trial`, `self`, and each `saccade`. Refactor to:
       - Accept the same `output`/`groupby`/`agg_func` interface.
@@ -152,14 +153,14 @@ interface works for all downstream plotting.
       - Return the requested attribute per saccade (if `groupby='saccade'`)
         or the aggregated value (if `groupby='bout'`).
 
-- [ ] **3.4 Update `TrackingExperiment.query(object='saccade')`**
+- [ ] **4.4 Update `TrackingExperiment.query(object='saccade')`**
       New kwargs: `groupby='saccade'`, `agg_func=np.nanmean`.
       Aggregation at the experiment level:
       - `groupby='saccade'`: concatenate all per-trial flat arrays → one big array.
       - `groupby='bout'`: concatenate per-trial bout-level arrays → one per bout.
       - `groupby='trial'`: collect per-trial scalars → array of length N_trials.
 
-- [ ] **3.5 Write integration tests** for `query(object='saccade')` confirming:
+- [ ] **4.5 Write integration tests** for `query(object='saccade')` confirming:
       - Trial-level subset correctly limits included bouts.
       - Saccade-level subset correctly filters by `peak_velocity`, `amplitude`, etc.
       - `groupby='saccade'` + scalar output → flat ndarray, length = total saccades.
@@ -202,6 +203,7 @@ subsets, and margin summaries — delegating actual drawing to Phase 2 functions
 ---
 
 ## Phase 5 — Deprecate old methods and clean up
+
 
 - [ ] **5.1 Rewrite `plot_summary` as a thin wrapper** around `plot()` (for backward compat), mark deprecated
 
