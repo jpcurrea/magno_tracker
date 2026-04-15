@@ -1,5 +1,7 @@
 # NOTE: When working through this todo list, changes should be made step-by-step. Discuss each step and check for conceptual errors before making code changes. This workflow should be followed in future sessions with an LLM to ensure correctness and maintainability.
 
+# CONSTRAINT: Lazy loading (xr.open_dataset) is a hard requirement for most of the library. Do NOT switch to eager loading (xr.load_dataset) as a solution to file-handle conflicts or save/overwrite bugs — lazy loading must be preserved. Any fixes to file-handle issues must work within the lazy-loading model (e.g. explicitly closing handles before writing, writing to a temp path then renaming, etc.).
+
 # tracking.py Refactor & Feature Additions Todo
 
 This document tracks planned changes and improvements for `magno_tracker/tracking.py`,
@@ -47,21 +49,46 @@ All major blocks of color, grid, wrapping, and bootstrap logic have been extract
 
 Goal: Refactor data handling to use xarray for robust, labeled, multidimensional arrays, improving query/filter logic and reducing shape mismatch bugs.
 
-- [ ] **2.1 Prototype xarray Dataset creation**
+- [x] **2.1 Prototype xarray Dataset creation**
       - Load HDF5 datasets into xarray, assigning dimension names (e.g., 'test', 'frame') and coordinates.
       - Validate that all variables (e.g., time, body_angle) align on dimensions.
+      - HDF5 → Zarr conversion on first load; subsequent loads read from Zarr lazily (`xr.open_dataset(..., engine='zarr')`).
+      - `save()` writes to a temp Zarr store then swaps atomically, avoiding h5py file-lock conflicts.
+      - Round-trip consistency validated by integration tests (all 9 passing as of April 2026).
 
-- [ ] **2.2 Refactor query logic to use xarray**
-      - Replace manual boolean mask logic with xarray's `.sel()`, `.where()`, and label-based indexing.
-      - Ensure all filtering, subsetting, and aggregation is done via xarray methods.
+- [x] **2.1b Fix `add_dataset` / `add_attr` / `remove_dataset` for zarr**
+      - All subtasks complete. Saving is now opt-in (`save()` must be called explicitly).
+      - Sensitive variable warnings implemented for `is_test` and `camera_heading_offline`.
+      - Derived dataset names standardised to snake_case.
+      - Round-trip tests added and passing (26/26 as of April 2026).
 
-- [ ] **2.3 Update downstream analysis and plotting**
-      - Update plotting and analysis code to use xarray objects.
-      - Ensure all code paths are tested and results match previous implementation.
+- [x] **2.2 Refactor query logic to use xarray**
+      - `query()` fully rewritten: 1-D subset vars drop tests via `.isel()`,
+        2-D subset vars NaN-fill frames via `.where()`.
+      - Membership (`[1, 3]`), inequality strings (`'>0.5'`), NaN matching, and
+        AND-conditions all handled correctly.
+      - 35 unit + integration tests passing (April 2026), results validated
+        empirically against real experimental data.
 
-- [ ] **2.4 Document migration and add tests**
-      - Add migration notes and examples to the codebase.
-      - Write unit tests for xarray-based query and filtering.
+- [x] **2.3 Update downstream analysis and plotting**
+      - `plot_summary` and other experiment-level plotting functions required no
+        changes — the new `query()` return type and shape are identical.
+      - `butterworth_filter` and `remove_saccades` updated to use `add_dataset()`.
+
+- [x] **2.4 Document migration and add tests**
+      - Migration notes and usage examples added to docstrings for `load()`,
+        `save()`, `add_dataset()`, `remove_dataset()`, `add_attr()`, and `query()`.
+      - 52 tests passing across `TestTrackingTrialFromH5`, `TestTrackingTrialFromZarr`,
+        `TestQuery`, `TestAddDataset`, `TestRemoveDataset`, `TestAddAttr`,
+        `TestAddDatasetRoundTrip`, `TestQueryIntegration`, `TestButterworthIntegration`,
+        and `TestRemoveSaccadesIntegration`.
+
+### Implementation summary (April 2026)
+
+**Phase 2 is complete.** The data layer now uses xarray + Zarr throughout:
+lazy loading is preserved, file-lock issues are eliminated, all derived datasets
+are stored via `add_dataset()` / `save()`, and the full query/filter API is
+backed by xarray dimension-aware operations.
 
 ---
 
@@ -69,6 +96,15 @@ Goal: Refactor data handling to use xarray for robust, labeled, multidimensional
 
 Stateless functions: `(ax, xvals, yvals, color, **kwargs) → artist(s)`.
 Easy to test with synthetic data and reusable outside `TrackingExperiment`.
+
+- [ ] **3.0 Fix `resolve_colors` / `color` argument handling in plotting functions**
+      - Passing a single RGB color (e.g. `color=red`) should generate a white→color
+        linear colormap applied uniformly to all rows and columns (previous behaviour).
+      - `row_cmap` / `col_cmap` may now be a **list of colors**, one per row/column,
+        in which case each row (or column) gets its own white→color linear colormap.
+      - Regression: since Phase 1 helper extraction the greys cmap is being applied
+        to all figures regardless of the `color` argument — this must be fixed.
+      - Add unit tests covering single-color, list-of-colors, and explicit cmap inputs.
 
 - [ ] **3.1 `plot_line(ax, xs, ys, color, summary_func=None, ci=False, **kw)`**
       Individual traces (gray) + colored mean overlay + optional CI shading.

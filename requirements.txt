@@ -1,9 +1,12 @@
 camera
 h5py
+h5netcdf
 matplotlib
-numpy
+numpy<2
 pandas
 scikit_image
 scikit_video
 scipy
 seaborn
+xarray
+Zarr

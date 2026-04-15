@@ -1,0 +1,36 @@
+flowchart TD
+    A[query called with output, sort_by, subset] --> B{output == 'bouts'?}
+    B -- yes --> C[return np.array of bouts]
+    B -- no --> D[fetch raw = _get_var output broadcast scalar → 1-D if needed wrap in xr.DataArray da]
+
+    D --> E[init test_mask = all True init frame_mask = None]
+
+    E --> F{any subset keys?}
+    F -- no --> K
+    F -- yes --> G[for each key, vals in subset]
+
+    G --> H[var = _get_var key broadcast scalar → 1-D]
+
+    H --> I{vals is a list with no strings?}
+    I -- yes membership OR --> J1[cond = np.isin var, vals]
+    I -- no AND conditions --> J2[for each val in vals compute cond via == inequalitystring or isnan]
+
+    J1 --> L{var.ndim?}
+    J2 --> L
+
+    L -- 1-D test-level --> M[test_mask &= cond drops entire tests]
+    L -- 2-D frame-level --> N[frame_mask &= cond NaN-fills frames]
+
+    M --> F2{more keys?}
+    N --> F2
+    F2 -- yes --> G
+    F2 -- no --> K
+
+    K[da = da.isel test=where test_mask drops excluded tests]
+    K --> O{frame_mask exists and da is 2-D?}
+    O -- yes --> P[da = da.where frame_mask NaN-fills excluded frames]
+    O -- no --> Q
+    P --> Q
+
+    Q[sb = _get_var sort_by filtered by test_mask sort_order = argsort sb da = da.isel test=sort_order]
+    Q --> R[return da.values numpy array]

@@ -14,6 +14,12 @@ import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
 import warnings
+warnings.filterwarnings(
+    "ignore",
+    message="Consolidated metadata is currently not part in the Zarr format 3 specification",
+    category=UserWarning,
+    module="zarr",
+)
 
 import copy
 import numpy as np
@@ -35,6 +41,7 @@ from skvideo import io
 import sys
 from time import time
 import pandas as pd
+import xarray as xr
 
 from functools import partial
 
@@ -1543,10 +1550,7 @@ class TrackingExperiment():
             # pad with zeros for the first frame
             num_trials = vals.shape[0]
             vals_diffs = np.diff(vals, axis=-1)
-            try:
-                vals_diffs = np.concatenate([np.zeros((num_trials, 1)), vals_diffs], axis=-1)
-            except:
-                breakpoint()
+            vals_diffs = np.concatenate([np.zeros((num_trials, 1)), vals_diffs], axis=-1)
             speed = np.abs(vals_diffs)
             too_fast = speed > speed_limit
             if replace and np.any(too_fast):
@@ -1554,6 +1558,8 @@ class TrackingExperiment():
                 vals_diffs[too_fast] -= offset
                 vals_new = np.cumsum(vals_diffs, axis=-1)
                 vals_new[0] += vals[..., 0]
+                if vals_new.shape[1] != trial.num_frames:
+                    print("why?")
                 # replace the dataset
                 trial.add_dataset(variable, vals_new)
                 # recalculate the too_fast variable
@@ -3359,6 +3365,23 @@ class TrackingExperiment():
             self.display.fig.suptitle(f"N={min(repetitions)}–{max(repetitions)} traces per subplot")
         # plt.show()
 
+    def save(self):
+        """
+        Save all contained trials as NetCDF files.
+        """
+        for trial in self.trials:
+            trial.save()
+
+    def load(self):
+        """
+        Load all contained trials, preferring NetCDF if available.
+        """
+        loaded_trials = []
+        for trial in self.trials:
+            loaded_trial = type(trial).load(trial.filename)
+            loaded_trials.append(loaded_trial)
+        self.trials = loaded_trials
+
     def close(self):
         """Close all trials and release resources."""
         for trial in getattr(self, 'trials', []):
@@ -3793,11 +3816,7 @@ class TrackingTrial():
         # load the h5 file
         self.file_opened = False
         self.load_success = False
-        try:
-            self.h5_file = h5py.File(self.filename, 'r')
-            self.file_opened = True
-        except:
-            pass
+        self.file_opened = self.load(filename)
         if self.file_opened:
             # # store the h5 datasets as attributes
             # self.holocube_framerate = holocube_framerate
@@ -3808,162 +3827,209 @@ class TrackingTrial():
                 self.data = self.query()
 
     def add_dataset(self, name, arr):
-        """Add a new dataset to the h5 file.
+        """Add or overwrite a variable in the in-memory xarray Dataset.
+
+        The change is held in memory only. Call ``self.save()`` explicitly to
+        persist it to the Zarr store.
+
+        **Migration note (xarray/Zarr backend)**
+
+        Previously this method wrote directly to the ``.h5`` file via h5py.
+        It now assigns an ``xr.DataArray`` into the in-memory Dataset, so
+        the new variable is immediately queryable without round-tripping to
+        disk::
+
+            trial.add_dataset('my_score', np.array([0.1, 0.9, 0.4]))
+            result = trial.query('camera_heading', subset={'my_score': '>0.5'})
+            trial.save()  # persist to .zarr if desired
+
+        Dimension assignment rules:
+
+        - 1-D array of length ``num_tests`` → dim ``('test',)``
+        - 2-D array of shape ``(num_tests, num_frames)`` → dims ``('test', 'frame')``
+        - 2-D array whose second dim ≠ ``num_frames`` → ``ValueError`` (see below)
 
         Parameters
         ----------
         name : str
-            The name of the dataset
+            The name of the variable.
         arr : np.ndarray
-            The array to store.
-        """
-        # first re-load the dataset in readwrite mode
-        self.h5_file.close()
-        while 'Closed' not in self.h5_file.__str__():
-            time.sleep(.01)
-        self.h5_file = h5py.File(self.filename, 'r+')
-        # then add the dataset
-        if name in self.h5_file.keys():
-            del self.h5_file[name]
+            The array to store.  Must be 1-D (length ``num_tests``) or 2-D
+            (``num_tests × num_frames``).  Raises ``ValueError`` if a 2-D array
+            has a different frame count than this trial.
 
-        # if the array is of type string, we need to store using a special dtype
-        if arr.dtype.type in [np.str_, np.bytes_]:
-            dt = h5py.string_dtype(encoding='utf-8')
-            try:
-                self.h5_file.create_dataset(name=name, data=arr.astype(np.bytes_), dtype=dt)
-            except:
-                breakpoint()
+        Raises
+        ------
+        ValueError
+            If ``arr`` is 2-D and ``arr.shape[1] != self.num_frames``.
+        """
+        arr = np.asarray(arr)
+        if arr.ndim == 1:
+            dims = ('test',)
+        elif arr.ndim == 2:
+            if arr.shape[1] == self.num_frames:
+                dims = ('test', 'frame')
+            else:
+                raise ValueError(
+                    f"add_dataset('{name}'): array has {arr.shape[1]} frames but "
+                    f"this trial has num_frames={self.num_frames}. "
+                    f"Ensure the array was derived from this trial's data without "
+                    f"changing the frame count, or reshape it before calling add_dataset()."
+                )
         else:
-            self.h5_file.create_dataset(name=name, data=arr)
-        del self.h5_file
-        # finally, reload the file and datsets in read mode
-        self.h5_file = h5py.File(self.filename, 'r')
-        self.load_datasets()
+            dims = tuple(f'dim_{i}' for i in range(arr.ndim))
+        da = xr.DataArray(arr, dims=dims)
+        # Drop the existing variable (if any) before assigning so xarray doesn't complain
+        # about conflicting coordinate / dimension information.
+        if name in self.h5_file.data_vars:
+            self.h5_file = self.h5_file.drop_vars(name)
+        self.h5_file = self.h5_file.assign({name: da})
+        _LOAD_DATASETS_SENSITIVE = {'is_test', 'camera_heading_offline'}
+        if name in _LOAD_DATASETS_SENSITIVE:
+            import warnings
+            warnings.warn(
+                f"'{name}' affects derived attributes computed by load_datasets() "
+                f"(e.g. self.is_test, self.frame_ind_offline). "
+                f"Call trial.load_datasets() to update them.",
+                UserWarning, stacklevel=2
+            )
 
     def remove_dataset(self, name):
-        """Remove a dataset from the h5 file.
+        """Remove a variable from the in-memory xarray Dataset.
+
+        The change is held in memory only. Call ``self.save()`` explicitly to
+        persist it to the Zarr store.
+
+        Silently does nothing if *name* is not present in the dataset.
+
+        **Migration note (xarray/Zarr backend)**
+
+        Previously this method deleted a dataset directly from the ``.h5`` file
+        via h5py.  It now calls ``xr.Dataset.drop_vars()`` on the in-memory
+        Dataset::
+
+            trial.remove_dataset('old_var')  # in-memory only
+            trial.save()                     # persist the removal to .zarr
 
         Parameters
         ----------
         name : str
-            The name of the dataset to remove.
+            The name of the variable to remove.
         """
-        # first re-load the dataset in readwrite mode
-        self.h5_file.close()
-        self.h5_file = h5py.File(self.filename, 'r+')
-        # then add the dataset
-        if name in self.h5_file.keys():
-            del self.h5_file[name]
-        del self.h5_file
-        # finally, reload the file and datsets in read mode
-        self.h5_file = h5py.File(self.filename, 'r')
-        self.load_datasets()
+        if name in self.h5_file.data_vars:
+            self.h5_file = self.h5_file.drop_vars(name)
+            _LOAD_DATASETS_SENSITIVE = {'is_test', 'camera_heading_offline'}
+            if name in _LOAD_DATASETS_SENSITIVE:
+                import warnings
+                warnings.warn(
+                    f"'{name}' affects derived attributes computed by load_datasets() "
+                    f"(e.g. self.is_test, self.frame_ind_offline). "
+                    f"Call trial.load_datasets() to update them.",
+                    UserWarning, stacklevel=2
+                )
 
     def add_attr(self, name, val):
-        """Add an attribute to the whole trial dataset.
+        """Add or update a global attribute on the in-memory xarray Dataset.
+
+        The change is held in memory only. Call ``self.save()`` explicitly to
+        persist it to the Zarr store.
+
+        Sets the value on both ``self.h5_file.attrs`` (so it survives a
+        ``save()``/reload round-trip) and directly on ``self`` (so it is
+        accessible as ``trial.name`` immediately)::
+
+            trial.add_attr('genotype', 'D. mel')
+            print(trial.genotype)           # 'D. mel'
+            print(trial.h5_file.attrs['genotype'])  # 'D. mel'
+            trial.save()                    # persist to .zarr
 
         Parameters
         ----------
         name : str
-            The name of the dataset
-        val : 
+            The attribute name.
+        val : scalar or str
             The value to store.
         """
-        # first re-load the dataset in readwrite mode
-        if 'h5_file' in dir(self):
-            self.h5_file.close()
-        try:
-            self.h5_file = h5py.File(self.filename, 'r+')
-        except:
-            breakpoint()
-        # then add the dataset
-        if name in self.h5_file.keys():
-            del self.h5_file.attrs[name]
         self.h5_file.attrs[name] = val
-        del self.h5_file
-        # finally, reload the file and datsets in read mode
-        self.h5_file = h5py.File(self.filename, 'r')
-        self.load_datasets()
+        self.__setattr__(name, val)
+
+    def _get_var(self, key):
+        """Retrieve a variable as a numpy array.
+
+        Checks the xarray Dataset data_vars first (file-sourced arrays),
+        then falls back to computed attributes set on self (e.g. time, test_ind).
+        """
+        ds = self.h5_file
+        if key in ds.data_vars:
+            return ds[key].values
+        elif key in self.__dict__:
+            val = self.__dict__[key]
+            if isinstance(val, np.ndarray):
+                return val
+            return np.array(val)
+        else:
+            raise AttributeError(f"Variable '{key}' not found in dataset or computed attributes.")
 
     def load_datasets(self):
         self.load_success = False
-        # load datasets
-        for key, val in self.h5_file.items():
-            # store each dataset as an attribute
+        ds = self.h5_file  # xr.Dataset
+
+        # Load global (file-level) attributes onto self
+        for key, val in ds.attrs.items():
             self.__setattr__(key, val)
-        # load attributes
-        for key, val in self.h5_file.attrs.items():
-            self.__setattr__(key, val)
-        # trim time series to the same frame number
-        min_frames = np.inf
-        for attr in ['orientation', 'camera_heading', 'virtual_heading']:
-            if attr in dir(self):
-                min_frames = min(self.__getattribute__(attr).shape[-1], min_frames)
-        for attr in ['orientation', 'camera_heading', 'virtual_heading']:
-            if attr in dir(self):
-                self.__setattr__(attr, self.__getattribute__(attr)[..., :min_frames])
-                if attr in ['orientation', 'camera_heading']:
-                    vals = self.__getattribute__(attr)
-                    if vals.ndim == 2:
-                        # make an attribute indexing the time point of each frame
-                        self.num_tests, self.num_frames = vals.shape
-                    else:
-                        self.num_tests = 1
-                        self.num_frames = vals.shape[0]
-        attr = 'camera_heading_offline'
-        if attr in dir(self):
-            # check if 2D or 1D array
-            vals = self.__getattribute__(attr)
+
+        # Get num_tests and num_frames from the renamed dimensions
+        if 'test' in ds.dims and 'frame' in ds.dims:
+            self.num_tests = ds.sizes['test']
+            self.num_frames = ds.sizes['frame']
+        elif 'frame' in ds.dims:
+            self.num_tests = 1
+            self.num_frames = ds.sizes['frame']
+
+        # Handle camera_heading_offline (may have a different frame length)
+        if 'camera_heading_offline' in ds.data_vars:
+            vals = ds['camera_heading_offline'].values
             if vals.ndim == 2:
-                self.num_tests, self.num_frames_offline = self.__getattribute__(attr).shape
+                _, self.num_frames_offline = vals.shape
             else:
-                self.num_tests = 1
                 self.num_frames_offline = vals.shape[0]
-            # make a count of each frame in order from start to end
             self.frame_ind_offline = np.arange(self.num_tests * self.num_frames_offline).reshape(
                 self.num_tests, self.num_frames_offline)
-        # we need to generate a time array for easy plotting, but not all files will have the
-        # same attributes like duration and framerate. So, let's default to the frame numbers
-        # and then upgrade to more specific values if the appropriate variables were stored
-        # 0. default to an array of frame numbers
-        if 'num_frames' in dir(self):
+
+        # Generate derived attributes from num_tests / num_frames
+        if hasattr(self, 'num_frames'):
             self.test_ind = np.arange(self.num_tests)
-            # make a count of each frame in order from start to end
             self.frame_ind = np.arange(self.num_tests * self.num_frames).reshape(
                 self.num_tests, self.num_frames)
-            # if there's only one test, the camera_headings array might be 1D, so let's make them match
-            if self.camera_heading.ndim == 1:
-                self.camera_heading = self.camera_heading[np.newaxis, :]
-            # if the duration is absent, estimate it
-            if 'duration' not in dir(self):
-                # 1. if stop_exp and start_exp are present, calculate the duration
-                if 'stop_exp' in dir(self) and 'start_exp' in dir(self):
+
+            # Estimate duration if not already loaded from attrs
+            if 'duration' not in self.__dict__:
+                if 'stop_exp' in self.__dict__ and 'start_exp' in self.__dict__:
                     self.duration = self.stop_exp - self.start_exp
-                # 2. if the framerate is present, calculate the duration from the number of frames
-                elif 'framerate' in dir(self):
+                elif 'framerate' in self.__dict__:
                     self.duration = self.num_frames / self.framerate
-            # 3. if duration is present, calculate the framerate from the number of frames
-            if 'duration' in dir(self):
+
+            if 'duration' in self.__dict__:
                 self.time = self.frame_ind * (self.duration / self.num_frames)
-                self.holocube_framerate = self.camera_heading.size / self.duration
+                self.holocube_framerate = (self.num_tests * self.num_frames) / self.duration
                 self.load_success = True
             else:
-                print("Could not determine the duration of the trial. Please add a 'duration' or 'framerate' attributes to properly calculate frame timing.")
-        # check if the pickled bouts were saved
+                print("Could not determine the duration of the trial. Please add a 'duration' or 'framerate' attribute.")
+
+        # Check for pickled bouts
         bouts_fn = self.filename.replace(".h5", "_bouts.pkl")
         if os.path.exists(bouts_fn):
             self.bouts = pickle.load(open(bouts_fn, 'rb'))
-            # add the parent trial to each bout
             for bout in self.bouts:
                 bout.trial = self
         else:
             self.bouts = None
-        # todo: if no is_test dataset was added, assume all bouts were tests
-        if 'is_test' not in dir(self):
-            try:
-                self.is_test = np.ones(self.num_tests, dtype=bool)
-            except:
-                breakpoint()
+
+        # Ensure is_test is always a direct attribute on self
+        if 'is_test' in ds.data_vars:
+            self.is_test = ds['is_test'].values.astype(bool)
+        elif 'is_test' not in self.__dict__:
+            self.is_test = np.ones(self.num_tests, dtype=bool)
 
     def get_saccade_stats(self, key='camera_heading', time_var='time', rerun=False, **saccade_kwargs):
         """List saccades for each trial using peak angular velocities.
@@ -4277,170 +4343,156 @@ class TrackingTrial():
                 new_headings += [arr]
         new_headings = np.array(new_headings)
         if invert:
-            lbl = key + ' saccades only'
+            lbl = f"{key}_saccades_only_{method}"
         else:
-            lbl = key + ' no saccades'
-        lbl += f" {method}"
+            lbl = f"{key}_no_saccades_{method}"
         self.add_dataset(lbl, new_headings)
 
     def query(self, output='camera_heading', sort_by='test_ind', subset={}):
-        """Return the trials indexed by a given attribute.
+        """Return trial data filtered and sorted by subset conditions.
 
-        Parameters  
+        **Migration note (xarray/Zarr backend)**
+
+        The query logic was rewritten to use xarray dimension-aware operations
+        instead of manual numpy boolean indexing.  The public interface and
+        return type (numpy array) are unchanged, but the internal routing is:
+
+        - **1-D subset variables** (shape ``num_tests``) drop non-matching tests
+          via ``xr.DataArray.isel()``, reducing the test axis permanently.
+        - **2-D subset variables** (shape ``num_tests × num_frames``) NaN-fill
+          non-matching frames via ``xr.DataArray.where()``, preserving the full
+          frame axis so downstream time-series plots remain aligned.
+
+        Subset value semantics:
+
+        - **Scalar** — equality match: ``{'is_test': True}``
+        - **Inequality string** — parsed by ``interprate_inequality``:
+          ``{'test_ind': '<5'}``, ``{'score': ['>0.4', '<=0.9']}``
+        - **List of non-strings** — OR membership (``np.isin``):
+          ``{'group': [1, 3]}``
+        - **NaN** — matches NaN entries: ``{'score': float('nan')}``
+        - **Multiple keys** — ANDed together across all conditions.
+
+        Examples
+        --------
+        Return all camera headings, sorted by test index (default)::
+
+            data = trial.query()  # shape (num_tests, num_frames)
+
+        Keep only test trials, sorted by test index::
+
+            data = trial.query('camera_heading', subset={'is_test': True})
+
+        Filter by a 1-D score variable and a time window simultaneously::
+
+            data = trial.query(
+                'camera_heading',
+                subset={'score': '>0.5', 'time': '>=5'},
+            )
+            # Tests with score <= 0.5 are dropped entirely.
+            # Frames where time < 5 are NaN-filled.
+
+        Parameters
         ----------
-        output : str, default = 'orientations'
-            The parameter to output indexed by key.
-        sort_by : str, default = 'time'
-            The parameter to use for sorting the trials.
-        subset : dict, default = {}
-            The subset of parameters to include in the output.
+        output : str, default='camera_heading'
+            The variable to return.
+        sort_by : str, default='test_ind'
+            1-D test-level variable used to order the returned tests.
+        subset : dict, default={}
+            Filtering conditions.  Keys are variable names; values are scalars,
+            inequality strings, lists, or NaN (see above).
+
+        Returns
+        -------
+        np.ndarray
+            Filtered and sorted array.  Shape is ``(n_tests,)`` for 1-D outputs
+            or ``(n_tests, num_frames)`` for 2-D outputs, where ``n_tests ≤
+            num_tests`` depending on 1-D subset conditions.
         """
+        # --- bouts shortcut ---
         if output == 'bouts':
-            ret = np.array(self.bouts)
+            return np.array(self.bouts)
+
+        # --- fetch output as a DataArray (or broadcast scalar to 1-D) ---
+        raw = self._get_var(output)
+        if isinstance(raw, (str, bytes)) or np.ndim(raw) == 0:
+            raw = np.repeat(raw, self.num_tests)
+        if raw.ndim == 1:
+            da = xr.DataArray(raw, dims=('test',))
+        elif raw.ndim == 2:
+            da = xr.DataArray(raw, dims=('test', 'frame'))
         else:
-            ret = np.array(self.__getattribute__(output))
-            if isinstance(ret, (str, bytes)) or ret.ndim == 0:
-                ret = np.repeat(ret, self.num_tests)
-        include = np.ones(ret.shape, dtype=bool)
-        if len(subset.keys()) > 0:
-            for key, vals in subset.items():
-                # todo: in order to allow lists of inequalities for each variable, we should
-                # convert all vals to lists
-                if not isinstance(vals, (list, tuple, np.ndarray)):
-                    vals = [vals]
+            # higher-dim: return as-is without subsetting
+            return raw
+        # --- build masks from subset ---
+        # test_mask: 1-D bool over 'test' — rows to keep
+        # frame_mask: 2-D bool over ('test','frame') — frames to NaN-fill
+        test_mask = np.ones(self.num_tests, dtype=bool)
+        frame_mask = None  # only created if a 2-D subset var is encountered
+        for key, vals in subset.items():
+            if not isinstance(vals, (list, tuple, np.ndarray)):
+                vals = [vals]
+            var = self._get_var(key)
+            # broadcast scalar/0-D to 1-D
+            if isinstance(var, (str, bytes, bool, float, int)) or np.ndim(var) == 0:
+                var = np.repeat(var, self.num_tests)
+
+            # Decide whether vals is a membership set or a list of AND conditions.
+            # A list of non-string scalars means OR/membership: e.g. {'group': [1, 3]}
+            #   → np.isin(var, [1, 3]).
+            # A list containing any strings means AND conditions: e.g. {'score': ['>0.4', '<=0.9']}
+            #   → each string is a separate inequality ANDed together.
+            is_membership = (
+                isinstance(vals, (list, tuple, np.ndarray))
+                and len(vals) > 0
+                and not any(isinstance(v, str) for v in vals)
+                and not any(isinstance(v, float) and np.isnan(v) for v in vals)
+            )
+            if is_membership:
+                cond = np.isin(var, vals)
+                if var.ndim == 1:
+                    test_mask &= cond
+                elif var.ndim == 2:
+                    if frame_mask is None:
+                        frame_mask = np.ones((self.num_tests, self.num_frames), dtype=bool)
+                    frame_mask &= cond
+            else:
                 for val in vals:
-                    logic, thresh = np.equal, val
+                    # compute a boolean array matching var's shape
                     if isinstance(val, str):
                         logic, thresh = interprate_inequality(val)
-                    var = self.__getattribute__(key)
-                    if isinstance(var, (str, bytes, bool, float, int)):
-                        var = np.repeat(var, self.num_tests)
-                    if var.ndim == 0:
-                        var = np.repeat(var, self.num_tests)
-                    # if np.any(np.isnan(val)):
-                    #     breakpoint()
-                    if var.ndim > 0:
-                        if len(var) == len(include):
-                            if isinstance(val, (list, tuple, np.ndarray)):
-                                inds = np.isin(var, val)
-                            # elif isinstance(val, (float, int, str, bool, bytes, np.integer, np.floating, np.str_)):
-                            else:
-                                try:
-                                    inds = logic(var, thresh)
-                                except:
-                                    breakpoint()
-                                if isinstance(val, float):
-                                    if np.isnan(val):
-                                        inds = np.isnan(var)
-                            while inds.ndim > include.ndim: 
-                                inds = np.any(inds, axis=-1)
-                            pad = include.ndim - inds.ndim
-                            index = [...]
-                            index += [np.newaxis for p in range(pad)]
-                            # Shape check before mask application
-                            inds_mask = inds[tuple(index)]
-                            if include.shape != inds_mask.shape:
-                                import warnings
-                                warnings.warn(
-                                    f"[TrackingTrial.query] Shape mismatch applying mask for key '{key}', value '{val}': "
-                                    f"include.shape={include.shape}, inds_mask.shape={inds_mask.shape}. "
-                                    "This will likely cause a ValueError. Check your subset logic and data integrity.",
-                                    UserWarning
-                                )
-                            include = include * inds_mask
-                    elif isinstance(var, (np.integer, np.floating, np.str_, np.bool_)):
-                        include *= var == val
+                        cond = logic(var, thresh)
+                    elif isinstance(val, float) and np.isnan(val):
+                        cond = np.isnan(var)
                     else:
-                        breakpoint()
-                        print(f"A subset variable, {key}, has length {len(var)} but should be {len(include)}.")
-        # if self.dirname == 'Empty Sp Gal4' and 'img_id' in subset.keys():
-        #     breakpoint()
-        # grab the indexing variable
-        # if sort_by == 'test_ind':
-        #     sort_by = self.test_ind[self.is_test[:]]
-        # else:
-        #     sort_by = self.__getattribute__(sort_by)
-        sort_by = self.__getattribute__(sort_by)
-        if isinstance(sort_by, (str, bytes)) or sort_by.ndim == 0:
-            sort_by = np.repeat(sort_by, self.num_tests)
-        if ret.size < sort_by.size:
-            # for some reason, non-tests are being skipped when processing the bouts
-            breakpoint()
-        assert ret.size >= sort_by.size, (
-            "The indexing variable cannot be larger than the output")
-            
-        # select the specified subset
-        # if ret.shape != include.shape:
-        #     new_ret = []
-        #     for inds, arr in zip(include, ret): new_ret += [arr[inds]]
-        #     ret = np.array(new_ret)
-        # else:
-        #     # new_ret = []
-        #     # for arr, inds in zip(ret, include): 
-        #     #     if isinstance(arr, np.ndarray):
-        #     #         if np.any(inds): 
-        #     #             new_ret += [arr[inds]]
-        #     ret = ret[include]
-        # sort by the sort_by variable
-        # index the return array using the include array
-        if sort_by.ndim == 1:
-            # todo: does this algorithm work for sort_by arrays of higher dimension (like time)?
-            # TODO: sometimes test_inds is bigger than the queried 
-            sort_by_inds = np.argsort(sort_by)
-            new_ret = []
-            try:
-                for ind, arr in zip(include[sort_by_inds], ret[sort_by_inds]):
-                    if isinstance(ind, (tuple, list, np.ndarray)):
-                        if any(ind):
-                            new_ret += [arr[ind]]
-                    elif isinstance(ind, (bool, np.bool_)):
-                        if ind:
-                            new_ret += [arr]
-            except:
-                breakpoint()
-            ret = np.array(new_ret)
-            return ret
-        else:
-            new_ret = []
-            for inds, arr, order in zip(include, ret, sort_by):
-                if np.any(inds):
-                    # if order.dtype.type in [np.bytes_, np.string_]:
-                    #     # todo: fix this. it's not working for some reason
-                    #     # if we have a list of strings to sort by, we need to replace the strings
-                    #     # with a number corresponding to it's alphabetical order
-                    #     # then we need to 
-                    #     sub_order = order[inds]
-                    #     new_ret += [arr[inds][np.argsort(sub_order)]]
-                    if isinstance(arr, np.ndarray):
-                        sub_order = order[inds]
-                        sort_by_inds = np.argsort(sub_order)
-                        new_ret += [arr[inds][sort_by_inds]]
-                    elif inds:
-                        new_ret += [arr]
-            ret = np.array(new_ret)
-            # # at exception for string or bytes datasets
-            # if sort_by.dtype.type in [np.bytes_, np.string_]:
-            #     sort_by_vals, sort_by_inds = np.unique(sort_by, return_inverse=True)
-            #     sort_by_inds = sort_by_inds.reshape(ret.shape)
-            #     new_ret_sorted = []
-            #     breakpoint()
-            # else:
-            #     # get inclusion index for the sort_by variable
-            #     sort_include = np.copy(include)
-            #     while sort_by.ndim < sort_include.ndim: sort_include = np.any(sort_include, axis=-1).astype(bool)
-            #     sort_by_inds = np.argsort(sort_by, axis=-1)
-            #     try:
-            #         # sort using the sort_by array
-            #         new_ret_sorted = [new_ret[i] for i in sort_by_inds]
-            #     except:
-            #         breakpoint()
-            #     # if np.array(new_ret).ndim == 1 and output == 'camera_heading_offline_wrapped':
-            #     #     breakpoint()
-            #     # the array takes on strange shape if the indexing variable is not the same shape as the output
-            #     ret = np.array(new_ret_sorted)
-            #     sort_by = sort_by.flatten()
-            #     ret = ret.flatten()[np.argsort(sort_by)]
-        return ret
+                        cond = (var == val)
+
+                    if var.ndim == 1:
+                        # test-level: AND into test_mask
+                        test_mask &= cond
+                    elif var.ndim == 2:
+                        # frame-level: AND into frame_mask
+                        if frame_mask is None:
+                            frame_mask = np.ones((self.num_tests, self.num_frames), dtype=bool)
+                        frame_mask &= cond
+
+        # --- apply test-level filter: drop non-matching tests ---
+        da = da.isel(test=np.where(test_mask)[0])
+
+        # --- apply frame-level filter: NaN-fill non-matching frames ---
+        if frame_mask is not None and da.ndim == 2:
+            fm = xr.DataArray(frame_mask[test_mask], dims=('test', 'frame'))
+            da = da.where(fm)
+
+        # --- sort by sort_by variable (1-D, test-level) ---
+        sb = self._get_var(sort_by)
+        if isinstance(sb, (str, bytes)) or np.ndim(sb) == 0:
+            sb = np.repeat(sb, self.num_tests)
+        sb = sb[test_mask]
+        sort_order = np.argsort(sb)
+        da = da.isel(test=sort_order)
+
+        return da.values
 
     def butterworth_filter(self, key='camera_heading', low=1, high=6,
                            sample_rate=60):
@@ -4460,7 +4512,7 @@ class TrackingTrial():
         # frequencies must be at least 0
         assert low >= 0 and high > 0, "Frequencies bounds must be non-negative."
         # copy the values to filtered
-        vals = np.copy(self.__getattribute__(key))
+        vals = np.copy(self._get_var(key))
         # unwrap the vals first and then wrap again
         vals = np.unwrap(vals, axis=1)
         if low > 0 and high < np.inf:
@@ -4479,8 +4531,140 @@ class TrackingTrial():
                                    btype='lowpass',
                                    output='sos')
         vals_smoothed = scipy.signal.sosfilt(filter, vals, axis=1)
-        # apply the filter and store with a new name
-        self.__setattr__(key+"_smoothed", vals_smoothed)
+        # persist via add_dataset so the smoothed array survives across sessions
+        self.add_dataset(key + "_smoothed", vals_smoothed)
+
+    def save(self):
+        """
+        Persist in-memory changes to the Zarr store on disk.
+
+        **Migration note (xarray/Zarr backend)**
+
+        Saving is now *opt-in* — ``add_dataset``, ``remove_dataset``, and
+        ``add_attr`` only modify the in-memory ``xr.Dataset`` (``self.h5_file``).
+        Call ``save()`` explicitly when you want changes to survive the session::
+
+            trial.add_dataset('my_var', arr)
+            trial.add_attr('experiment_date', '2026-04-14')
+            trial.save()   # writes path/to/trial.zarr atomically
+
+        The save uses a write-to-temp-then-rename pattern so that in-flight lazy
+        reads from the existing store are never interrupted::
+
+            # writes to trial.zarr_tmp → closes handle → removes trial.zarr
+            # → renames trial.zarr_tmp → trial.zarr → reopens lazily
+
+        Returns
+        -------
+        str
+            Absolute path to the written ``.zarr`` store.
+        """
+        import os
+        import shutil
+        import xarray as xr
+        zarr_path = os.path.splitext(self.filename)[0] + ".zarr"
+        tmp_path = zarr_path + "_tmp"
+        # Write to a temporary store. Lazy reads from self.h5_file occur here chunk by
+        # chunk against the original store (zarr_path or the source h5), which is
+        # untouched at this point.
+        self.h5_file.to_zarr(tmp_path, mode='w')
+        # Release the lazy handle on the original store before replacing the directory.
+        self.h5_file.close()
+        # Swap: remove the old store (if any) and rename the temp store into place.
+        if os.path.exists(zarr_path):
+            shutil.rmtree(zarr_path)
+        os.rename(tmp_path, zarr_path)
+        # Reopen lazily from the new store to restore the lazy-loading contract.
+        self.h5_file = xr.open_dataset(zarr_path, engine='zarr')
+        return zarr_path
+
+    def load(self, filename, trim=False, force_h5=False):
+        """
+        Load trial data, converting to Zarr on first use.
+
+        **Migration note (xarray/Zarr backend)**
+
+        Trials are now stored as Zarr directory stores rather than NetCDF files.
+        On the first load of any ``.h5`` file the data is read via h5netcdf, written
+        to a ``.zarr`` store alongside the original file, and reopened lazily::
+
+            trial = TrackingTrial("path/to/trial.h5")
+            # → creates path/to/trial.zarr if it does not already exist
+            # → self.h5_file is an xr.Dataset opened lazily with engine='zarr'
+
+        Subsequent loads skip the conversion and open the ``.zarr`` store directly.
+        All dimension variables are named ``'test'`` (small axis) and ``'frame'``
+        (large axis), replacing the opaque ``phony_dim_N`` names from h5netcdf.
+
+        Parameters
+        ----------
+        filename : str
+            Path to the ``.h5`` source file.
+        trim : bool, default=False
+            If True, trim frame-like dimensions to the same minimum length before
+            renaming.  Useful when variables have off-by-one lengths in the source.
+        force_h5 : bool, default=False
+            If True, skip any existing ``.zarr`` store and re-read from the original
+            ``.h5`` file (re-creating the store).  Primarily for testing.
+        """
+        import os
+        import xarray as xr
+        base, _ = os.path.splitext(filename)
+        new_path = base + ".zarr"
+        success = False
+        try_nc = False
+        # if the NetCDF file exists, load from it; otherwise, load from the original HDF5 file
+        if os.path.exists(new_path) and not force_h5:
+            try_nc = True
+        # xr.open_dataset keeps the file lazily open — data is read on access.
+        if try_nc:
+            try:
+                self.h5_file = xr.open_dataset(new_path, engine='zarr')
+                self._source_path = new_path
+                success = True
+            except:
+                success = False
+        # If it fails, we can try to load from the original HDF5 file if we haven't already
+        if not success:
+            try:
+                self.h5_file = xr.open_dataset(filename, engine='h5netcdf', phony_dims='sort')
+                # store it as a Zarr file using xarray
+                self.h5_file.to_zarr(new_path, mode='w')
+                self.h5_file.close()
+                # and now open the Zarr file
+                self.h5_file = xr.open_dataset(new_path, engine='zarr')
+                self._source_path = new_path
+                success = True
+            except:
+                success = False
+        if success:
+            ds = self.h5_file
+            # --- Trim frame-like dimensions to the same length before renaming ---
+            # Variables like camera_heading and orientation can end up with slightly
+            # different lengths (off by 1-2 frames). xarray assigns them separate
+            # phony dimensions, so we trim to the minimum length first.
+            # Heuristic: frame-like dims have more than 10 values (test dim is small).
+            if trim:
+                frame_like_dims = [d for d in ds.dims if ds.dims[d] > 10]
+                if frame_like_dims:
+                    min_frames = min(ds.dims[d] for d in frame_like_dims)
+                    for var in list(ds.data_vars):
+                        for d in frame_like_dims:
+                            if d in ds[var].dims and ds.dims[d] > min_frames:
+                                ds[var] = ds[var].isel({d: slice(None, min_frames)})
+
+            # --- Rename phony dimensions to meaningful names ---
+            # The test dim is the small one (typically < 10), frame dim is the large one.
+            dim_names_sorted = sorted(ds.sizes.keys(), key=lambda d: ds.sizes[d])
+            rename_dict = {}
+            if len(dim_names_sorted) >= 1:
+                rename_dict[dim_names_sorted[0]] = 'test'
+            if len(dim_names_sorted) >= 2:
+                rename_dict[dim_names_sorted[-1]] = 'frame'
+            if rename_dict:
+                ds = ds.rename(rename_dict)
+            self.h5_file = ds
+        return success
 
     def close(self):
         """Close the h5 file and delete bouts if present."""
