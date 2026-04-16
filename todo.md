@@ -219,6 +219,16 @@ Subsetting uses the existing `query()` logic against the saccade table:
 | `'test'` | one value per test via `agg_func` | per-condition traces |
 | `'trial'` | one value per trial via `agg_func` | subject-level stats |
 
+`agg_func` accepts any callable and is applied as `agg_func(group_values)` for each group.
+Pass `agg_func=list` to collect raw values per group without reducing (returns one list per
+group, ragged across groups if saccade counts differ). Default is `np.nanmean`.
+
+| `agg_func=` | `groupby='test'` result |
+|---|---|
+| `np.nanmean` | one scalar per test |
+| `list` | one list of raw values per test (ragged) |
+| `np.stack` | one 2D array per test (if all groups have equal length) |
+
 `output` can be:
 - A **scalar column name** (`'amplitude'`, `'peak_velocity'`, etc.) → returns ndarray.
 - `'saccade'` → returns list of on-demand `Saccade` objects (reconstructed from
@@ -226,41 +236,79 @@ Subsetting uses the existing `query()` logic against the saccade table:
 - A **time-series attribute** (`'arr_relative'`, `'velocity'`) → returns list of
   variable-length arrays (only meaningful with `groupby='saccade'`).
 
+### Two-phase Saccade construction
+
+`Saccade.__init__` currently does two things: (1) **refine** `start`/`stop` using the
+baseline velocity distribution and validate via the noise threshold (`baseline_comparison`,
+`baseline_test`), and (2) **compute and store** derived attributes (`amplitude`,
+`peak_velocity`, `duration`, etc.).
+
+We exploit this split deliberately:
+
+- **Detection phase** (`detect_saccades()`): instantiate `Saccade` with
+  `baseline_comparison=True, baseline_test=True`. If `saccade.success`, read the
+  refined `start`, `stop`, and derived scalars into the saccade table. Discard the
+  `Saccade` object — its job is done.
+- **Reconstruction phase** (`output='saccade'`): instantiate `Saccade` with
+  `baseline_comparison=False, baseline_test=False`. The `start`/`stop` stored in
+  the table are already the fully refined values; `interpolate_velocity=True` still
+  runs so that time-series attributes (`arr_relative`, `velocity`, `relative_time`,
+  etc.) are available for plotting. `trial` and `test_ind` can be `None` for
+  reconstruction — the caller already has the sliced `arr`.
+
+### `_detect_saccades` simplification
+
+Only `speed_noise_method=True` is kept. The new helper strips:
+- The entire commented-out Kalman-filter block inside `speed_noise_method`.
+- The large commented-out rolling-std / cross-boundary dead code.
+- The `kalman_method` and `acceleration_method` branches entirely.
+- The inline `display` / `breakpoint()` block (remove, not port).
+
+Parameters that survive: `threshold_speed`, and the `find_peaks` overrides
+(`distance`, `width`, `prominence`, `wlen`).
+Parameters dropped: `speed_noise_method` flag (always True now),
+`kalman_method`, `acceleration_method`, `de_lag`,
+`maximum_saccade_frequency`, `relative_start_velo`.
+
 ### Tasks
 
-- [ ] **4.1 Update `Saccade.__init__`** to accept `(arr, trial, test_ind, framerate,
+- [x] **4.1 Update `Saccade.__init__`** to accept `(arr, trial, test_ind, framerate,
       start, stop, ...)` instead of `(arr, bout, ...)`. Replace `self.bout`
-      attribute with `self.trial` and `self.test_ind`.
+      attribute with `self.trial` and `self.test_ind`. `trial` and `test_ind` may
+      be `None` when reconstructing on-demand from stored start/stop values.
 
-- [ ] **4.2 Add `detect_saccades()` to `TrackingTrial`**
-      Iterates over tests, runs the existing `Bout.process_saccades()` detection logic
-      (inlined or called as a standalone helper), builds the saccade table, stores
-      it as `self.saccade_table` (an xarray Dataset or structured ndarray).
-      Replaces any existing table. Does not call `save()`.
+- [x] **4.2 Add `detect_saccades()` to `TrackingTrial`**
+      Iterates over tests, calls `_detect_saccades()` for each test's heading array,
+      instantiates `Saccade` with full baseline refinement, harvests scalar columns
+      from successful saccades into the saccade table, then discards `Saccade`
+      objects. Stores table as `self.saccade_table`. Does not call `save()`.
 
-- [ ] **4.3 Persist / load saccade table via the existing Zarr machinery**
+- [x] **4.3 Persist / load saccade table via the existing Zarr machinery**
       - `save()` writes the saccade table to the Zarr store alongside other datasets.
       - `load()` / `open_dataset()` loads it lazily on the next open.
       - Use `add_dataset()` internally, consistent with Phase 2 conventions.
 
-- [ ] **4.4 Implement `TrackingTrial.query(object='saccade', ...)`**
+- [x] **4.4 Implement `TrackingTrial.query(object='saccade', ...)`**
       Uses the saccade table for fast scalar queries. For `output='saccade'`,
-      reconstructs `Saccade` objects on demand using
-      `test_start_frame + start_frame` into `self.data['body_angle']`.
+      reconstructs `Saccade` on demand with `baseline_comparison=False,
+      baseline_test=False` using the stored `start`/`stop` into
+      `self.data['body_angle']`.
 
-- [ ] **4.5 Implement `TrackingExperiment.query(object='saccade', ...)`**
+- [x] **4.5 Implement `TrackingExperiment.query(object='saccade', ...)`**
       Calls each trial's `query(object='saccade', ...)` and concatenates results:
       - `groupby='saccade'` → concatenate flat arrays.
       - `groupby='test'` → concatenate per-test arrays.
       - `groupby='trial'` → one value per trial.
 
-- [ ] **4.6 Deprecate `Bout` class**
+- [x] **4.6 Deprecate `Bout` class**
       - Keep `Bout` in the file but mark it deprecated with a warning on instantiation.
-      - `process_saccades()` detection logic extracted into a module-level helper
-        `_detect_saccades(arr, time, framerate, **kwargs) → list[dict]` so it can
-        be called by `detect_saccades()` without instantiating `Bout`.
+      - Extract the `speed_noise_method` core of `process_saccades()` into a
+        module-level helper `_detect_saccades(arr, framerate, threshold_speed=350,
+        **find_peaks_kwargs) → list[dict]`. Remove all dead/commented-out code and
+        the `kalman_method` / `acceleration_method` branches. Each dict in the
+        returned list contains `start`, `stop` (raw, pre-refinement frame indices).
 
-- [ ] **4.7 Write integration tests** confirming:
+- [x] **4.7 Write integration tests** confirming:
       - `detect_saccades()` populates `saccade_table` with the correct columns.
       - `save()` + reload produces identical saccade table.
       - `query(object='saccade', output='amplitude')` returns a flat ndarray.
@@ -268,8 +316,57 @@ Subsetting uses the existing `query()` logic against the saccade table:
         one value per test.
       - `query(object='saccade', subset={'peak_velocity': '>5'})` correctly
         filters individual saccades.
-      - On-demand `Saccade` reconstruction matches the original `Bout`-based result.
+      - On-demand `Saccade` reconstruction (no baseline re-test) matches scalar
+        attributes stored in the table.
 
+### Implementation summary (April 2026)
+
+**Phase 4 is complete.** The saccade detection and querying layer is now fully
+independent of `Bout`:
+
+- `_detect_saccades(arr, framerate, ...)` — standalone module-level helper,
+  `speed_noise_method` only, all dead code stripped. Parameters reduced to
+  `threshold_speed` + `find_peaks` kwargs.
+- `Saccade.__init__` signature updated to `(arr, trial, test_ind, framerate,
+  start, stop, ...)`. `trial`/`test_ind` may be `None` for on-demand
+  reconstruction.
+- `TrackingTrial.detect_saccades()` — two-phase: full baseline refinement
+  during detection, scalars (including `peak_frame`) harvested into
+  `self.saccade_table`, `Saccade` objects discarded.
+- Saccade table persisted as columnar `_saccade_*` Zarr variables; the `load()`
+  dim-rename guard and robust `dims[0]` lookup ensure safe round-trips even
+  when saccade count coincidentally equals `num_tests`.
+- `TrackingTrial.query(object='saccade', ...)` — fast scalar queries with
+  `groupby='saccade'/'test'/'trial'`, `agg_func=list` support, on-demand
+  `Saccade` reconstruction.
+- `TrackingExperiment.query(object='saccade', ...)` — flattening concatenation
+  across trials.
+- `TrackingTrial.saccade_table_df(extra_cols, time_ind)` and
+  `TrackingExperiment.saccade_table_df(extra_cols, time_ind)` — export to
+  pandas DataFrame; scalar/1-D test-level/2-D (test × frame) extra columns
+  all supported; experiment-level df always includes `trial_filename`.
+- `Bout` marked deprecated with `DeprecationWarning` on instantiation.
+- `load_datasets()` defaults to `framerate=60` when neither `framerate` nor
+  `duration` is stored in the file's attrs.
+- 27 integration tests, all passing.
+
+**Additional fixes and optimisations (April 2026):**
+- **Saccade table persistence** moved from columnar `_saccade_*` Zarr variables to a
+  `.saccades.pkl` sidecar file; saccade-only saves now complete in <1 s.
+- **`save()` made surgical**: granular `_pending_vars` / `_removed_vars` /
+  `_dirty_attrs` tracking so only changed arrays/attrs open the Zarr store;
+  threading reverted to sequential (zarr v3 async loops made threads slower).
+- **`Saccade` object cache**: `self.saccades` list + `self._saccade_id_to_index`
+  dict built on the first `query(object='saccade', output='saccade')` call and
+  invalidated when `detect_saccades()` replaces the saccade table. Avoids
+  reconstructing `Saccade` objects on every repeated query.
+- **`plot_saccades` refactored**: removed `Bout`-based `trial.query(output='bouts')`
+  + `bout.query_saccades()` traversal; replaced with a direct
+  `trial.query(output='saccade', object='saccade', subset=subset)` call.
+  Trials without a saccade table (raising `RuntimeError`) are silently skipped.
+- **Bug fix in `detect_saccades` / `saccade_table_df`**: `self._saccade_id_to_index`
+  invalidation line was accidentally fused with the `def saccade_table_df` line —
+  corrected.
 
 
 ## Phase 5 — Unified `TrackingExperiment.plot()` method

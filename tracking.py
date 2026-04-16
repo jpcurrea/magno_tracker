@@ -1761,16 +1761,42 @@ class TrackingExperiment():
             Whether to skip trials with no data.
         **kwargs : dict
             The arguments to pass to the query method of each trial.
+            For ``object='saccade'``, relevant kwargs are: ``output``,
+            ``subset``, ``groupby`` (``'saccade'``, ``'test'``, or
+            ``'trial'``), and ``agg_func``.
         """
-        ret = []
         if 'subset' not in kwargs.keys():
             kwargs['subset'] = {}
+
+        if object == 'saccade':
+            groupby = kwargs.get('groupby', 'saccade')
+            ret = []
+            for trial in self.trials:
+                try:
+                    res = trial.query(object='saccade', **kwargs)
+                except RuntimeError:
+                    # No saccade table on this trial — skip silently.
+                    continue
+                if skip_empty and len(res) == 0:
+                    continue
+                ret.append(res)
+            # Concatenate across trials.
+            if groupby in ('saccade', 'test'):
+                # Each trial returns a list; flatten into one list.
+                flat = []
+                for trial_res in ret:
+                    flat.extend(trial_res)
+                return flat
+            else:
+                # groupby='trial': one value per trial — return as a list.
+                return ret
+
+        # --- trial / bout branch ---
+        ret = []
         for trial in self.trials:
-            if object == 'saccade':
-                res = trial.query_saccades(**kwargs)
-            elif object == 'bout':
+            if object == 'bout':
                 res = trial.query_bouts(**kwargs)
-            else: 
+            else:
                 res = trial.query(**kwargs)
             if skip_empty:
                 if len(res) > 0:
@@ -1829,6 +1855,60 @@ class TrackingExperiment():
         # for trial in self.trials:
         #     ret += [trial.query_saccades(**kwargs)]
         # return ret
+
+    def detect_saccades(self, key='camera_heading', threshold_speed=350, **find_peaks_kwargs):
+        """Detect saccades for every trial in the experiment.
+
+        Calls :meth:`TrackingTrial.detect_saccades` on each trial with the
+        given arguments.  Does **not** call ``save()``.
+
+        Parameters
+        ----------
+        key : str, default='camera_heading'
+            The heading variable to use for detection.
+        threshold_speed : float, default=350
+            Minimum peak speed (degrees/s) required to keep a saccade.
+        **find_peaks_kwargs
+            Forwarded to :func:`_detect_saccades` (distance, width, prominence, wlen).
+        """
+        for trial in self.trials:
+            trial.detect_saccades(key=key, threshold_speed=threshold_speed, **find_peaks_kwargs)
+
+    def saccade_table_df(self, extra_cols=None, time_ind='start_frame'):
+        """Return saccade data from all trials as a single :class:`pandas.DataFrame`.
+
+        Always includes a ``trial_filename`` column so rows can be traced back
+        to their source trial.
+
+        Parameters
+        ----------
+        extra_cols : list[str] or None
+            Passed to each ``TrackingTrial.saccade_table_df()``.
+            Scalar / 1-D test-level / 2-D (test × frame) variables are all
+            supported — see that method's docstring for details.
+        time_ind : {'start_frame', 'stop_frame', 'peak_frame'}, default='start_frame'
+            Passed to each ``TrackingTrial.saccade_table_df()``.
+
+        Returns
+        -------
+        pandas.DataFrame
+            One row per saccade across all trials, with a leading
+            ``trial_filename`` column.
+        """
+        import pandas as pd
+        frames = []
+        for trial in self.trials:
+            try:
+                df = trial.saccade_table_df(extra_cols=extra_cols, time_ind=time_ind)
+            except RuntimeError:
+                continue
+            if df.empty:
+                continue
+            df.insert(0, 'trial_filename', os.path.basename(trial.filename))
+            frames.append(df)
+        if not frames:
+            return pd.DataFrame()
+        return pd.concat(frames, ignore_index=True)
 
     def add_dataset(self, name, vals):
         """Add this dataset to each trial.
@@ -2172,65 +2252,65 @@ class TrackingExperiment():
                     muted_color = np.squeeze(muted_color)
                 for trial in self.trials:
                     lines_plotted = 0
-                    bouts = trial.query(output='bouts', sort_by=query_kwargs['sort_by'], subset=subset)
-                    resps = trial.query(output=output_var, sort_by=query_kwargs['sort_by'], subset=subset)
-                    for bout in bouts:
-                        # filter saccades
-                        time, saccades = bout.query_saccades(output='saccade', subset=subset, sort_by=query_kwargs['sort_by'])
-                        if len(saccades) > 0:
-                            sample_size += 1
-                        for saccade in saccades:
-                            peak_speed = abs(saccade.peak_velocity) * 180 / np.pi
-                            if (peak_speed >= min_speed) * (peak_speed <= max_speed):
-                                # get the corresponding time values
-                                time = saccade.__getattribute__('time')
-                                heading = np.copy(saccade.__getattribute__(saccade_var))
-                                # get the range of times to plot
-                                include = (time >= start) * (time < stop)
-                                # center the yvalues based on the y-intercept
-                                zero_ind = np.argmin(abs(time))
-                                # get the saccade start and stop indices
-                                start_ind, stop_ind = saccade.start, saccade.stop
-                                heading -= heading[zero_ind]
-                                inds = np.where(include)[0]
-                                pre_inds = inds[inds < start_ind]
-                                post_inds = inds[inds > start_ind]
-                                if np.nanmean(heading[post_inds]) < 0 and positive_amplitude:
-                                    heading *= -1
-                                # Only keep included region
-                                heading = heading[include]
-                                time = time[include]
-                                # Insert NaNs at discontinuities in heading
-                                wrapped_heading, mask = omit_wrapping(heading, return_mask=True)
-                                # Mask time to match heading
-                                wrapped_time = np.full_like(wrapped_heading, np.nan)
-                                wrapped_time[mask] = time[:np.count_nonzero(mask)]
-                                saccade_arr += [wrapped_heading]
-                                time_arr += [wrapped_time]
-                                if reversal_split:
-                                    # todo: this is half wrong when positive_amplitude is True
-                                    # get the mean heading before 0
-                                    pre_heading = np.nanmean(heading[pre_inds])
-                                    post_heading = np.nanmean(heading[post_inds])
-                                    same_dir = (pre_heading > 0) != (post_heading > 0)
-                                    same_direction += [same_dir]
-                                    if same_dir:
-                                        ax = same_ax
-                                    else:
-                                        ax = diff_ax
+                    try:
+                        saccades = trial.query(output='saccade', object='saccade', subset=subset)
+                    except RuntimeError:
+                        continue
+                    for saccade in saccades:
+                        peak_speed = abs(saccade.peak_velocity) * 180 / np.pi
+                        if (peak_speed >= min_speed) * (peak_speed <= max_speed):
+                            # get the corresponding time values
+                            time = saccade.__getattribute__('time')
+                            heading = np.copy(saccade.__getattribute__(saccade_var))
+                            # get the range of times to plot
+                            include = (time >= start) * (time < stop)
+                            # center the yvalues based on the y-intercept
+                            zero_ind = np.argmin(abs(time))
+                            # get the saccade start and stop indices
+                            start_ind, stop_ind = saccade.start, saccade.stop
+                            heading -= heading[zero_ind]
+                            inds = np.where(include)[0]
+                            pre_inds = inds[inds < start_ind]
+                            post_inds = inds[inds > start_ind]
+                            if len(post_inds) > 0 and np.nanmean(heading[post_inds]) < 0 and positive_amplitude:
+                                heading *= -1
+                            # Only keep included region
+                            heading = heading[include]
+                            time = time[include]
+                            # Insert NaNs at discontinuities in heading
+                            wrapped_heading, mask = omit_wrapping(heading, return_mask=True)
+                            # Mask time to match heading
+                            wrapped_time = np.full_like(wrapped_heading, np.nan)
+                            wrapped_time[mask] = time[:np.count_nonzero(mask)]
+                            saccade_arr += [wrapped_heading]
+                            time_arr += [wrapped_time]
+                            if reversal_split:
+                                # todo: this is half wrong when positive_amplitude is True
+                                # get the mean heading before 0
+                                pre_heading = np.nanmean(heading[pre_inds]) if len(pre_inds) > 0 else 0
+                                post_heading = np.nanmean(heading[post_inds]) if len(post_inds) > 0 else 0
+                                same_dir = (pre_heading > 0) != (post_heading > 0)
+                                same_direction += [same_dir]
+                                if same_dir:
+                                    ax = same_ax
                                 else:
-                                    same_direction += [True]
-                                    ax = col
-                                ax.plot(wrapped_heading, wrapped_time, color=muted_color, lw=.25, alpha=line_alpha, zorder=1)
-                                # Highlight saccade region (optional, not NaN-masked)
-                                ax.plot(heading[saccade.start:saccade.stop], time[saccade.start:saccade.stop], color=line_color, lw=.25, alpha=.5, zorder=2)
-                                lines_plotted += 1
-                                # plot the stop coordinate
-                                stop_ind = saccade.stop
-                                stop_times += [time[stop_ind] if stop_ind < len(time) else np.nan]
-                                start_times += [time[start_ind] if start_ind < len(time) else np.nan]
-                                stop_amps += [heading[stop_ind] if stop_ind < len(heading) else np.nan]
-                                start_amps += [heading[start_ind] if start_ind < len(heading) else np.nan]
+                                    ax = diff_ax
+                            else:
+                                same_direction += [True]
+                                ax = col
+                            ax.plot(wrapped_heading, wrapped_time, color=muted_color, lw=.25, alpha=line_alpha, zorder=1)
+                            # Highlight saccade region within the included window
+                            n = len(heading)
+                            s0 = max(start_ind - int(inds[0]) if len(inds) else 0, 0)
+                            s1 = min(stop_ind - int(inds[0]) if len(inds) else n, n)
+                            ax.plot(heading[s0:s1], time[s0:s1], color=line_color, lw=.25, alpha=.5, zorder=2)
+                            lines_plotted += 1
+                            # plot the stop coordinate
+                            stop_ind = saccade.stop
+                            stop_times += [time[stop_ind] if stop_ind < len(time) else np.nan]
+                            start_times += [time[start_ind] if start_ind < len(time) else np.nan]
+                            stop_amps += [heading[stop_ind] if stop_ind < len(heading) else np.nan]
+                            start_amps += [heading[start_ind] if start_ind < len(heading) else np.nan]
                     if lines_plotted > 0:
                         sample_size += 1
                         total_lines += [lines_plotted]
@@ -4074,6 +4154,12 @@ class TrackingTrial():
             # grab default dataset frequently used
             if self.load_success:
                 self.data = self.query()
+        # tracks which variables/attrs have been changed since the last save.
+        # save() uses these to write only the affected arrays rather than
+        # rewriting the entire zarr store.
+        self._pending_vars = {}    # name → (np.ndarray, dims_tuple)
+        self._removed_vars = set()
+        self._dirty_attrs = False
 
     def add_dataset(self, name, arr):
         """Add or overwrite a variable in the in-memory xarray Dataset.
@@ -4133,6 +4219,8 @@ class TrackingTrial():
         if name in self.h5_file.data_vars:
             self.h5_file = self.h5_file.drop_vars(name)
         self.h5_file = self.h5_file.assign({name: da})
+        self._pending_vars[name] = (arr, dims)
+        self._removed_vars.discard(name)
         _LOAD_DATASETS_SENSITIVE = {'is_test', 'camera_heading_offline'}
         if name in _LOAD_DATASETS_SENSITIVE:
             import warnings
@@ -4167,6 +4255,8 @@ class TrackingTrial():
         """
         if name in self.h5_file.data_vars:
             self.h5_file = self.h5_file.drop_vars(name)
+            self._removed_vars.add(name)
+            self._pending_vars.pop(name, None)
             _LOAD_DATASETS_SENSITIVE = {'is_test', 'camera_heading_offline'}
             if name in _LOAD_DATASETS_SENSITIVE:
                 import warnings
@@ -4201,6 +4291,7 @@ class TrackingTrial():
         """
         self.h5_file.attrs[name] = val
         self.__setattr__(name, val)
+        self._dirty_attrs = True
 
     def _get_var(self, key):
         """Retrieve a variable as a numpy array.
@@ -4220,6 +4311,7 @@ class TrackingTrial():
             raise AttributeError(f"Variable '{key}' not found in dataset or computed attributes.")
 
     def load_datasets(self):
+        import os
         self.load_success = False
         ds = self.h5_file  # xr.Dataset
 
@@ -4257,6 +4349,14 @@ class TrackingTrial():
                     self.duration = self.stop_exp - self.start_exp
                 elif 'framerate' in self.__dict__:
                     self.duration = self.num_frames / self.framerate
+                else:
+                    # Fall back to 60 fps so the trial is still usable.
+                    self.framerate = 60.0
+                    self.duration = self.num_frames / self.framerate
+
+            # Ensure framerate is always set (derive from duration if needed).
+            if 'framerate' not in self.__dict__ and 'duration' in self.__dict__:
+                self.framerate = self.num_frames / self.duration
 
             if 'duration' in self.__dict__:
                 self.time = self.frame_ind * (self.duration / self.num_frames)
@@ -4279,6 +4379,27 @@ class TrackingTrial():
             self.is_test = ds['is_test'].values.astype(bool)
         elif 'is_test' not in self.__dict__:
             self.is_test = np.ones(self.num_tests, dtype=bool)
+
+        # Reconstruct saccade_table from sidecar .pkl first (fast path), falling
+        # back to legacy _saccade_* variables embedded in the zarr Dataset.
+        import pickle as _pickle
+        sidecar_path = os.path.splitext(self.filename)[0] + '.saccades.pkl'
+        if os.path.exists(sidecar_path):
+            with open(sidecar_path, 'rb') as _f:
+                self.saccade_table = _pickle.load(_f)
+        else:
+            # Reconstruct saccade_table from _saccade_* variables if stored in this Dataset.
+            saccade_vars = [v for v in ds.data_vars if v.startswith('_saccade_')]
+            if saccade_vars:
+                first_da = ds[saccade_vars[0]]
+                # Use dims[0] rather than hardcoding 'saccade': on some zarr round-trips
+                # the dimension may have been renamed (e.g. if saccade_count == num_tests).
+                saccade_dim = first_da.dims[0]
+                n = first_da.sizes[saccade_dim]
+                self.saccade_table = [
+                    {v[9:]: ds[v].values[i].item() for v in saccade_vars}
+                    for i in range(n)
+                ]
 
     def get_saccade_stats(self, key='camera_heading', time_var='time', rerun=False, **saccade_kwargs):
         """List saccades for each trial using peak angular velocities.
@@ -4597,68 +4718,239 @@ class TrackingTrial():
             lbl = f"{key}_no_saccades_{method}"
         self.add_dataset(lbl, new_headings)
 
-    def query(self, output='camera_heading', sort_by='test_ind', subset={}):
-        """Return trial data filtered and sorted by subset conditions.
+    def detect_saccades(self, key='camera_heading', threshold_speed=350, **find_peaks_kwargs):
+        """Detect saccades across all tests and store a flat saccade table.
 
-        **Migration note (xarray/Zarr backend)**
-
-        The query logic was rewritten to use xarray dimension-aware operations
-        instead of manual numpy boolean indexing.  The public interface and
-        return type (numpy array) are unchanged, but the internal routing is:
-
-        - **1-D subset variables** (shape ``num_tests``) drop non-matching tests
-          via ``xr.DataArray.isel()``, reducing the test axis permanently.
-        - **2-D subset variables** (shape ``num_tests × num_frames``) NaN-fill
-          non-matching frames via ``xr.DataArray.where()``, preserving the full
-          frame axis so downstream time-series plots remain aligned.
-
-        Subset value semantics:
-
-        - **Scalar** — equality match: ``{'is_test': True}``
-        - **Inequality string** — parsed by ``interprate_inequality``:
-          ``{'test_ind': '<5'}``, ``{'score': ['>0.4', '<=0.9']}``
-        - **List of non-strings** — OR membership (``np.isin``):
-          ``{'group': [1, 3]}``
-        - **NaN** — matches NaN entries: ``{'score': float('nan')}``
-        - **Multiple keys** — ANDed together across all conditions.
-
-        Examples
-        --------
-        Return all camera headings, sorted by test index (default)::
-
-            data = trial.query()  # shape (num_tests, num_frames)
-
-        Keep only test trials, sorted by test index::
-
-            data = trial.query('camera_heading', subset={'is_test': True})
-
-        Filter by a 1-D score variable and a time window simultaneously::
-
-            data = trial.query(
-                'camera_heading',
-                subset={'score': '>0.5', 'time': '>=5'},
-            )
-            # Tests with score <= 0.5 are dropped entirely.
-            # Frames where time < 5 are NaN-filled.
+        Iterates over each test, calls ``_detect_saccades()`` to find candidate
+        start/stop frames, then instantiates a ``Saccade`` with full baseline
+        refinement (``baseline_comparison=True, baseline_test=True``) to refine
+        the window and validate the event.  Scalar attributes of each successful
+        saccade are harvested into ``self.saccade_table`` (a list of dicts).
+        Any existing table is replaced.  Does **not** call ``save()``.
 
         Parameters
         ----------
-        output : str, default='camera_heading'
-            The variable to return.
-        sort_by : str, default='test_ind'
-            1-D test-level variable used to order the returned tests.
-        subset : dict, default={}
-            Filtering conditions.  Keys are variable names; values are scalars,
-            inequality strings, lists, or NaN (see above).
+        key : str, default='camera_heading'
+            The heading variable to use for detection.
+        threshold_speed : float, default=350
+            Minimum peak speed (degrees/s) required to keep a saccade.
+        **find_peaks_kwargs
+            Forwarded to ``_detect_saccades`` (distance, width, prominence, wlen).
+
+        Attributes set
+        --------------
+        saccade_table : list[dict]
+            One dict per accepted saccade with keys: ``test_ind``,
+            ``test_start_frame``, ``start_frame``, ``stop_frame``,
+            ``amplitude``, ``peak_velocity``, ``duration``,
+            ``start_angle``, ``stop_angle``.
+        """
+        headings = self.query(key)          # shape (num_tests, num_frames)
+        framerate = self.framerate
+        rows = []
+        for test_i in range(self.num_tests):
+            arr = headings[test_i]          # shape (num_frames,)
+            test_start_frame = test_i * self.num_frames
+            candidates = _detect_saccades(arr, framerate, threshold_speed=threshold_speed,
+                                          **find_peaks_kwargs)
+            for cand in candidates:
+                saccade = Saccade(
+                    arr, self, test_i, framerate,
+                    start=cand['start'], stop=cand['stop'],
+                    baseline_comparison=True, baseline_test=True,
+                )
+                if not saccade.success:
+                    continue
+                peak_velo_degs = abs(saccade.peak_velocity) * 180.0 / np.pi
+                if peak_velo_degs < threshold_speed:
+                    continue
+                rows.append({
+                    'test_ind':         test_i,
+                    'test_start_frame': test_start_frame,
+                    'start_frame':      saccade.start,
+                    'stop_frame':       saccade.stop,
+                    'peak_frame':       int(saccade.peak_ind),
+                    'amplitude':        float(saccade.amplitude),
+                    'peak_velocity':    float(saccade.peak_velocity),
+                    'duration':         float(saccade.duration),
+                    'start_angle':      float(saccade.start_angle),
+                    'stop_angle':       float(saccade.stop_angle),
+                })
+        self.saccade_table = rows
+        # Invalidate any cached Saccade objects so the next query rebuilds them.
+        self.saccades = None
+        self._saccade_id_to_index = None
+
+    def saccade_table_df(self, extra_cols=None, time_ind='start_frame'):
+        """Return the saccade table as a :class:`pandas.DataFrame`.
+
+        Parameters
+        ----------
+        extra_cols : list[str] or None
+            Names of trial attributes or datasets to append as extra columns.
+            For each name the value is resolved via ``_get_var()``:
+
+            - **Scalar / 0-D / string** → broadcast to every saccade row.
+            - **1-D array of length num_tests** → index by ``row['test_ind']``
+              so each saccade gets the value for its own test.
+            - **2-D array (num_tests × num_frames)** → index by
+              ``(row['test_ind'], row[time_ind])`` so each saccade gets the
+              value at the chosen frame.
+
+        time_ind : {'start_frame', 'stop_frame', 'peak_frame'}, default='start_frame'
+            Which saccade-table frame index to use when looking up 2-D
+            (test × frame) variables.
 
         Returns
         -------
-        np.ndarray
-            Filtered and sorted array.  Shape is ``(n_tests,)`` for 1-D outputs
-            or ``(n_tests, num_frames)`` for 2-D outputs, where ``n_tests ≤
-            num_tests`` depending on 1-D subset conditions.
+        pandas.DataFrame
+            One row per saccade.
         """
-        # --- bouts shortcut ---
+        import pandas as pd
+        if not hasattr(self, 'saccade_table') or not self.saccade_table:
+            return pd.DataFrame()
+        df = pd.DataFrame(self.saccade_table)
+        for col in (extra_cols or []):
+            var = self._get_var(col)
+            if isinstance(var, np.ndarray):
+                if var.ndim == 0:
+                    # 0-D numpy scalar — broadcast to all rows.
+                    df[col] = var.item()
+                elif var.ndim == 1 and len(var) == self.num_tests:
+                    df[col] = [var[row['test_ind']] for row in self.saccade_table]
+                elif var.ndim == 2 and var.shape[0] == self.num_tests:
+                    n_frames = var.shape[1]
+                    df[col] = [
+                        var[row['test_ind'], min(row[time_ind], n_frames - 1)]
+                        for row in self.saccade_table
+                    ]
+                else:
+                    raise ValueError(
+                        f"extra_col '{col}' has shape {var.shape}, which cannot be "
+                        f"mapped to saccades (expected 1-D of length {self.num_tests} "
+                        f"or 2-D of shape ({self.num_tests}, ~{self.num_frames}))."
+                    )
+            else:
+                # Scalar, string, or 0-D — broadcast to all rows.
+                df[col] = var
+        return df
+
+    def query(self, output='camera_heading', sort_by='test_ind', subset={},
+              object='trial', groupby='saccade', agg_func=np.nanmean):
+        """Return trial data filtered and sorted by subset conditions.
+
+        When ``object='saccade'``, queries the saccade table instead of the
+        heading data.  ``detect_saccades()`` must have been called first.
+
+        Saccade query parameters
+        ------------------------
+        output : str
+            A scalar saccade-table column (``'amplitude'``, ``'peak_velocity'``,
+            ``'duration'``, ``'start_angle'``, ``'stop_angle'``, ``'test_ind'``,
+            ``'start_frame'``, ``'stop_frame'``), or ``'saccade'`` to get
+            reconstructed ``Saccade`` objects.
+        subset : dict
+            Keys that match saccade-table columns are applied to saccade rows
+            directly.  Keys that match trial-level variables are matched against
+            the test each saccade belongs to (e.g. ``{'is_test': True}``).
+        groupby : {'saccade', 'test', 'trial'}
+            ``'saccade'`` — flat result (one value per saccade).
+            ``'test'`` — one value per test via ``agg_func``.
+            ``'trial'`` — one value for the whole trial via ``agg_func``.
+        agg_func : callable, default=np.nanmean
+            Applied as ``agg_func(group_values)`` per group.  Use ``list`` to
+            collect raw values without reducing (returns ragged lists).
+
+        **Trial query (object='trial') — unchanged behaviour**
+        """
+        # ------------------------------------------------------------------ #
+        # Saccade query branch                                                 #
+        # ------------------------------------------------------------------ #
+        if object == 'saccade':
+            if not hasattr(self, 'saccade_table') or self.saccade_table is None:
+                raise RuntimeError(
+                    "No saccade table found.  Call detect_saccades() first."
+                )
+            saccade_cols = set(self.saccade_table[0].keys()) if self.saccade_table else set()
+
+            # --- filter rows ------------------------------------------------
+            rows = list(self.saccade_table)
+            for key, vals in subset.items():
+                if not isinstance(vals, (list, tuple)):
+                    vals = [vals]
+                filtered = []
+                for row in rows:
+                    include = True
+                    if key in saccade_cols:
+                        # saccade-level filter
+                        row_val = row[key]
+                        match = False
+                        for val in vals:
+                            if isinstance(val, str):
+                                logic, thresh = interprate_inequality(val)
+                                match = match or bool(logic(row_val, thresh))
+                            elif isinstance(val, float) and np.isnan(val):
+                                match = match or np.isnan(row_val)
+                            else:
+                                match = match or (row_val == val)
+                        include = match
+                    else:
+                        # trial-level filter: look up value for this saccade's test
+                        trial_var = self._get_var(key)
+                        if isinstance(trial_var, np.ndarray) and trial_var.ndim == 1:
+                            row_val = trial_var[row['test_ind']]
+                        else:
+                            row_val = trial_var
+                        match = False
+                        for val in vals:
+                            if isinstance(val, str):
+                                logic, thresh = interprate_inequality(val)
+                                match = match or bool(logic(row_val, thresh))
+                            elif isinstance(val, float) and np.isnan(val):
+                                match = match or np.isnan(row_val)
+                            else:
+                                match = match or (row_val == val)
+                        include = match
+                    if include:
+                        filtered.append(row)
+                rows = filtered
+
+            # --- extract output values -------------------------------------
+            def _row_to_value(row):
+                if output == 'saccade':
+                    # Build the full Saccade cache on first access.
+                    if not getattr(self, 'saccades', None):
+                        heading = self.query('camera_heading')  # (num_tests, num_frames)
+                        self.saccades = [
+                            Saccade(
+                                heading[r['test_ind']], self, r['test_ind'], self.framerate,
+                                start=r['start_frame'], stop=r['stop_frame'],
+                                baseline_comparison=False, baseline_test=False,
+                            )
+                            for r in self.saccade_table
+                        ]
+                        # Map each table row id → list index for O(1) lookup.
+                        self._saccade_id_to_index = {id(r): i for i, r in enumerate(self.saccade_table)}
+                    return self.saccades[self._saccade_id_to_index[id(row)]]
+                return row[output]
+
+            # --- apply groupby -------------------------------------------
+            if groupby == 'saccade':
+                return [_row_to_value(r) for r in rows]
+            elif groupby == 'test':
+                test_groups = {}
+                for r in rows:
+                    test_groups.setdefault(r['test_ind'], []).append(_row_to_value(r))
+                return [agg_func(grp) for grp in test_groups.values()]
+            elif groupby == 'trial':
+                all_vals = [_row_to_value(r) for r in rows]
+                return agg_func(all_vals) if all_vals else np.nan
+            else:
+                raise ValueError(f"groupby must be 'saccade', 'test', or 'trial'; got {groupby!r}")
+
+        # ------------------------------------------------------------------ #
+        # Trial query branch (original behaviour)                             #
+        # ------------------------------------------------------------------ #
         if output == 'bouts':
             return np.array(self.bouts)
 
@@ -4811,20 +5103,52 @@ class TrackingTrial():
         import os
         import shutil
         import xarray as xr
+        import pickle as _pickle
+        import zarr as _zarr
         zarr_path = os.path.splitext(self.filename)[0] + ".zarr"
-        tmp_path = zarr_path + "_tmp"
-        # Write to a temporary store. Lazy reads from self.h5_file occur here chunk by
-        # chunk against the original store (zarr_path or the source h5), which is
-        # untouched at this point.
-        self.h5_file.to_zarr(tmp_path, mode='w')
-        # Release the lazy handle on the original store before replacing the directory.
-        self.h5_file.close()
-        # Swap: remove the old store (if any) and rename the temp store into place.
-        if os.path.exists(zarr_path):
-            shutil.rmtree(zarr_path)
-        os.rename(tmp_path, zarr_path)
-        # Reopen lazily from the new store to restore the lazy-loading contract.
-        self.h5_file = xr.open_dataset(zarr_path, engine='zarr')
+        sidecar_path = os.path.splitext(self.filename)[0] + ".saccades.pkl"
+        has_saccades = hasattr(self, 'saccade_table') and self.saccade_table
+        any_zarr_changes = self._pending_vars or self._removed_vars or self._dirty_attrs
+
+        if os.path.exists(zarr_path) and any_zarr_changes:
+            # Surgical-update path: open the existing store and write only what changed.
+            # This is fast regardless of how large the unchanged arrays are.
+            store = _zarr.open(zarr_path, mode='r+')
+            # Delete removed variables.
+            for name in self._removed_vars:
+                if name in store:
+                    del store[name]
+            # Write new/modified variables.
+            for name, (arr, dims) in self._pending_vars.items():
+                z = store.create_array(name, data=arr, overwrite=True)
+                z.attrs['_ARRAY_DIMENSIONS'] = list(dims)
+            # Update global attributes (.zattrs).
+            if self._dirty_attrs:
+                store.attrs.update(dict(self.h5_file.attrs))
+            self._pending_vars.clear()
+            self._removed_vars.clear()
+            self._dirty_attrs = False
+        elif not os.path.exists(zarr_path):
+            # First-time write: no zarr store exists yet — do a full write via xarray
+            # so all dimension coordinates are encoded correctly.
+            tmp_path = zarr_path + "_tmp"
+            self.h5_file.to_zarr(tmp_path, mode='w')
+            self.h5_file.close()
+            if os.path.exists(zarr_path):
+                shutil.rmtree(zarr_path)
+            os.rename(tmp_path, zarr_path)
+            self.h5_file = xr.open_dataset(zarr_path, engine='zarr')
+            self._pending_vars.clear()
+            self._removed_vars.clear()
+            self._dirty_attrs = False
+
+        # Saccade table: always saved to a lightweight sidecar .pkl file alongside
+        # the zarr store.  This completely avoids zarr overhead on saccade-only saves
+        # (the common case after detect_saccades with RERUN=False).
+        if has_saccades:
+            with open(sidecar_path, 'wb') as _f:
+                _pickle.dump(self.saccade_table, _f, protocol=_pickle.HIGHEST_PROTOCOL)
+
         return zarr_path
 
     def load(self, filename, trim=False, force_h5=False):
@@ -4903,15 +5227,19 @@ class TrackingTrial():
                                 ds[var] = ds[var].isel({d: slice(None, min_frames)})
 
             # --- Rename phony dimensions to meaningful names ---
-            # The test dim is the small one (typically < 10), frame dim is the large one.
-            dim_names_sorted = sorted(ds.sizes.keys(), key=lambda d: ds.sizes[d])
-            rename_dict = {}
-            if len(dim_names_sorted) >= 1:
-                rename_dict[dim_names_sorted[0]] = 'test'
-            if len(dim_names_sorted) >= 2:
-                rename_dict[dim_names_sorted[-1]] = 'frame'
-            if rename_dict:
-                ds = ds.rename(rename_dict)
+            # Only run when the dims are still opaque (e.g. 'phony_dim_0').
+            # When loading from a Zarr store that was already saved with named
+            # dims ('test', 'frame', 'saccade', ...) the rename is skipped so
+            # that extra dims like 'saccade' are never incorrectly overwritten.
+            if 'test' not in ds.dims or 'frame' not in ds.dims:
+                dim_names_sorted = sorted(ds.sizes.keys(), key=lambda d: ds.sizes[d])
+                rename_dict = {}
+                if len(dim_names_sorted) >= 1:
+                    rename_dict[dim_names_sorted[0]] = 'test'
+                if len(dim_names_sorted) >= 2:
+                    rename_dict[dim_names_sorted[-1]] = 'frame'
+                if rename_dict:
+                    ds = ds.rename(rename_dict)
             self.h5_file = ds
         return success
 
@@ -4970,6 +5298,84 @@ class KalmanFitter():
         self.results += [self.modelled_vals]
         return self.error(self.modelled_vals)
 
+
+def _detect_saccades(arr, framerate, threshold_speed=350, display=False, **find_peaks_kwargs):
+    """Detect candidate saccade start/stop frames using the speed-noise method.
+
+    Applies a zero-phase Butterworth filter to the heading array, computes
+    velocity, and uses peak-finding to identify candidate saccade windows.
+    Returns raw (pre-refinement) start/stop frame indices; the caller is
+    responsible for instantiating Saccade with baseline refinement and
+    filtering by threshold_speed.
+
+    Parameters
+    ----------
+    arr : np.ndarray, shape=(n_frames,)
+        Heading time series (radians). NaNs are handled internally.
+    framerate : float
+        Frames per second.
+    threshold_speed : float, default=350
+        Unused here (kept for API symmetry with detect_saccades). The
+        threshold is applied by the caller after Saccade refinement.
+    display : bool, default=False
+        If True, plot the filtered position, velocity, and acceleration in
+        three vertically-stacked subplots with a shared time axis.  Each
+        detected saccade window is shaded lightgray and a red vertical line
+        marks the peak frame.
+    **find_peaks_kwargs
+        Optional overrides for scipy.signal.find_peaks: distance, width,
+        prominence, wlen. Defaults: distance=framerate/16, width=2,
+        prominence=(1, 30), wlen=framerate/4.
+
+    Returns
+    -------
+    candidates : list[dict]
+        Each dict has keys 'start' and 'stop' (int frame indices,
+        pre-refinement).
+    """
+    arr = np.unwrap(np.copy(arr))
+    arr_clean, _mask, valid_start, valid_end = _handle_nans_for_filter(arr)
+    high = min(15, round(framerate / 2) - 1)
+    vals_fwd = butterworth_filter(arr_clean[np.newaxis], low=0, high=high, sample_rate=framerate)
+    vals_rev = butterworth_filter(arr_clean[np.newaxis, ::-1], low=0, high=high, sample_rate=framerate)
+    vals_filtered = np.full_like(arr, np.nan)
+    vals_filtered[valid_start:valid_end] = np.unwrap(
+        (vals_fwd + vals_rev[:, ::-1]) / 2, axis=-1
+    )
+    velocity = np.gradient(vals_filtered) * framerate
+    dist = framerate / 4
+    distance = find_peaks_kwargs.get('distance', dist / 4)
+    width = find_peaks_kwargs.get('width', 2)
+    prominence = find_peaks_kwargs.get('prominence', (1, 30))
+    wlen = find_peaks_kwargs.get('wlen', dist)
+    peaks = scipy.signal.find_peaks(
+        np.abs(velocity), distance=distance, width=width,
+        prominence=prominence, wlen=wlen,
+    )
+    starts = peaks[1]['left_bases']
+    stops = peaks[1]['right_bases']
+    if display:
+        import matplotlib.pyplot as plt
+        accel = np.gradient(velocity) * framerate
+        time = np.arange(len(arr)) / framerate
+        peak_frames = peaks[0]
+        fig, axes = plt.subplots(nrows=3, sharex=True, figsize=(10, 6))
+        axes[0].plot(time, np.degrees(np.squeeze(vals_filtered)), 'k-')
+        axes[1].plot(time, np.degrees(velocity), 'k-')
+        axes[2].plot(time, np.degrees(accel), 'k-')
+        for start, stop, peak in zip(starts, stops, peak_frames):
+            for ax in axes:
+                ax.axvspan(time[start], time[stop], color='lightgray', alpha=1.0)
+                ax.axvline(time[peak], color='r', linewidth=1)
+        axes[0].set_ylabel('Position (°)')
+        axes[1].set_ylabel('Velocity (°/s)')
+        axes[2].set_ylabel('Accel. (°/s²)')
+        axes[2].set_xlabel('Time (s)')
+        plt.tight_layout()
+        plt.show()
+    return [{'start': int(s), 'stop': int(t)} for s, t in zip(starts, stops)]
+
+
 class Bout():
     def __init__(self, arr, time, trial, test_ind, original_times=None):
         """Analyze a flight bout isolating saccades and taking pertinent measurements.
@@ -4987,6 +5393,13 @@ class Bout():
         original_times : np.ndarray
             Optionally, provide the time values from the video to allow 
         """
+        import warnings
+        warnings.warn(
+            "Bout is deprecated and will be removed in a future version. "
+            "Use TrackingTrial.detect_saccades() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         # store the parameters
         self.trial = trial
         self.arr = arr
@@ -5209,7 +5622,7 @@ class Bout():
             # store the resulting saccade
             velos = [max(abs(np.gradient(saccade.arr))) * 60 for saccade in self.saccades]
             for start, stop in zip(starts, stops):
-                saccade = Saccade(self.arr, self, self.framerate, start, stop, **saccade_kwargs)
+                saccade = Saccade(self.arr, self.trial, self.test_ind, self.framerate, start, stop, **saccade_kwargs)
                 # velos = np.gradient(saccade.arr) * self.framerate
                 # peak_velo = abs(velos).max()
                 peak_velo = abs(saccade.peak_velocity) * 180 / np.pi
@@ -5359,7 +5772,7 @@ class Bout():
                                 start = round(tmin + peak_lag)
                                 stop = round(start + dur)
                             stop = min(len(self.arr)-1, stop)
-                            saccade = Saccade(self.arr, self.framerate, start, stop, display=True, **saccade_kwargs)
+                            saccade = Saccade(self.arr, self.trial, self.test_ind, self.framerate, start, stop, display=True, **saccade_kwargs)
                             if abs(saccade.peak_velocity) < threshold_speed * np.pi / 180.:
                                 saccade.success = False
                             if saccade.success:
@@ -5445,7 +5858,7 @@ class Bout():
                         # include if the end point is not the last frame of the test
                         if out_point < 359:
                             # collect Saccades of each slice of the array
-                            self.saccades += [Saccade(arr, self.framerate, start=in_point, stop=out_point, **saccade_kwargs)]
+                            self.saccades += [Saccade(arr, self.trial, self.test_ind, self.framerate, start=in_point, stop=out_point, **saccade_kwargs)]
 
 
     def query_saccades(self, output='heading', time_var='time', reference_time='start', start=0, stop=np.inf, min_speed=350,
@@ -5525,15 +5938,19 @@ class Bout():
         return times, saccades
 
 class Saccade():
-    def __init__(self, arr, bout, framerate=1, start=0, stop=-1, interpolate_velocity=True, baseline_comparison=False, baseline_z=2, baseline_padding=10, display=False, baseline_test=True, **kwargs):
+    def __init__(self, arr, trial, test_ind, framerate=1, start=0, stop=-1, interpolate_velocity=True, baseline_comparison=False, baseline_z=2, baseline_padding=10, display=False, baseline_test=True, **kwargs):
         """Wrapper for saccade time series and measurements.
 
         Parameters
         ----------
         arr : np.ndarray
             The heading time series from the whole trial.
-        bout : Bout
-            The parent bout containing this saccade.
+        trial : TrackingTrial or None
+            The parent trial containing this saccade. May be None when
+            reconstructing on-demand from stored start/stop values.
+        test_ind : int or None
+            The index of the test within the trial. May be None for
+            on-demand reconstruction.
         framerate : float, default=1
             The framerate of the time series.
         start, stop : int, default=0, -1
@@ -5580,7 +5997,8 @@ class Saccade():
         # store the original time series and time
         self.baseline_z = baseline_z
         self.baseline_padding = baseline_padding
-        self.bout = bout
+        self.trial = trial
+        self.test_ind = test_ind
         arr = np.unwrap(arr)
         self.original_arr = arr
         self.start, self.stop = int(round(start)), int(round(stop))
