@@ -26,6 +26,28 @@ def test_resolve_colors_colormap():
     assert np.all(arr >= 0) and np.all(arr <= 1)
 
 
+def test_resolve_colors_row_only():
+    # Only row_cmap: each row gets its color; broadcast across all columns unchanged.
+    row_cmap = [matplotlib.colors.to_rgb('r'), matplotlib.colors.to_rgb('b')]
+    arr = resolve_colors(row_cmap, None, [0, 1], [0, 1, 2])
+    assert arr.shape == (2, 3, 3)
+    # Row 0 should be pure red across all columns
+    np.testing.assert_allclose(arr[0], np.tile(matplotlib.colors.to_rgb('r'), (3, 1)))
+    # Row 1 should be pure blue across all columns
+    np.testing.assert_allclose(arr[1], np.tile(matplotlib.colors.to_rgb('b'), (3, 1)))
+
+
+def test_resolve_colors_col_only():
+    # Only col_cmap: each column gets its color; broadcast across all rows unchanged.
+    col_cmap = [matplotlib.colors.to_rgb('g'), matplotlib.colors.to_rgb('r')]
+    arr = resolve_colors(None, col_cmap, [0, 1, 2], [0, 1])
+    assert arr.shape == (3, 2, 3)
+    # Column 0 should be pure green across all rows
+    np.testing.assert_allclose(arr[:, 0], np.tile(matplotlib.colors.to_rgb('g'), (3, 1)))
+    # Column 1 should be pure red across all rows
+    np.testing.assert_allclose(arr[:, 1], np.tile(matplotlib.colors.to_rgb('r'), (3, 1)))
+
+
 def test_resolve_colors_list_length_error():
     # Should raise ValueError if list length mismatches
     with pytest.raises(ValueError):
@@ -34,7 +56,7 @@ def test_resolve_colors_list_length_error():
 
 def test_get_grid_vals_numeric():
     class DummyExp:
-        def query(self, output, subset=None):
+        def query(self, output, subset=None, **kwargs):
             return np.array([1, 2, np.nan, 2, 1])
     vals = get_grid_vals(DummyExp(), 'foo', {})
     assert set(vals) == {1, 2}
@@ -42,7 +64,7 @@ def test_get_grid_vals_numeric():
 
 def test_get_grid_vals_string():
     class DummyExp:
-        def query(self, output, subset=None):
+        def query(self, output, subset=None, **kwargs):
             return np.array(['a', 'b', 'nan', 'a'])
     vals = get_grid_vals(DummyExp(), 'foo', {})
     assert set(vals) == {'a', 'b'}

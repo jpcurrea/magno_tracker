@@ -65,65 +65,98 @@ def resolve_colors(row_cmap, col_cmap, row_vals, col_vals, default_color='k'):
     """
     Generate a (num_rows, num_cols, 3) array of RGB colors for a grid.
 
+    Blending rules:
+    - Both row_cmap and col_cmap specified → geometric mean blend per cell.
+    - Only row_cmap → each row has one color, broadcast across all columns.
+    - Only col_cmap → each column has one color, broadcast across all rows.
+    - Neither specified → default_color fills every cell.
+
     Parameters
     ----------
-    row_cmap : matplotlib colormap, list, or None
+    row_cmap : matplotlib colormap callable, list of colors, or None
         Colormap or list of colors for rows.
-    col_cmap : matplotlib colormap, list, or None
+    col_cmap : matplotlib colormap callable, list of colors, or None
         Colormap or list of colors for columns.
     row_vals : array-like
-        Unique values for grid rows.
+        Unique values for grid rows (used only for length).
     col_vals : array-like
-        Unique values for grid columns.
+        Unique values for grid columns (used only for length).
     default_color : str or tuple, optional
-        Default color if no colormap is provided (default is 'k').
+        Fallback color when neither cmap is provided (default 'k').
 
     Returns
     -------
-    color_arr : ndarray
-        Array of shape (num_rows, num_cols, 3) with RGB values.
+    color_arr : ndarray, shape (num_rows, num_cols, 3)
+        RGB values in [0, 1] for every grid cell.
     """
     num_rows = len(row_vals)
     num_cols = len(col_vals)
-    color_arr = np.empty((num_rows, num_cols, 3), dtype=float)
 
     def to_rgb(c):
         return matplotlib.colors.to_rgb(c)
 
-    # Consolidate row and col color logic into a loop
-    color_maps = [row_cmap, col_cmap]
-    sizes = [num_rows, num_cols]
-    color_lists = []
-    for cmap, n, label in zip(color_maps, sizes, ['row', 'col']):
-        # Determine the color list for rows or columns
-        if cmap is None:
-            colors = [to_rgb(default_color)] * n
+    def cmap_to_colors(cmap, n, label, vals=None):
+        """Map a cmap spec to an (n, 3) float array of RGB colors.
+
+        Parameters
+        ----------
+        cmap : str, callable, list/tuple/ndarray
+            A named matplotlib colormap string, a callable colormap, or an
+            explicit list/array/tuple of ``n`` colors.
+        n : int
+            Number of colors needed.
+        label : str
+            'row' or 'col' — used in error messages.
+        vals : array-like, optional
+            The actual data values corresponding to each color slot.  Required
+            when ``cmap`` is a string so the colormap can be normalised against
+            the data range.  Ignored for callable and list inputs.
+        """
+        if isinstance(cmap, str):
+            if vals is None:
+                raise ValueError(
+                    f"string {label}_cmap requires vals to be provided for normalisation.")
+            norm_vals = vals
+            if len(norm_vals) > 0 and isinstance(norm_vals[0], (str, bytes)):
+                norm_vals = np.argsort(norm_vals).astype(float)
+            else:
+                norm_vals = np.asarray(norm_vals, dtype=float)
+            norm = matplotlib.colors.Normalize(norm_vals.min(), norm_vals.max())
+            sm = matplotlib.cm.ScalarMappable(norm=norm, cmap=cmap)
+            return sm.to_rgba(norm_vals)[:, :3]
         elif hasattr(cmap, '__call__'):
-            colors = [cmap(i / max(n - 1, 1))[:3] for i in range(n)]
+            return np.array([cmap(i / max(n - 1, 1))[:3] for i in range(n)])
         elif isinstance(cmap, (list, tuple, np.ndarray)):
-            colors = [to_rgb(c) for c in cmap]
+            colors = np.array([to_rgb(c) for c in cmap])
             if len(colors) != n:
-                raise ValueError(f"Length of {label}_cmap ({len(colors)}) does not match number of {label}s ({n}).")
+                raise ValueError(
+                    f"Length of {label}_cmap ({len(colors)}) does not match "
+                    f"number of {label}s ({n}).")
+            return colors
         else:
-            raise TypeError(f"{label}_cmap must be None, a colormap, or a list/tuple/array of colors.")
-        color_lists.append(colors)
-    row_colors, col_colors = color_lists
+            raise TypeError(
+                f"{label}_cmap must be a string colormap name, a callable colormap, "
+                f"or a list/tuple/array of colors.")
 
-    row_colors = np.asarray(row_colors)
-    col_colors = np.asarray(col_colors)
+    row_specified = row_cmap is not None
+    col_specified = col_cmap is not None
 
-    # Geometric mean color blending, matching plot_summary logic
-    if num_rows > 0 and num_cols > 0:
+    if row_specified and col_specified:
+        row_colors = cmap_to_colors(row_cmap, num_rows, 'row', vals=row_vals)
+        col_colors = cmap_to_colors(col_cmap, num_cols, 'col', vals=col_vals)
         color_arr = np.sqrt(0.5 * (
             row_colors[:, np.newaxis, :] ** 2 +
             col_colors[np.newaxis, :, :] ** 2
         ))
-    elif num_cols > 0:
-        color_arr = np.repeat(col_colors[np.newaxis, :, :], num_rows, axis=0)
-    elif num_rows > 0:
-        color_arr = np.repeat(row_colors[:, np.newaxis, :], num_cols, axis=1)
+    elif row_specified:
+        row_colors = cmap_to_colors(row_cmap, num_rows, 'row', vals=row_vals)
+        color_arr = np.broadcast_to(
+            row_colors[:, np.newaxis, :], (num_rows, num_cols, 3)).copy()
+    elif col_specified:
+        col_colors = cmap_to_colors(col_cmap, num_cols, 'col', vals=col_vals)
+        color_arr = np.broadcast_to(
+            col_colors[np.newaxis, :, :], (num_rows, num_cols, 3)).copy()
     else:
-        # Fallback: fill with default color if both cmaps are None or grid is empty
         color_arr = np.full((num_rows, num_cols, 3), to_rgb(default_color), dtype=float)
 
     return color_arr
@@ -263,6 +296,328 @@ def bootstrap_ci(data, stat_func, confidence=0.84, n_boot=1000, axis=0, return_b
     if return_bootstrap:
         return low, high, boot_stats
     return low, high
+
+# ---------------------------------------------------------------------------
+# Phase 3 — Standalone stateless plot-type functions
+# Each function takes (ax, xs, ys, color, **kwargs) and returns artist(s).
+# They contain no experiment-level logic and are fully testable with synthetic
+# data.  The Phase 5 TrackingExperiment.plot() method will call these.
+# ---------------------------------------------------------------------------
+
+def plot_line(ax, xs, ys, color, summary_func=None, ci=False,
+              confidence=0.84, n_boot=1000, trace_color='gray', **kw):
+    """Plot individual traces with an optional colored mean and CI.
+
+    Parameters
+    ----------
+    ax : matplotlib Axes
+    xs : ndarray, shape (n_traces, n_frames)
+        X values for each trace.
+    ys : ndarray, shape (n_traces, n_frames)
+        Y values for each trace.
+    color : color spec
+        Color for the mean line and CI shading.
+    summary_func : callable or None
+        If provided, compute and overlay a summary trace (e.g. np.nanmean).
+    ci : bool
+        If True (and summary_func is set), shade a bootstrap CI around the mean.
+    confidence : float
+        Confidence level for the CI (default 0.84).
+    n_boot : int
+        Bootstrap resamples for the CI (default 1000).
+    trace_color : color spec, default 'gray'
+        Color for the individual background traces.
+    **kw
+        Extra kwargs forwarded to ax.plot for the individual traces.
+        Use ``alpha`` (default 0.5) and ``lw`` (default 0.5) to control
+        trace opacity and line width.
+
+    Returns
+    -------
+    artists : list
+        All artists added to ax.
+    """
+    artists = []
+    alpha = kw.pop('alpha', 0.5)
+    lw = kw.pop('lw', 0.5)
+    lines = ax.plot(xs.T, ys.T, color=trace_color, lw=lw, alpha=alpha, **kw)
+    artists.extend(lines)
+    if summary_func is not None:
+        mean_x = summary_func(xs, axis=0)
+        y = ys[np.isnan(ys).sum(1).argmin()]
+        white, = ax.plot(mean_x, y, color='w', lw=4, zorder=4)
+        mean_line, = ax.plot(mean_x, y, color=color, zorder=5)
+        artists.extend([white, mean_line])
+        if ci:
+            lows, highs = bootstrap_ci(xs, summary_func,
+                                       confidence=confidence, n_boot=n_boot)
+            band = ax.fill_betweenx(y, lows, highs,
+                                    color=color, alpha=0.3,
+                                    zorder=3, linewidth=0)
+            artists.append(band)
+    return artists
+
+
+def plot_hist2d(ax, xs, ys, color, bins=100, density=False, **kw):
+    """Plot a 2-D histogram with a white-to-color linear colormap.
+
+    Parameters
+    ----------
+    ax : matplotlib Axes
+    xs : ndarray, shape (n,) — already flattened, NaNs removed by caller
+    ys : ndarray, shape (n,)
+    color : color spec
+        Defines the saturated end of the white→color colormap.
+    bins : int or [int, int]
+        Passed to np.histogram2d.
+    density : bool
+        If True, normalise the histogram to a probability density.
+    **kw
+        Extra kwargs forwarded to ax.pcolormesh.  Pass ``vmax`` to fix the
+        colour scale; pass ``cbar=False`` to suppress the colorbar.
+
+    Returns
+    -------
+    mesh : QuadMesh
+    """
+    cmap = matplotlib.colors.LinearSegmentedColormap.from_list(
+        '', [(1, 1, 1), color])
+    hist, xedges, yedges = np.histogram2d(xs, ys, bins=bins, density=density)
+    vmax = kw.pop('vmax', hist.max())
+    cbar = kw.pop('cbar', True)
+    mesh = ax.pcolormesh(xedges, yedges, hist.T,
+                         cmap=cmap, vmin=0, vmax=vmax, **kw)
+    if cbar:
+        plt.colorbar(mesh, ax=ax)
+    return mesh
+
+
+def plot_trajectory2d(ax, xs, ys, color, trace_color='k', **kw):
+    """Plot cumulative 2-D heading trajectories and optional overlays.
+
+    Parameters
+    ----------
+    ax : matplotlib Axes
+    xs : ndarray, shape (n_traces, n_frames)
+        Angular heading in radians for each trace.
+    ys : ndarray, shape (n_traces, n_frames)
+        Ignored (kept for API consistency); pass ``None`` if unavailable.
+    color : color spec
+        Used for optional overlays (circle, contour ellipse, circ_hist, mean).
+    trace_color : color spec, default 'k'
+        Color for the individual trajectory lines and endpoint scatter.
+    **kw
+        Optional flags and settings:
+        ``circle`` — draw per-fly radius circles.
+        ``contour`` — draw a bootstrap ellipse for the mean endpoint.
+        ``circ_hist`` — draw a Wedge ring histogram of endpoint angles at
+            radius 1.01–1.26, plus a bootstrap CI arc and mean-angle dot.
+        ``bins`` — number of bins (or bin edges array) for ``circ_hist``
+            (default 100).
+        ``mean_line`` — overlay the mean trajectory.
+        ``confidence`` — CI level for contour/circ_hist (default 0.84).
+        ``alpha`` — opacity of individual trajectory lines (default 0.25).
+        ``lw`` — line width of individual trajectory lines (default 0.5).
+
+    Returns
+    -------
+    artists : list
+    """
+    from matplotlib.patches import Arc, Wedge
+    confidence = kw.pop('confidence', 0.84)
+    alpha = kw.pop('alpha', 0.25)
+    lw = kw.pop('lw', 0.5)
+    artists = []
+
+    ax.set_aspect('equal', adjustable='box')
+
+    d_vectors = np.array([np.cos(xs), np.sin(xs)]).transpose(1, 0, 2)
+    d_vectors[np.isnan(d_vectors)] = 0
+    trajectory = np.cumsum(d_vectors, axis=-1)
+    trajectory /= trajectory.shape[-1]
+    last_pos = trajectory[..., -1]
+    radii = np.linalg.norm(last_pos, axis=1)
+
+    lines = ax.plot(trajectory[:, 0].T, trajectory[:, 1].T,
+                    lw=lw, color=trace_color, alpha=alpha, zorder=2)
+    scatter = ax.scatter(last_pos[..., 0], last_pos[..., 1],
+                         color=trace_color, marker='.', s=0.5, zorder=2)
+    artists.extend(lines)
+    artists.append(scatter)
+
+    if kw.get('circle'):
+        for radius in radii:
+            c = plt.Circle((0, 0), radius=radius,
+                           color=color, alpha=0.25, fill=False, lw=0.5)
+            ax.add_artist(c)
+            artists.append(c)
+
+    if kw.get('contour'):
+        cmap_overlay = matplotlib.colors.LinearSegmentedColormap.from_list(
+            '', [(1, 1, 1), color])
+        inds = np.arange(len(last_pos))
+        rand_inds = np.random.choice(inds, size=(10000, len(inds)), replace=True)
+        boot_means = np.nanmean(last_pos[rand_inds], axis=1)
+        mean = np.mean(boot_means, axis=0)
+        cov = np.cov(boot_means, rowvar=False)
+        chi2_val = scipy.stats.chi2.ppf(confidence, 2)
+        eigenvals, eigenvecs = np.linalg.eigh(cov)
+        idx = eigenvals.argsort()[::-1]
+        eigenvals, eigenvecs = eigenvals[idx], eigenvecs[:, idx]
+        a = np.sqrt(chi2_val * eigenvals[0])
+        b = np.sqrt(chi2_val * eigenvals[1])
+        angle = np.arctan2(eigenvecs[1, 0], eigenvecs[0, 0])
+        ellipse = matplotlib.patches.Ellipse(
+            mean, 2 * a, 2 * b, angle=np.degrees(angle),
+            color=color, alpha=0.25, fill=True, lw=0.5, zorder=2)
+        ax.add_artist(ellipse)
+        artists.append(ellipse)
+
+    if kw.get('circ_hist'):
+        angles = np.arctan2(last_pos[..., 1], last_pos[..., 0])
+        hist_bins = kw.get('bins', 100)
+        if isinstance(hist_bins, int):
+            hist_bins = np.linspace(-np.pi, np.pi, hist_bins + 1)
+        hist, hist_bins = np.histogram(angles, bins=hist_bins, density=False)
+        # draw ring histogram as Wedge tiles (normalized within this panel)
+        ring_cmap = matplotlib.colors.LinearSegmentedColormap.from_list('', [(1, 1, 1), color])
+        max_val = hist.max() if hist.max() > 0 else 1
+        cvals = ring_cmap(hist / max_val)
+        for start, stop, cval in zip(hist_bins[:-1], hist_bins[1:], cvals):
+            w = Wedge((0, 0), 1.01, start * 180 / np.pi, stop * 180 / np.pi,
+                      facecolor=cval, edgecolor=cval, alpha=1, lw=0.25, width=-0.25)
+            ax.add_artist(w)
+            artists.append(w)
+        # adjust axis limits to show the ring (radius ~1.27)
+        ax.set_xlim(-1.27, 1.27)
+        ax.set_ylim(-1.27, 1.27)
+        # bootstrap CI for the mean angle
+        inds = np.arange(len(last_pos))
+        rand_inds = np.random.choice(inds, size=(10000, len(inds)), replace=True)
+        boot_means = np.nanmean(last_pos[rand_inds], axis=1)
+        boot_angles = np.arctan2(boot_means[..., 1], boot_means[..., 0])
+        mean_angle = np.arctan2(boot_means[..., 1].mean(), boot_means[..., 0].mean())
+        lb_diff, ub_diff = np.percentile(
+            boot_angles - mean_angle,
+            [100 * (1 - confidence) / 2, 100 * (1 + confidence) / 2])
+        lb, ub = mean_angle + lb_diff, mean_angle + ub_diff
+        radius = 1.125
+        for arc_color, lw, zorder in [('w', 4, 4), (color, 2, 5)]:
+            arc = Arc((0, 0), width=2 * radius, height=2 * radius, angle=0,
+                      theta1=np.degrees(lb), theta2=np.degrees(ub),
+                      color=arc_color, lw=lw, zorder=zorder, capstyle='round')
+            ax.add_artist(arc)
+            artists.append(arc)
+        for sc_color, s, z in [('w', 40, 4), (color, 20, 5)]:
+            sc = ax.scatter(radius * np.cos(mean_angle), radius * np.sin(mean_angle),
+                            color=sc_color, marker='o', s=s, zorder=z)
+            artists.append(sc)
+
+    if kw.get('mean_line'):
+        mean_traj = np.nanmean(trajectory, axis=0)
+        white, = ax.plot(mean_traj[0], mean_traj[1], color='w', lw=4, zorder=4)
+        mean_l, = ax.plot(mean_traj[0], mean_traj[1], color=color, lw=1, zorder=5)
+        sc_w = ax.scatter(mean_traj[0, -1], mean_traj[1, -1],
+                          color='w', marker='o', s=10, zorder=4)
+        sc_c = ax.scatter(mean_traj[0, -1], mean_traj[1, -1],
+                          color=color, marker='o', s=5, zorder=5)
+        artists.extend([white, mean_l, sc_w, sc_c])
+
+    return artists
+
+
+def plot_histogram(ax, xs, bins, color, probability=False, summary_func=None,
+                   **kw):
+    """Plot a 1-D histogram bar plot with an optional summary line.
+
+    Parameters
+    ----------
+    ax : matplotlib Axes
+    xs : ndarray, shape (n,) — flattened; NaNs silently ignored
+    bins : int or array-like
+        Bin edges or count, passed to ax.hist.
+    color : color spec
+        Bar face color.
+    probability : bool
+        If True, normalise to probability (density=True equivalent).
+    summary_func : callable or None
+        If provided, draw a vertical line at summary_func(xs[~nan]).
+    **kw
+        Extra kwargs forwarded to ax.hist (e.g. histtype, alpha).
+
+    Returns
+    -------
+    artists : tuple  (n, bins, patches[, vline])
+    """
+    valid = xs[~np.isnan(xs)]
+    n, bin_edges, patches = ax.hist(
+        valid, bins=bins, color=color,
+        density=probability, **kw)
+    if summary_func is not None:
+        val = summary_func(valid)
+        vline = ax.axvline(val, color=color, lw=1.5, zorder=3)
+        return n, bin_edges, patches, vline
+    return n, bin_edges, patches
+
+
+def plot_scatter(ax, xs, ys, color, jitter_std=0.0, correlation=False,
+                 n_boot=10000, marker_color=None, **kw):
+    """Scatter plot with optional jitter and Mardia's circular-linear correlation.
+
+    Parameters
+    ----------
+    ax : matplotlib Axes
+    xs : ndarray, shape (n,)
+        X values (circular, in radians, for correlation).
+    ys : ndarray, shape (n,)
+        Y values.
+    color : color spec
+        Summary/overlay color (e.g. a future trend line). If ``marker_color``
+        is not set, also used for the scatter markers.
+    jitter_std : float
+        Standard deviation of Gaussian jitter applied to xs.
+    correlation : bool
+        If True, annotate the axes title with Mardia's r and a bootstrap p-value.
+    n_boot : int
+        Bootstrap resamples for the correlation p-value (default 10000).
+    marker_color : color spec or None, default None
+        Color for scatter markers. Overrides ``color`` for the data points
+        when set; if None, ``color`` is used.
+    **kw
+        Extra kwargs forwarded to ax.scatter (e.g. s, alpha, edgecolors).
+
+    Returns
+    -------
+    sc : PathCollection
+    """
+    plot_xs = xs.copy()
+    if jitter_std > 0:
+        plot_xs = plot_xs + np.random.normal(0, jitter_std, size=plot_xs.shape)
+    alpha = kw.pop('alpha', 0.25)
+    s = kw.pop('s', 1)
+    edgecolors = kw.pop('edgecolors', 'none')
+    point_color = marker_color if marker_color is not None else color
+    sc = ax.scatter(plot_xs, ys, color=point_color,
+                    alpha=alpha, s=s, edgecolors=edgecolors, **kw)
+    if correlation:
+        valid = np.isfinite(xs) & np.isfinite(ys)
+        if valid.sum() > 2:
+            r = mardia_circ_lin(xs[valid], ys[valid])
+            rand_inds = np.random.randint(0, valid.sum(), (n_boot, valid.sum()))
+            rand_r = np.array([
+                mardia_circ_lin(xs[valid][idx], ys[valid][idx])
+                for idx in rand_inds])
+            lower, _, upper = np.percentile(rand_r, [2.5, 50, 97.5])
+            mid = np.median(rand_r)
+            pval = (np.sum(rand_r <= 0) / n_boot
+                    if mid > 0 else np.sum(rand_r >= 0) / n_boot)
+            ax.set_title(
+                f"r={r:.2f} ({lower:.2f}, {upper:.2f}) {sigAsterisk(pval)}",
+                fontsize=8)
+    return sc
+
+
+# ---------------------------------------------------------------------------
 
 class Kalman_Filter():
     '''
@@ -1660,6 +2015,7 @@ class TrackingExperiment():
                       positive_amplitude=False, scale=1.5, reversal_split=False,
                       saccade_var='arr_relative', min_speed=350, max_speed=np.inf,
                       mean_bins=25, bins=100, line_color='k', line_alpha=.25,
+                      color='k',
                       **query_kwargs):
         """Plot saccade data in one big grid as in the plot summary below.
         
@@ -1743,7 +2099,7 @@ class TrackingExperiment():
         # row_vals, col_vals = np.array(new_row_vals), np.array(new_col_vals)
         num_rows, num_cols = len(row_vals), len(col_vals)
         # Use the resolve_colors helper to generate the color array
-        color_arr = resolve_colors(row_cmap, col_cmap, row_vals, col_vals)
+        color_arr = resolve_colors(row_cmap, col_cmap, row_vals, col_vals, default_color=color)
         # todo: add extra rows if split_reversal
         if reversal_split:
             num_rows *= 2
@@ -2036,6 +2392,7 @@ class TrackingExperiment():
                               bins=21, min_speed=50, max_speed=3000, scatter=False, 
                               xlim=None, ylim=None, xticks=None, yticks=None, display=None,
                               log_cmap=False, jitter_std=0.1, correlation=False,
+                              color='k',
                               plot_kwargs={},
                               **query_kwargs):
         """Plot saccade position (x) and amplitude (y) in a grid as in the plot summary below.
@@ -2106,7 +2463,7 @@ class TrackingExperiment():
         row_vals, col_vals = np.array(new_row_vals), np.array(new_col_vals)
         num_rows, num_cols = len(row_vals), len(col_vals)
         # Use the resolve_colors helper to generate the color array
-        color_arr = resolve_colors(row_cmap, col_cmap, row_vals, col_vals)
+        color_arr = resolve_colors(row_cmap, col_cmap, row_vals, col_vals, default_color=color)
         # todo: add extra rows if split_reversal
         # test: check that the colors are aligned properly. we want this array shape to be num_rows X num_cols
         # add a row or column if plotting in the margins
@@ -2648,7 +3005,7 @@ class TrackingExperiment():
         row_vals = get_grid_vals(self, row_var, subset) if row_var is not None else [None]
         col_vals = get_grid_vals(self, col_var, subset) if col_var is not None else [None]
         num_rows, num_cols = len(row_vals), len(col_vals)
-        color_arr = resolve_colors(row_cmap, col_cmap, row_vals, col_vals)
+        color_arr = resolve_colors(row_cmap, col_cmap, row_vals, col_vals, default_color=color)
         # test: check that the colors are aligned properly. we want this array shape to be num_rows X num_cols
         # add a row or column if plotting in the margins
         if bottom_margin:
@@ -3082,7 +3439,8 @@ class TrackingExperiment():
             row_cmap=None, col_cmap=None, fig=None,
             right_margin=True, bottom_margin=True,
             xlim=None, xticks=None, logx=False, logy=False, display=None, ylim=None,
-            summary_func=partial(scipy.stats.circmean, low=-np.pi, high=np.pi), xlabel=None, 
+            summary_func=partial(scipy.stats.circmean, low=-np.pi, high=np.pi), xlabel=None,
+            color='k',
             **query_kwargs):
         """Plot histgrams of data in one big grid arranged by two variables.
         
@@ -3153,116 +3511,7 @@ class TrackingExperiment():
             storage += [arr for arr in vals[non_nans]]
         row_vals, col_vals = np.array(new_row_vals), np.array(new_col_vals)
         num_rows, num_cols = len(row_vals), len(col_vals)
-        # get the colors from the specified colormaps
-        colors = {}
-        for cmap, vals, key in zip(
-            [row_cmap, col_cmap], 
-            [row_vals, col_vals],
-            ['rows', 'columns']):
-            if len(vals) > 0:
-                if isinstance(cmap, str):
-                    if isinstance(vals[0], (str, bytes)):
-                        # if values are strings, sort them in alphabetical order and use their index for the colors
-                        vals = np.argsort(vals)
-                    norm = matplotlib.colors.Normalize(vals.min(), vals.max())
-                    cmap = matplotlib.cm.ScalarMappable(norm=norm, cmap=cmap)
-                    colors[key] = cmap.to_rgba(vals)[:, :-1]
-                elif callable(cmap):
-                    colors[key] = cmap(vals)
-                elif isinstance(cmap, (list, np.ndarray, tuple)):
-                    assert len(cmap) == len(vals), (
-                        f"Colormap list has {len(cmap)} elements but {len(vals)} {key}.")
-                    colors[key] = cmap
-                else:
-                    colors[key] = []
-            else:
-                colors[key] = []
-        # combine the color lists to make an array specifying the color of each subplot
-        if len(colors['rows']) == num_rows and len(colors['columns']) == num_cols:
-            # get the mean combination of row and column colors
-            color_mean = .5*(
-                colors['rows'][:, np.newaxis]**2 +
-                colors['columns'][np.newaxis, :]**2)
-            color_arr = np.sqrt(color_mean)
-            # elif colors['columns'] is not None:
-            #     color_arr = np.repeat(colors['columns'][np.newaxis], num_rows, axis=0)
-            # elif colors['rows'] is not None:
-            #     color_arr = np.repeat(colors['rows'][:, np.newaxis], num_cols, axis=0)
-        elif len(colors['columns']) == num_cols:
-            if isinstance(colors['columns'], list):
-                colors['columns'] = np.array(colors['columns'])
-            color_arr = np.repeat(colors['columns'][np.newaxis], num_rows, axis=0)
-        elif len(colors['rows']) == num_rows:
-            if isinstance(colors['rows'], list):
-                colors['rows'] = np.array(colors['rows'])
-            color_arr = np.repeat(colors['rows'][:, np.newaxis], num_cols, axis=1)
-        else:
-            # color_arr = np.zeros((num_rows, num_cols, 3), dtype='uint8')
-            color_arr = np.zeros((num_rows, num_cols, 3), dtype='float')
-            if color != 'k':
-                # replace with the specified color (r, g, b)
-                # color_arr[:] = (255*np.array(color)).astype('uint8')
-                color_arr[:] = np.array(color)
-        # row_vals = self.query(output=row_var, sort_by=row_var)
-        # col_vals = self.query(output=col_var, sort_by=col_var)
-        # assert len(col_vals) > 0 or len(row_vals) > 0, "The subset is empty!"
-        # # todo: what's up with the number of axes?
-        # row_vals = np.unique(row_vals)
-        # col_vals = np.unique(col_vals)
-        # new_row_vals, new_col_vals = [], []
-        # for num, (vals, storage) in enumerate(zip([row_vals, col_vals], [new_row_vals, new_col_vals])):
-        #     if vals.dtype.type == np.bytes_:
-        #         non_nans = vals != b'nan'
-        #     elif vals.dtype.type in [np.str_]:
-        #         non_nans = vals != 'nan'
-        #     else:
-        #         non_nans = np.isnan(vals) == False
-        #     storage += [arr for arr in vals[non_nans]]
-        # row_vals, col_vals = np.array(new_row_vals), np.array(new_col_vals)
-        # num_rows, num_cols = len(row_vals), len(col_vals)
-        # # get the colors from the specified colormaps
-        # colors = {}
-        # for cmap, vals, key in zip(
-        #     [row_cmap, col_cmap], 
-        #     [row_vals, col_vals],
-        #     ['rows', 'columns']):
-        #     if len(vals) > 0:
-        #         if isinstance(cmap, str):
-        #             if isinstance(vals[0], (str, bytes)):
-        #                 # if values are strings, sort them in alphabetical order and use their index for the colors
-        #                 vals = np.argsort(vals)
-        #             # add comments below
-        #             # make a colormap
-        #             norm = matplotlib.colors.Normalize(vals.min(), vals.max())
-        #             cmap = matplotlib.cm.ScalarMappable(norm=norm, cmap=cmap)
-        #             colors[key] = cmap.to_rgba(vals)[:, :-1]
-        #         elif callable(cmap):
-        #             colors[key] = cmap(vals)
-        #         elif isinstance(row_cmap, (list, np.ndarray, tuple)):
-        #             assert len(row_cmap) == len(vals), (
-        #                 f"Colormap list has {len(row_cmap)} elements but {len(vals)} {key}.")
-        #             colors[key] = row_cmap
-        #         else:
-        #             colors[key] = []
-        #     else:
-        #         colors[key] = []
-        # # combine the color lists to make an array specifying the color of each subplot
-        # if len(colors['rows']) == num_rows and len(colors['columns']) == num_cols:
-        #     # get the mean combination of row and column colors
-        #     color_mean = .5*(
-        #         colors['rows'][:, np.newaxis]**2 +
-        #         colors['columns'][np.newaxis, :]**2)
-        #     color_arr = np.sqrt(color_mean)
-        #     # elif colors['columns'] is not None:
-        #     #     color_arr = np.repeat(colors['columns'][np.newaxis], num_rows, axis=0)
-        #     # elif colors['rows'] is not None:
-        #     #     color_arr = np.repeat(colors['rows'][:, np.newaxis], num_cols, axis=0)
-        # elif len(colors['columns']) == num_cols:
-        #     color_arr = np.repeat(colors['columns'][np.newaxis], num_rows, axis=0)
-        # elif len(colors['rows']) == num_rows:
-        #     color_arr = np.repeat(colors['rows'][:, np.newaxis], num_cols, axis=1)
-        # else:
-        #     color_arr = np.zeros((num_rows, num_cols, 3), dtype='uint8')
+        color_arr = resolve_colors(row_cmap, col_cmap, row_vals, col_vals, default_color=color)
         # test: check that the colors are aligned properly. we want this array shape to be num_rows X num_cols
         # add a row or column if plotting in the margins
         if bottom_margin:

@@ -97,161 +97,249 @@ backed by xarray dimension-aware operations.
 Stateless functions: `(ax, xvals, yvals, color, **kwargs) → artist(s)`.
 Easy to test with synthetic data and reusable outside `TrackingExperiment`.
 
-- [ ] **3.0 Fix `resolve_colors` / `color` argument handling in plotting functions**
-      - Passing a single RGB color (e.g. `color=red`) should generate a white→color
-        linear colormap applied uniformly to all rows and columns (previous behaviour).
-      - `row_cmap` / `col_cmap` may now be a **list of colors**, one per row/column,
-        in which case each row (or column) gets its own white→color linear colormap.
-      - Regression: since Phase 1 helper extraction the greys cmap is being applied
-        to all figures regardless of the `color` argument — this must be fixed.
-      - Add unit tests covering single-color, list-of-colors, and explicit cmap inputs.
+- [x] **3.0 Fix `resolve_colors` / `color` argument handling in plotting functions**
+      - One cmap specified → broadcast that cmap across the other axis (no blending).
+      - Both cmaps → geometric mean blend: `sqrt(0.5*(r²+c²))`.
+      - Neither → fill with `default_color`.
+      - Added string cmap support (e.g. `'viridis'`) via `ScalarMappable`.
+      - Added `color='k'` parameter to `plot_saccades`, `plot_saccade_dynamics`,
+        `plot_histogram_summary`; all call `resolve_colors(..., default_color=color)`.
+      - Replaced `plot_histogram_summary`'s ~60-line manual color block with a
+        single `resolve_colors()` call.
+      - Unit tests: single-color, row-only broadcast, col-only broadcast, both-cmaps.
 
-- [ ] **3.1 `plot_line(ax, xs, ys, color, summary_func=None, ci=False, **kw)`**
-      Individual traces (gray) + colored mean overlay + optional CI shading.
+- [x] **3.1 `plot_line(ax, xs, ys, color, summary_func=None, ci=False, confidence=0.84, n_boot=1000, trace_color='gray', **kw)`**
+      Individual traces in `trace_color` + white-backed colored mean + optional bootstrap CI band.
+      `alpha`/`lw` via `**kw`.
 
-- [ ] **3.2 `plot_hist2d(ax, xs, ys, color, bins=100, density=False, **kw)`**
-      2D histogram with a white→color linear colormap, optional mean-scatter overlay.
+- [x] **3.2 `plot_hist2d(ax, xs, ys, color, bins=100, density=False, **kw)`**
+      2D histogram with white→color colormap. `vmax`/`cbar` extracted from `**kw`.
 
-- [ ] **3.3 `plot_trajectory2d(ax, xs, ys, color, **kw)`**
-      Cumulative heading → 2D path; options for contour, circ_hist, mean_line, ellipse CI.
+- [x] **3.3 `plot_trajectory2d(ax, xs, ys, color, trace_color='k', **kw)`**
+      Cumulative heading → 2D paths + endpoint scatter. Forced square aspect ratio
+      (`ax.set_aspect('equal', adjustable='box')`). Optional overlays via `**kw`:
+      - `circle` — per-fly radius circles.
+      - `contour` — bootstrap ellipse at `confidence` CI.
+      - `circ_hist` — Wedge ring histogram of endpoint angles at r=1.01–1.26,
+        normalized within the panel, with bootstrap CI arc + mean-angle dot.
+        Bug fix vs. original: ring Wedge tiles were computed but never drawn —
+        now drawn immediately after normalization. Axis limits auto-expand to ±1.27.
+      - `mean_line` — mean trajectory overlay.
+      - `bins` — bin count/edges for `circ_hist` (default 100).
 
-- [ ] **3.4 `plot_histogram(ax, xs, bins, color, probability=False, summary_func=None, **kw)`**
-      1D histogram (bar + optional summary line). Covers what `plot_histogram_summary` does per cell.
+- [x] **3.4 `plot_histogram(ax, xs, bins, color, probability=False, summary_func=None, **kw)`**
+      1D bar histogram; NaNs removed silently; optional `axvline` at `summary_func(valid)`.
 
-- [ ] **3.5 `plot_scatter(ax, xs, ys, color, **kw)`**
-      Simple scatter with optional jitter and correlation annotation (Mardia's r + bootstrap p).
+- [x] **3.5 `plot_scatter(ax, xs, ys, color, jitter_std=0.0, correlation=False, n_boot=10000, marker_color=None, **kw)`**
+      Scatter with optional jitter. `marker_color` overrides `color` for data points
+      (reserved for future summary overlay). Optional Mardia's circular-linear
+      correlation annotation with bootstrap p-value. `alpha`/`s`/`edgecolors` via `**kw`.
 
-- [ ] **3.6 Write unit tests for all Phase 3 functions** using synthetic data and `Figure()`/`Axes`.
+- [x] **3.6 Write unit tests for all Phase 3 functions** — 29 tests in
+      `tests/test_phase3_plot_functions.py`. PNG outputs saved to `tests/plot_outputs/`
+      for visual inspection. Covers: basic output, trace/marker color params, CI,
+      `circ_hist` Wedge count, CI arc, axis limits, aspect ratio, `contour` ellipse,
+      `circle` count, jitter, probability histogram, correlation annotation.
+
+### Implementation summary (April 2026)
+
+**Phase 3 is complete.** All five standalone functions are implemented and tested.
+
+Key design decisions:
+- All functions are module-level (not methods) and accept `ax` as first argument.
+- `**kw` absorbs function-specific options so the Phase 5 `plot()` dispatch can
+  forward `plot_kwargs` without needing to know each option by name.
+- Cross-subplot normalization (e.g. for `circ_hist` ring tiles) is intentionally
+  left to the caller: Phase 5's `plot()` should query all data first, compute a
+  global `vmax`, then pass it explicitly to each `plot_trajectory2d` call.
 
 ---
 
-## Phase 4 — Fix hierarchical query so saccade-level data flows through `query()`
+## Phase 4 — Replace `Bout` intermediary with a flat saccade table per trial
 
-Currently `TrackingExperiment.query(object='saccade')` delegates to
-`TrackingTrial.query_saccades()`, which returns `(time_arr, saccade_arr)` — a
-different signature from trial-level queries. Meanwhile `plot_saccades` and
-`plot_saccade_dynamics` bypass the query system entirely and inline their own
-trial→bout→saccade loops with ad-hoc filtering.
+### Motivation
 
-The goal: make `query(object='saccade', output='amplitude', subset={...})` return
-per-saccade values, with subsetting applied hierarchically:
+`Bout` is essentially a container: it slices one test's data from a trial, runs
+saccade detection, and holds a list of `Saccade` objects. With xarray, per-test
+slicing is already handled by `query(subset={'test_ind': X})`. The class adds
+ceremony without meaningful logic, and the trial→bout→saccade traversal in
+`plot_saccades`/`plot_saccade_dynamics` is the main source of complexity in
+Phase 4's query system.
 
-- **Trial/bout-level keys** (`bg_gain`, `condition`, etc.) filter which bouts are included.
-- **Saccade-level keys** (`peak_velocity`, `amplitude`, etc.) filter individual saccades.
+The replacement: a **saccade table** stored as an xarray Dataset on the trial,
+one row per detected saccade, with enough columns to (a) quickly filter and plot
+without rebuilding `Saccade` objects and (b) reconstruct a full `Saccade`
+on demand.
 
-### Aggregation via `groupby`
+### Saccade table schema
 
-Saccade counts are ragged (different bouts have different numbers of saccades),
-so we need a `groupby` parameter to control the granularity of the output,
-paired with an `agg_func` (default `np.nanmean`) for the reduction:
+| Column | dtype | Description |
+|---|---|---|
+| `test_ind` | int | Which test this saccade belongs to |
+| `test_start_frame` | int | Frame index in the full trial array where that test begins |
+| `start_frame` | int | Saccade start, **test-relative** (matches existing detection algorithm) |
+| `stop_frame` | int | Saccade stop, test-relative |
+| `amplitude` | float | `stop_angle − start_angle` in radians |
+| `peak_velocity` | float | Signed peak velocity in rad/s |
+| `duration` | float | Duration in seconds |
+| `start_angle` | float | Heading at saccade start (radians) |
+| `stop_angle` | float | Heading at saccade stop (radians) |
 
-| `groupby=`    | Returns                        | Use case                                      |
-|---------------|--------------------------------|-----------------------------------------------|
-| `'saccade'`   | flat array, one val per saccade | scatter plots, histograms of individual events |
-| `'bout'`      | one val per bout (via `agg_func`) | per-condition traces where each bout = one trace |
-| `'trial'`     | one val per trial/subject (via `agg_func`) | subject-level stats, bootstrapping |
+Trial-relative frame index → `test_start_frame + start_frame`. This preserves
+backward compatibility with the detection algorithm (which works on test-relative
+arrays) while still enabling fast trial-level reconstruction.
 
-For **time-series** outputs (`arr_relative`, `velocity`, etc.), `groupby='saccade'`
-returns a list of variable-length arrays; `'bout'`/`'trial'` require that `agg_func`
-can handle ragged inputs (e.g., bin-average to a common time grid first).
+### `Saccade` constructor change
 
-For **scalar** outputs (`amplitude`, `peak_velocity`, etc.), all three `groupby`
-levels return ndarrays — just at different sizes.
+From `Saccade(arr, bout, framerate, start, stop)` → `Saccade(arr, trial, test_ind, framerate, start, stop)`.
+`self.bout` references (used only for attribute lookups in `query_saccades`)
+are replaced by `self.trial` + `self.test_ind`.
 
-The `plot()` method (Phase 4) passes `groupby` through, so the same query
-interface works for all downstream plotting.
+### Lifecycle of the saccade table
+
+- Built eagerly when `detect_saccades()` is called on the trial.
+- Replaces any existing table if `detect_saccades()` is called again.
+- Stored in memory as a plain dict/xarray Dataset; not persisted until `save()` is called
+  (consistent with the `add_dataset()` / `save()` pattern from Phase 2).
+- Loaded lazily from Zarr on subsequent trial loads.
+
+### New query interface
+
+`TrackingTrial.query(object='saccade', output, subset={}, groupby='saccade', agg_func=np.nanmean)`
+
+Subsetting uses the existing `query()` logic against the saccade table:
+- **Trial-level keys** (`bg_gain`, `condition`, etc.) filter via the trial's xarray data.
+- **Saccade-level keys** (`peak_velocity`, `amplitude`, etc.) filter rows of the table directly.
+
+`groupby` controls output granularity:
+
+| `groupby=` | Returns | Use case |
+|---|---|---|
+| `'saccade'` | flat array / list of `Saccade` objects | histograms, scatter of individual events |
+| `'test'` | one value per test via `agg_func` | per-condition traces |
+| `'trial'` | one value per trial via `agg_func` | subject-level stats |
+
+`output` can be:
+- A **scalar column name** (`'amplitude'`, `'peak_velocity'`, etc.) → returns ndarray.
+- `'saccade'` → returns list of on-demand `Saccade` objects (reconstructed from
+  `test_start_frame + start_frame` and the trial's heading array).
+- A **time-series attribute** (`'arr_relative'`, `'velocity'`) → returns list of
+  variable-length arrays (only meaningful with `groupby='saccade'`).
 
 ### Tasks
 
-- [ ] **4.1 Define which saccade attributes are "scalar" vs "time-series"**
-      Scalars: `amplitude`, `duration`, `peak_velocity`, `start_angle`, `stop_angle`,
-      `start_time`, `stop_time`. Time-series: `arr_relative`, `velocity`, `time`,
-      `relative_time`. Document these in a class-level dict or constant
-      (e.g., `Saccade.SCALAR_ATTRS`, `Saccade.TIMESERIES_ATTRS`).
+- [ ] **4.1 Update `Saccade.__init__`** to accept `(arr, trial, test_ind, framerate,
+      start, stop, ...)` instead of `(arr, bout, ...)`. Replace `self.bout`
+      attribute with `self.trial` and `self.test_ind`.
 
-- [ ] **4.2 Refactor `TrackingTrial.query_saccades()`**
-      New signature: `query_saccades(output, groupby='saccade', agg_func=np.nanmean,
-      subset={}, sort_by='test_ind', min_speed=0, max_speed=np.inf)`.
-      - Partition `subset` keys into trial/bout-level vs saccade-level.
-      - Apply trial-level filters via `query_bouts()`.
-      - Walk filtered bouts → saccades, apply saccade-level filters.
-      - Collect the requested `output` attribute from each surviving saccade.
-      - If `groupby='saccade'`: return flat array (scalars) or list (time-series).
-      - If `groupby='bout'`: apply `agg_func` per bout → one value per bout.
-      - If `groupby='trial'`: apply `agg_func` across all saccades → one value.
+- [ ] **4.2 Add `detect_saccades()` to `TrackingTrial`**
+      Iterates over tests, runs the existing `Bout.process_saccades()` detection logic
+      (inlined or called as a standalone helper), builds the saccade table, stores
+      it as `self.saccade_table` (an xarray Dataset or structured ndarray).
+      Replaces any existing table. Does not call `save()`.
 
-- [ ] **4.3 Update `Bout.query_saccades()` accordingly**
-      Currently walks `self.saccades` and checks subset keys against
-      `self.trial`, `self`, and each `saccade`. Refactor to:
-      - Accept the same `output`/`groupby`/`agg_func` interface.
-      - Use the partitioned saccade-level subset keys only (bout/trial
-        filtering already happened upstream).
-      - Return the requested attribute per saccade (if `groupby='saccade'`)
-        or the aggregated value (if `groupby='bout'`).
+- [ ] **4.3 Persist / load saccade table via the existing Zarr machinery**
+      - `save()` writes the saccade table to the Zarr store alongside other datasets.
+      - `load()` / `open_dataset()` loads it lazily on the next open.
+      - Use `add_dataset()` internally, consistent with Phase 2 conventions.
 
-- [ ] **4.4 Update `TrackingExperiment.query(object='saccade')`**
-      New kwargs: `groupby='saccade'`, `agg_func=np.nanmean`.
-      Aggregation at the experiment level:
-      - `groupby='saccade'`: concatenate all per-trial flat arrays → one big array.
-      - `groupby='bout'`: concatenate per-trial bout-level arrays → one per bout.
-      - `groupby='trial'`: collect per-trial scalars → array of length N_trials.
+- [ ] **4.4 Implement `TrackingTrial.query(object='saccade', ...)`**
+      Uses the saccade table for fast scalar queries. For `output='saccade'`,
+      reconstructs `Saccade` objects on demand using
+      `test_start_frame + start_frame` into `self.data['body_angle']`.
 
-- [ ] **4.5 Write integration tests** for `query(object='saccade')` confirming:
-      - Trial-level subset correctly limits included bouts.
-      - Saccade-level subset correctly filters by `peak_velocity`, `amplitude`, etc.
-      - `groupby='saccade'` + scalar output → flat ndarray, length = total saccades.
-      - `groupby='bout'` + scalar output → ndarray, length = total bouts.
-      - `groupby='trial'` + scalar output → ndarray, length = total trials.
-      - `groupby='saccade'` + time-series output → list of variable-length arrays.
-      - `agg_func` is correctly applied (test with `np.nanmean`, `len`, etc.).
+- [ ] **4.5 Implement `TrackingExperiment.query(object='saccade', ...)`**
+      Calls each trial's `query(object='saccade', ...)` and concatenates results:
+      - `groupby='saccade'` → concatenate flat arrays.
+      - `groupby='test'` → concatenate per-test arrays.
+      - `groupby='trial'` → one value per trial.
 
----
+- [ ] **4.6 Deprecate `Bout` class**
+      - Keep `Bout` in the file but mark it deprecated with a warning on instantiation.
+      - `process_saccades()` detection logic extracted into a module-level helper
+        `_detect_saccades(arr, time, framerate, **kwargs) → list[dict]` so it can
+        be called by `detect_saccades()` without instantiating `Bout`.
 
-## Phase 4 — Unified `TrackingExperiment.plot()` method
+- [ ] **4.7 Write integration tests** confirming:
+      - `detect_saccades()` populates `saccade_table` with the correct columns.
+      - `save()` + reload produces identical saccade table.
+      - `query(object='saccade', output='amplitude')` returns a flat ndarray.
+      - `query(object='saccade', output='amplitude', groupby='test')` returns
+        one value per test.
+      - `query(object='saccade', subset={'peak_velocity': '>5'})` correctly
+        filters individual saccades.
+      - On-demand `Saccade` reconstruction matches the original `Bout`-based result.
+
+
+
+## Phase 5 — Unified `TrackingExperiment.plot()` method
 
 A single entry point that handles grid setup, querying, iteration over row/col
-subsets, and margin summaries — delegating actual drawing to Phase 2 functions.
+subsets, and margin summaries — delegating actual drawing to Phase 3 functions.
+Phase 3 functions are already implemented and unit-tested; Phase 5 wires them
+into the experiment-level grid infrastructure.
 
-- [ ] **4.1 Implement `TrackingExperiment.plot()`**
+- [ ] **5.1 Implement `TrackingExperiment.plot()`**
       Signature: `plot(xvar, yvar, col_var, row_var, plot_type='line',
-      object='trial', row_cmap=None, col_cmap=None, ...)`
+      object='trial', row_cmap=None, col_cmap=None, color='k', ...)`
       Internally:
         1. `get_grid_vals()` (Phase 1.2) for row/col values
         2. `resolve_colors()` (Phase 1.1) for the color array
         3. Create `SummaryDisplay` grid
-        4. Loop over row × col, calling `self.query(object=object, output=xvar, subset=...)`
-        5. Dispatch to the appropriate Phase 2 function based on `plot_type`
+        4. **Pre-query pass**: loop over row × col, call `self.query()` for every
+           cell and cache results. This allows computing global normalization
+           values (e.g. `circ_hist` Wedge `vmax`, `hist2d` color scale) before
+           any drawing happens, so all panels share the same color range.
+        5. **Draw pass**: loop over cached (data, color) pairs, dispatch to the
+           appropriate Phase 3 function based on `plot_type`, passing the global
+           `vmax` (and any other cross-subplot stats) via `**plot_kwargs`.
         6. Populate margin summaries
         7. Call `display.format()` and `display.label_margins()`
 
-- [ ] **4.2 Test `plot()` with `plot_type='line'`** — verify identical output to current `plot_summary` default
+- [ ] **5.2 Test `plot()` with `plot_type='line'`**
+      Integration test: call on real (or synthetic) experiment data; confirm
+      the correct number of subplots, that traces appear on each axis, and
+      that `resolve_colors` produces distinct colors per row/col.
 
-- [ ] **4.3 Test `plot()` with `plot_type='hist2d'`** — verify identical output to `plot_summary(..., plot_type='hist2d')`
+- [ ] **5.3 Test `plot()` with `plot_type='hist2d'`**
+      Confirm 2D histogram bins appear, shared `vmax` is consistent across panels.
 
-- [ ] **4.4 Test `plot()` with `plot_type='hist'`** — verify it replaces `plot_histogram_summary`
+- [ ] **5.4 Test `plot()` with `plot_type='histogram'`**
+      Confirm bar histograms appear; verify it produces equivalent output to
+      `plot_histogram_summary` on the same data.
 
-- [ ] **4.5 Test `plot()` with `plot_type='trajectory2d'`** — verify identical output to `plot_summary(..., plot_type='trajectory2d')`
+- [ ] **5.5 Test `plot()` with `plot_type='trajectory2d'`**
+      Confirm `circ_hist` Wedge count is consistent and all panels use the same
+      normalized `vmax` (cross-subplot normalization from the pre-query pass).
 
-- [ ] **4.6 Test `plot()` with `object='saccade', plot_type='line'`** — verify it replaces `plot_saccades`
+- [ ] **5.6 Test `plot()` with `object='saccade', plot_type='line'`**
+      Requires Phase 4 complete. Confirm it replaces `plot_saccades`.
+      Data source switches from `Bout`-based traversal to saccade table query.
 
-- [ ] **4.7 Test `plot()` with `object='saccade', plot_type='scatter'` or `'hist2d'`** — verify it replaces `plot_saccade_dynamics`
+- [ ] **5.7 Test `plot()` with `object='saccade', plot_type='scatter'` or `'hist2d'`**
+      Requires Phase 4 complete. Confirm it replaces `plot_saccade_dynamics`.
+      Data source switches from `Bout`-based traversal to saccade table query.
 
 ---
 
-## Phase 5 — Deprecate old methods and clean up
+## Phase 6 — Deprecate old methods and clean up
 
+- [ ] **6.1 Rewrite `plot_summary` as a thin wrapper** around `plot()` (for backward compat), mark deprecated.
+      Note: `color`, `row_cmap`, `col_cmap` already forward correctly via Phase 3.0
+      changes — the wrapper mainly needs to translate old `plot_kwargs` keys.
 
-- [ ] **5.1 Rewrite `plot_summary` as a thin wrapper** around `plot()` (for backward compat), mark deprecated
+- [ ] **6.2 Rewrite `plot_histogram_summary`** as `plot(..., plot_type='histogram')`, mark deprecated.
+      Note: `color='k'` param and `resolve_colors` replacement already done in Phase 3.0.
 
-- [ ] **5.2 Rewrite `plot_histogram_summary`** as `plot(..., plot_type='hist')`, mark deprecated
+- [ ] **6.3 Rewrite `plot_saccades`** as `plot(..., object='saccade', plot_type='line')`, mark deprecated.
+      Note: `color='k'` param already added in Phase 3.0.
 
-- [ ] **5.3 Rewrite `plot_saccades`** as `plot(..., object='saccade', plot_type='line')`, mark deprecated
+- [ ] **6.4 Rewrite `plot_saccade_dynamics`** as `plot(..., object='saccade', plot_type='scatter')`, mark deprecated.
+      Note: `color='k'` param already added in Phase 3.0.
 
-- [ ] **5.4 Rewrite `plot_saccade_dynamics`** as `plot(..., object='saccade', plot_type='scatter')`, mark deprecated
+- [ ] **6.5 Remove dead code:** `breakpoint()` calls, large commented-out blocks throughout all methods.
 
-- [ ] **5.5 Remove dead code:** `breakpoint()` calls, large commented-out blocks throughout all methods
-
-- [ ] **5.6 Add/update docstrings** for all new and modified public functions and methods
+- [ ] **6.6 Add/update docstrings** for all new and modified public functions and methods.
 
 ---
 
@@ -263,8 +351,9 @@ subsets, and margin summaries — delegating actual drawing to Phase 2 functions
 - The `SummaryDisplay` class and its `format()`/`label_margins()` methods are
   already solid. No changes needed there.
 - Each phase is independently mergeable: Phase 1 is pure extraction with no
-  behavior change, Phase 2 adds new code, Phase 3 fixes the query system,
-  Phase 4 wires everything together, Phase 5 cleans up.
+  behavior change, Phase 2 migrates the data layer to xarray/Zarr, Phase 3
+  implements standalone plot functions, Phase 4 fixes the saccade query system,
+  Phase 5 wires everything into a unified `plot()` method, Phase 6 cleans up.
 
 ---
 Add new items as needed. Check off items as they are completed.
