@@ -88,6 +88,15 @@ def resolve_colors(row_cmap, col_cmap, row_vals, col_vals, default_color='k'):
     -------
     color_arr : ndarray, shape (num_rows, num_cols, 3)
         RGB values in [0, 1] for every grid cell.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> colors = resolve_colors(None, None, [1, 2], [1, 2, 3], default_color='k')
+    >>> colors.shape
+    (2, 3, 3)
+    >>> np.allclose(colors[0, 0], [0., 0., 0.])
+    True
     """
     num_rows = len(row_vals)
     num_cols = len(col_vals)
@@ -179,6 +188,14 @@ def get_grid_vals(experiment, var, subset):
     -------
     vals : ndarray
         1D array of unique, valid values for the variable.
+
+    Examples
+    --------
+    Usage with a real experiment is shown in the tutorial notebook.  The
+    function filters NaN/b'nan' and returns sorted unique values::
+
+        vals = get_grid_vals(exp, 'condition', subset={'bg_gain': '>0'})
+        # → e.g. array([1, 2, 3, 4])
     """
     arr = experiment.query(output=var, subset=subset, skip_empty=True)
     # If arr is a list of arrays, flatten it
@@ -213,6 +230,15 @@ def omit_wrapping(arr, threshold=np.pi/2, return_mask=False):
         Copy of arr with NaNs inserted at discontinuities.
     mask : ndarray, optional
         Boolean mask, True for valid (non-NaN) entries. Only if return_mask=True.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> omit_wrapping(np.array([0.0, 0.1, 3.0, 3.1]))
+    array([0. , 0.1, nan, 3. , 3.1])
+    >>> out, mask = omit_wrapping(np.array([0.0, 0.1, 3.0, 3.1]), return_mask=True)
+    >>> mask
+    array([ True,  True, False,  True,  True])
     """
     arr = np.asarray(arr)
     if arr.ndim == 1:
@@ -277,6 +303,17 @@ def bootstrap_ci(data, stat_func, confidence=0.84, n_boot=1000, axis=0, return_b
         Upper bound(s) of the confidence interval.
     boot_stats : ndarray, optional
         Array of bootstrap statistics (only if return_bootstrap is True).
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> rng = np.random.default_rng(0)
+    >>> data = rng.standard_normal((100, 50))
+    >>> low, high = bootstrap_ci(data, np.nanmean, confidence=0.84, n_boot=200)
+    >>> low.shape
+    (50,)
+    >>> bool(np.all(low < high))
+    True
     """
     data = np.asarray(data)
     rng = np.random.default_rng()
@@ -1577,12 +1614,7 @@ class TrackingVideo():
                 head_ang = scipy.stats.circmean(head_angs, low=-np.pi, high=np.pi)
                 self.heading += [head_ang]
             elif method == 'svd':
-                # 1. threshold the video
-                body = (frame > floor) * (frame <= ceiling)
-                breakpoint()
-                # 2. get 2D coordinates representing the fly
-                # ys, xs =
-                # 3. get the orientation of the principle component
+                raise NotImplementedError("SVD heading method is not yet implemented.")
             # extra: measure the wing 
             if wings:
                 # get the wing ring values
@@ -1611,14 +1643,12 @@ class TrackingVideo():
                 # plot a vector using the heading angle
                 # plt.figure()
             if head:
-                breakpoint()
-                # 
+                pass  # head tracking not yet implemented
             print_progress(num, self.num_frames)
         if isinstance(self.video, io.ffmpeg.FFmpegReader):
             self.video = io.FFmpegReader(self.filename)
         # convert to ndarray
         self.heading = np.array(self.heading)
-        breakpoint()
         if np.any(np.isnan(self.heading)):
             # if np.isnan(self.heading).mean() > .1:
             #     breakpoint()
@@ -1687,8 +1717,8 @@ class TrackingVideo():
                 else:
                     try:
                         rr, cc, val = skimage.draw.line_aa(vid_radius, vid_radius, pos[0], pos[1])
-                    except:
-                        breakpoint()
+                    except Exception:
+                        raise
                     # scale down the older values
                     old_vals = frame_centered[cc, rr].astype(float)
                     old_vals *= (1 - val)[..., np.newaxis]
@@ -1979,8 +2009,7 @@ class OfflineTracker():
                     heading_offline_arr[heading_offline_arr < -np.pi] += 2* np.pi
                     heading_offline_arr[heading_offline_arr > np.pi] -= 2* np.pi
                 elif method == 'svd':
-                    # get the principle component of the above-threshold pixel coordinates
-                    breakpoint()
+                    raise NotImplementedError("SVD heading method is not yet implemented.")
                 data.add_dataset('camera_heading_offline', heading_offline_arr)
                 # data.add_dataset('com_thrust', self.thrust)
                 if wings:
@@ -2147,7 +2176,6 @@ class OfflineTracker():
         sum_corr_ax.plot(lags, np.nanmean(summary_corr_TS, axis=0), color='k', alpha=1)
         plt.tight_layout()
         plt.show()
-        breakpoint()
 
         # 2. plot individual residual traces
 
@@ -2184,22 +2212,57 @@ class TrackingExperiment():
             self.remove_incompletes()
 
     def query(self, object='trial', same_size=True, skip_empty=False, **kwargs):
-        """Get specified data from each trial.
+        """Collect data from every trial and return a combined result.
 
         Parameters
         ----------
-        object : str, default='trial'
-            The object to query. Can be 'trial', 'bout', or 'saccade'.
-        same_size : bool, default=True
-            Whether to return an arrays forced into the same shape. Only really 
-            applies when object='trial'.
-        skip_empty : bool, default=False
-            Whether to skip trials with no data.
-        **kwargs : dict
-            The arguments to pass to the query method of each trial.
-            For ``object='saccade'``, relevant kwargs are: ``output``,
-            ``subset``, ``groupby`` (``'saccade'``, ``'test'``, or
-            ``'trial'``), and ``agg_func``.
+        object : {'trial', 'saccade', 'bout'}, default ``'trial'``
+            What to query from each trial.  ``'saccade'`` delegates to
+            :meth:`TrackingTrial.query` with ``object='saccade'`` and
+            requires :meth:`detect_saccades` to have been called first.
+        same_size : bool, default True
+            Only applies when ``object='trial'``.  When True and trials have
+            different lengths, shorter arrays are padded (NaN / 0) to the
+            maximum length so the result is a single ``ndarray``.
+        skip_empty : bool, default False
+            Omit trials that return empty arrays.
+        **kwargs
+            Forwarded to each trial's ``query()`` call.  Key kwargs:
+
+            output : str
+                Variable name to retrieve (``object='trial'``) or saccade
+                column / ``'saccade'`` (``object='saccade'``).
+            subset : dict, optional
+                Filter conditions.  Scalar, membership list, inequality string
+                (e.g. ``'>0.5'``), or NaN matching are all supported.
+            sort_by : str, default ``'test_ind'``
+                Variable to sort results by.
+            groupby : {'saccade', 'test', 'trial'}, optional
+                Granularity for ``object='saccade'``.
+            agg_func : callable, optional
+                Reduction applied per group for ``groupby='test'/'trial'``.
+
+        Returns
+        -------
+        ndarray or list
+            For ``object='trial'`` with uniform shapes: ``ndarray`` of shape
+            ``(n_trials, n_tests[, n_frames])``.  Otherwise a list.
+            For ``object='saccade'``: list of values / :class:`Saccade` objects.
+
+        Examples
+        --------
+        Get heading time-series for all trials::
+
+            data = exp.query(output='camera_heading')
+            # → ndarray shape (n_trials, n_tests, n_frames)
+
+        Filter by condition and group saccades per test::
+
+            amps = exp.query(
+                object='saccade', output='amplitude',
+                groupby='test',
+                subset={'condition': 1, 'peak_velocity': '>5'},
+            )
         """
         if 'subset' not in kwargs.keys():
             kwargs['subset'] = {}
@@ -2347,31 +2410,45 @@ class TrackingExperiment():
         return pd.concat(frames, ignore_index=True)
 
     def add_dataset(self, name, vals):
-        """Add this dataset to each trial.
-        
-        Add a dataset of the provided values under the specified name.
+        """Add a per-trial dataset to every trial in the experiment.
 
         Parameters
         ----------
         name : str
-            The name of the dataset
-        arr : np.ndarray, shape=(k) or (N, k)
-            The list or array of arrays to store.
+            Dataset name.  Must be a valid Python identifier and must not
+            shadow an existing trial attribute.
+        vals : sequence of array-like, length == len(self.trials)
+            One array per trial.  Each element is forwarded to
+            :meth:`TrackingTrial.add_dataset` for that trial.
+
+        Examples
+        --------
+        ::
+
+            smoothed = [butterworth(t.query('camera_heading')) for t in exp.trials]
+            exp.add_dataset('camera_heading_smooth', smoothed)
+            exp.save()
         """
         for trial, arr in zip(self.trials, vals):
             trial.add_dataset(name, arr)
 
     def add_attr(self, name, vals):
-        """Add this dataset to each trial.
-        
-        Add a dataset of the provided values under the specified name.
+        """Add a scalar metadata attribute to every trial in the experiment.
 
         Parameters
         ----------
         name : str
-            The name of the dataset
-        arr : np.ndarray, shape=(k) or (N, k)
-            The list or array of arrays to store.
+            Attribute name.
+        vals : sequence, length == len(self.trials)
+            One scalar value per trial, forwarded to
+            :meth:`TrackingTrial.add_attr`.
+
+        Examples
+        --------
+        ::
+
+            exp.add_attr('experimenter', ['Alice'] * len(exp.trials))
+            exp.save()
         """
         for trial, arr in zip(self.trials, vals):
             trial.add_attr(name, arr)
@@ -2542,91 +2619,183 @@ class TrackingExperiment():
              plot_kwargs=None, **query_kwargs):
         """Unified grid-plot entry point for TrackingExperiment.
 
+        Draws a grid of subplots parameterised by ``col_var`` and ``row_var``,
+        with optional margin summary axes on the right and bottom.  All querying,
+        color resolution, and grid layout happen internally; the caller only
+        needs to specify what to plot and how.
+
         Parameters
         ----------
         xvar : str
-            Variable for each panel's x-axis. For
-            ``object='saccade', plot_type='line'``, this must be a
-            time-series attribute of ``Saccade`` (e.g. ``'arr_relative'``).
+            Variable for each panel's x-axis.  For
+            ``object='saccade', plot_type='line'`` this must be a time-series
+            attribute of :class:`Saccade` (e.g. ``'arr_relative'``).
         yvar : str or None
-            Variable for each panel's y-axis. Not used by
+            Variable for each panel's y-axis.  Not used by
             ``plot_type='trajectory2d'``; ignored by ``plot_type='histogram'``.
         col_var, row_var : str or None
-            Variables that parameterise the grid columns and rows.
+            Variables that parameterise the grid columns and rows.  Pass
+            ``None`` for a single column or row.
         plot_type : {'line', 'hist2d', 'trajectory2d', 'histogram', 'scatter'}
             Drawing style per panel.
         object : {'trial', 'saccade'}
-            Data source.  ``'saccade'`` requires ``detect_saccades()`` to
-            have been called on every trial.
+            Data source.  ``'saccade'`` requires :meth:`detect_saccades` to
+            have been called on every trial first.
         row_cmap, col_cmap : colormap or list, optional
-            Forwarded to ``resolve_colors``.
-        color : color spec, default 'k'
-            Fallback colour when no cmap is given.
+            Colormap for rows / columns.  Forwarded to :func:`resolve_colors`.
+            Accepts a named matplotlib colormap string, a callable that takes a
+            value in [0, 1], or an explicit list of colors.
+        color : color spec, default ``'k'``
+            Fallback colour when neither cmap is given.
         right_margin, bottom_margin : bool | str | list[str]
-            Margin configuration.  ``True`` → smart default per
-            ``plot_type``; ``False`` → disabled; a string or list of
-            strings selects explicit margin plot type(s) (``'line'``,
-            ``'histogram'``, ``'scatter'``, ``'circ_hist'``).
+            Margin configuration.  ``True`` → smart default per ``plot_type``;
+            ``False`` → disabled; a string or list of strings selects explicit
+            margin plot type(s): ``'line'``, ``'histogram'``, ``'scatter'``,
+            ``'circ_hist'``.
         xlim, ylim : tuple or None
-            Forwarded to ``SummaryDisplay.format()``.
+            Axis limits forwarded to :meth:`SummaryDisplay.format`.
         xticks, yticks : list or None
-            Forwarded to ``SummaryDisplay.format()``.
-        logx, logy : bool
-            Forwarded to ``SummaryDisplay.format()``.
+            Tick positions forwarded to :meth:`SummaryDisplay.format`.
+        logx, logy : bool, default False
+            Log-scale axes forwarded to :meth:`SummaryDisplay.format`.
         display : SummaryDisplay or None
-            Provide a pre-existing display to superimpose data.
-        summary_func : callable, default np.nanmean
-            Applied along axis=0 for mean overlays and margin 'line' plots.
+            Provide an existing display to superimpose data onto.
+        summary_func : callable, default ``np.nanmean``
+            Applied along axis=0 for mean overlays and margin ``'line'`` plots.
         xlabel, ylabel : str or None
-            Custom axis labels; default to variable names.
+            Custom axis labels; default to ``xvar`` / ``yvar``.
         scale : float, default 1.5
-            Controls figure size.
+            Multiplier that controls figure size.
         bins : int or array-like, default 100
-            Histogram bins for 'hist2d', 'histogram', and 'circ_hist'.
+            Bin count or edges for ``'hist2d'``, ``'histogram'``, and
+            ``'circ_hist'``.
         density : bool, default False
-            Normalise 'hist2d' counts to density.
+            Normalise ``'hist2d'`` counts to density.
         probability : bool, default False
-            Normalise 'histogram' counts to probability.
+            Normalise ``'histogram'`` counts to probability (0–1).
         omit_wrap : bool, default True
-            Insert NaNs at angular discontinuities (for 'line' plot_type).
+            Insert NaNs at angular discontinuities greater than π/2 when
+            ``plot_type='line'``.
         confidence_interval : bool, default False
-            Add bootstrap CI shading for 'line' plot_type.
+            Add a bootstrap CI shading band for ``plot_type='line'``.
         confidence : float, default 0.84
-            CI level for bootstrap CI and trajectory2d overlays.
+            Confidence level for bootstrap CI and ``trajectory2d`` overlays.
         n_boot : int, default 1000
-            Bootstrap resamples for CI.
+            Number of bootstrap resamples for CI estimation.
         groupby : {'saccade', 'test', 'trial'} or None
-            Grouping for ``object='saccade'`` scalar queries.  ``None``
-            is treated as ``'saccade'`` (flat per-saccade).
+            Grouping granularity for ``object='saccade'`` scalar queries.
+            ``None`` is treated as ``'saccade'`` (flat, one value per saccade).
         agg_func : callable or None
-            Aggregation applied when ``groupby`` is ``'test'`` or
-            ``'trial'``.  Default ``np.nanmean``.
-        plot_kwargs : dict, optional
-            Extra kwargs forwarded to the Phase 3 plot function
-            (e.g. ``{'circ_hist': True, 'mean_line': True}``).
-            For ``plot_type='line'`` the following keys are also consumed
-            here before forwarding: ``split_by_sign`` (bool, default False),
-            ``mean_bins`` (int or None, default None).
+            Aggregation function applied per group when ``groupby`` is
+            ``'test'`` or ``'trial'``.  Default ``np.nanmean``.
         positive_amplitude : bool, default False
-            Only for ``object='saccade', plot_type='line'``.  Flip the sign
-            of any saccade trace whose last non-NaN x-value is negative so
-            all traces end positive.  Useful for comparing saccade shapes
-            regardless of direction.
+            Only for ``object='saccade', plot_type='line'``.  Flip negative
+            saccade traces so all traces end with positive displacement.
         min_speed, max_speed : float or None, default None
-            Speed filters for ``object='saccade'`` (degrees/s).  Converted
+            Speed filters for ``object='saccade'`` in degrees/s.  Converted
             internally to rad/s and applied as ``peak_velocity`` subset
             conditions.
         show_n : bool, default False
-            Add a ``N=<groups>, n=<items>`` annotation in the bottom-right
-            corner of each trace panel.  N counts the number of groupby
-            entities (trials for ``groupby='saccade'/'trial'``, tests for
-            ``groupby='test'``; number of trials for ``object='trial'``).
-            n counts individual saccades (``object='saccade'``) or trace
-            rows (``object='trial'``).
+            Annotate each trace panel with ``N=<groups>, n=<items>`` in the
+            bottom-right corner.
+        relative_to : {'start', 'peak', 'stop'}, default ``'start'``
+            Reference frame alignment for ``object='saccade', plot_type='line'``.
+            Each trace is shifted so that the chosen frame sits at x=0.
+        rad2deg : bool, default False
+            Convert ``xvar`` data from radians to degrees before plotting.
+            ``plot_type='trajectory2d'`` is always exempt (it uses raw radians
+            for ``cos``/``sin``).  When ``True``, pass ``xlim`` in degrees.
+        right_margin_xlim, right_margin_ylim : tuple or None
+            Override the auto-synced axis limits on right-margin axes.
+        bottom_margin_xlim, bottom_margin_ylim : tuple or None
+            Override the auto-synced axis limits on bottom-margin axes.
+        plot_kwargs : dict or None
+            Extra keyword arguments forwarded to the underlying Phase 3 plot
+            function.  Recognised keys depend on ``plot_type``:
+
+            **plot_type='line'**
+
+            ==================  ================================================
+            ``trace_color``     Color for individual trace lines (default 'gray').
+            ``alpha``           Trace opacity (default 0.5).
+            ``mean_bins``       int — bin-average the mean line into N bins over
+                                the yvar range instead of a frame-by-frame mean.
+            ``split_by_sign``   bool — draw separate solid/dashed mean lines for
+                                positive and negative ``xvar`` groups.
+            ``saccade_spans``   list of (y_start, y_stop) tuples marking the
+                                saccade window on each trace (for
+                                ``object='saccade'``).
+            ==================  ================================================
+
+            **plot_type='histogram'**
+
+            ==================  ================================================
+            (no extra keys)     Use ``bins``, ``probability`` top-level params.
+            ==================  ================================================
+
+            **plot_type='hist2d'**
+
+            ==================  ================================================
+            ``vmax``            Saturate the colormap at this count value.
+            ``cbar``            bool — show a colorbar (default True).
+            ``n_contours``      int — overlay KDE contour lines.
+            ``contour_alpha``   float — opacity of KDE contours.
+            ==================  ================================================
+
+            **plot_type='scatter'**
+
+            ==================  ================================================
+            ``jitter_std``      std of Gaussian jitter added to each point.
+            ``correlation``     bool — annotate Mardia circular-linear r.
+            ``alpha``           point opacity.
+            ``s``               marker size.
+            ==================  ================================================
+
+            **plot_type='trajectory2d'**
+
+            ==================  ================================================
+            ``circle``          bool — draw per-fly radius circles + mean circle.
+            ``contour``         bool — draw bootstrap confidence ellipse.
+            ``circ_hist``       bool — draw a Wedge ring histogram of endpoint
+                                angles at r = 1.01–1.26 with a CI arc.
+            ``mean_line``       bool — draw the mean 2D trajectory.
+            ``bins``            int or edges for the circ_hist ring.
+            ==================  ================================================
 
         **query_kwargs
-            Forwarded to ``self.query()``
-            (e.g. ``subset={}``, ``sort_by='test_ind'``).
+            Forwarded to :meth:`TrackingExperiment.query`
+            (e.g. ``subset={'condition': 1}``, ``sort_by='test_ind'``).
+
+        Examples
+        --------
+        Line plot of heading vs time, one column per condition::
+
+            exp.plot('camera_heading', 'time', col_var='condition',
+                     row_var=None, col_cmap='viridis')
+
+        Saccade traces aligned to the peak, with binned mean and degree axis::
+
+            exp.plot('arr_relative', 'relative_time',
+                     object='saccade', plot_type='line',
+                     col_var='condition', row_var=None,
+                     relative_to='peak', rad2deg=True,
+                     xlim=(-90, 90), ylim=(0.4, -0.1),
+                     plot_kwargs={'mean_bins': 20, 'split_by_sign': True},
+                     show_n=True)
+
+        Position vs amplitude 2D histogram with degree axes::
+
+            exp.plot('start_angle', 'amplitude',
+                     object='saccade', plot_type='hist2d',
+                     col_var='condition', row_var=None,
+                     rad2deg=True, xlim=(-180, 180), ylim=(-180, 180))
+
+        Trajectory2D with circular histogram overlay::
+
+            exp.plot('camera_heading', 'time',
+                     plot_type='trajectory2d',
+                     col_var='condition', row_var=None,
+                     plot_kwargs={'circ_hist': True, 'contour': True})
         """
         if plot_kwargs is None:
             plot_kwargs = {}
@@ -3221,323 +3390,45 @@ class TrackingExperiment():
         **query_kwargs
             These get passed to the query 
         """
-        if 'subset' not in query_kwargs:
-            query_kwargs['subset'] = {}
-        if 'sort_by' not in query_kwargs:
-            query_kwargs['sort_by'] = 'test_ind'
-        subset = copy.copy(query_kwargs['subset'])
-        # get the values used for coloring each subplot
-        if row_var is not None:
-            row_vals = self.query(output=row_var, sort_by=row_var)
-        else:
-            row_vals = [None]
-        if col_var is not None:
-            col_vals = self.query(output=col_var, sort_by=col_var)
-        else:
-            col_vals = [None]
-        assert len(col_vals) > 0 or len(row_vals) > 0, "The subset is empty!"
-        # todo: what's up with the number of axes?
-        row_vals = np.unique(row_vals)
-        col_vals = np.unique(col_vals)
-        # new_row_vals, new_col_vals = [], []
-        # for num, (vals, storage) in enumerate(zip([row_vals, col_vals], [new_row_vals, new_col_vals])):
-        #     if np.any(vals != None):
-        #         if vals.dtype.type == np.bytes_:
-        #             non_nans = vals != b'nan'
-        #         elif vals.dtype.type in [np.string_, np.str_]:
-        #             non_nans = vals != 'nan'
-        #         else:
-        #             non_nans = np.isnan(vals) == False
-        #         storage += [arr for arr in vals[non_nans]]
-        #     else:
-        #         storage = vals
-        # row_vals, col_vals = np.array(new_row_vals), np.array(new_col_vals)
-        num_rows, num_cols = len(row_vals), len(col_vals)
-        # Use the resolve_colors helper to generate the color array
-        color_arr = resolve_colors(row_cmap, col_cmap, row_vals, col_vals, default_color=color)
-        # todo: add extra rows if split_reversal
+        import warnings
+        warnings.warn(
+            "plot_saccades() is deprecated and will be removed in a future "
+            "version.  Use plot(object='saccade', plot_type='line') instead.",
+            DeprecationWarning, stacklevel=2,
+        )
+        if fig is not None:
+            warnings.warn(
+                "The 'fig' parameter is not forwarded to plot().",
+                DeprecationWarning, stacklevel=2,
+            )
         if reversal_split:
-            num_rows *= 2
-        # test: check that the colors are aligned properly. we want this array shape to be num_rows X num_cols
-        # add a row or column if plotting in the margins
-        if bottom_margin:
-            num_rows += 1
-        if right_margin:
-            num_cols += 1
-        # make the figure and axes with a grid defined by num_rows and num_cols
-        figsize = (scale * num_cols + 1, scale*num_rows + 1)
-        self.display = SummaryDisplay(
-            num_rows=num_rows, num_cols=num_cols, right_margin=right_margin, 
-            bottom_margin=bottom_margin, figsize=figsize)
-        trace_axes = self.display.trace_axes
-        # todo: there's a problem with the number of axes here when there is supposed to be 
-        # a bottom margin axis
-        # plot the data
-        num_frames = self.trials[0].num_frames
-        means = np.zeros((trace_axes.shape[0], trace_axes.shape[1], int(num_frames)), dtype=float)
-        max_count = 0
-        sample_sizes = []
-        # split trace axes if reversal split
-        if reversal_split:
-            new_num_rows = round(num_rows / 2)
-            trace_axes = trace_axes.reshape((new_num_rows, 2, trace_axes.shape[1]))
-        for row_num, (row, row_val, row_colors, row_means) in enumerate(zip(
-            trace_axes, row_vals, color_arr, means)):
-            if right_margin:
-                if reversal_split:
-                    row_summ_axes = self.display.right_col[2 * row_num: 2 * row_num + 2]
-                else:
-                    row_summ_axes = [self.display.right_col[row_num]]
-            else:
-                row_summ_axes = None
-            # update the subset dictionary
-            if row_var is not None and row_val is not None:
-                subset[row_var] = row_val
-            if reversal_split:
-                row = row.T
-            for col_num, (col, col_val, color, ax_mean) in enumerate(zip(
-                row, col_vals, row_colors, row_means)):
-                if reversal_split:
-                    same_ax, diff_ax = col
-                else:
-                    ax = col
-                if bottom_margin:
-                    col_summ_ax = self.display.bottom_row[col_num]
-                else:
-                    col_summ_ax = None
-                if col_var is not None and col_val is not None:
-                    subset[col_var] = col_val
-                # todo: plot the indvidual saccades and a separate mean line for left- and rightward saccades
-                # update the subset dictionary
-                saccade_arr = []
-                time_arr = []
-                same_direction = []
-                sample_size = 0
-                total_lines = []
-                start_amps, start_times = [], []
-                stop_amps, stop_times = [], []
-                line_color = np.array(matplotlib.colors.to_rgb(line_color))
-                # convert to hsv and then generate a low saturation higher value version of color
-                hsv = matplotlib.colors.rgb_to_hsv(line_color[np.newaxis, np.newaxis, :])
-                hsv[..., 2] *= 1.5
-                hsv[..., 1] *= .5
-                hsv[..., :3] = np.clip(hsv[..., :3], 0, 1)
-                muted_color = np.array(matplotlib.colors.hsv_to_rgb(hsv))
-                if muted_color.ndim > 1:
-                    muted_color = np.squeeze(muted_color)
-                for trial in self.trials:
-                    lines_plotted = 0
-                    try:
-                        saccades = trial.query(output='saccade', object='saccade', subset=subset)
-                    except RuntimeError:
-                        continue
-                    for saccade in saccades:
-                        peak_speed = abs(saccade.peak_velocity) * 180 / np.pi
-                        if (peak_speed >= min_speed) * (peak_speed <= max_speed):
-                            # get the corresponding time values
-                            time = saccade.__getattribute__('time')
-                            heading = np.copy(saccade.__getattribute__(saccade_var))
-                            # get the range of times to plot
-                            include = (time >= start) * (time < stop)
-                            # center the yvalues based on the y-intercept
-                            zero_ind = np.argmin(abs(time))
-                            # get the saccade start and stop indices
-                            start_ind, stop_ind = saccade.start, saccade.stop
-                            heading -= heading[zero_ind]
-                            inds = np.where(include)[0]
-                            pre_inds = inds[inds < start_ind]
-                            post_inds = inds[inds > start_ind]
-                            if len(post_inds) > 0 and np.nanmean(heading[post_inds]) < 0 and positive_amplitude:
-                                heading *= -1
-                            # Only keep included region
-                            heading = heading[include]
-                            time = time[include]
-                            # Insert NaNs at discontinuities in heading
-                            wrapped_heading, mask = omit_wrapping(heading, return_mask=True)
-                            # Mask time to match heading
-                            wrapped_time = np.full_like(wrapped_heading, np.nan)
-                            wrapped_time[mask] = time[:np.count_nonzero(mask)]
-                            saccade_arr += [wrapped_heading]
-                            time_arr += [wrapped_time]
-                            if reversal_split:
-                                # todo: this is half wrong when positive_amplitude is True
-                                # get the mean heading before 0
-                                pre_heading = np.nanmean(heading[pre_inds]) if len(pre_inds) > 0 else 0
-                                post_heading = np.nanmean(heading[post_inds]) if len(post_inds) > 0 else 0
-                                same_dir = (pre_heading > 0) != (post_heading > 0)
-                                same_direction += [same_dir]
-                                if same_dir:
-                                    ax = same_ax
-                                else:
-                                    ax = diff_ax
-                            else:
-                                same_direction += [True]
-                                ax = col
-                            ax.plot(wrapped_heading, wrapped_time, color=muted_color, lw=.25, alpha=line_alpha, zorder=1)
-                            # Highlight saccade region within the included window
-                            n = len(heading)
-                            s0 = max(start_ind - int(inds[0]) if len(inds) else 0, 0)
-                            s1 = min(stop_ind - int(inds[0]) if len(inds) else n, n)
-                            ax.plot(heading[s0:s1], time[s0:s1], color=line_color, lw=.25, alpha=.5, zorder=2)
-                            lines_plotted += 1
-                            # plot the stop coordinate
-                            stop_ind = saccade.stop
-                            stop_times += [time[stop_ind] if stop_ind < len(time) else np.nan]
-                            start_times += [time[start_ind] if start_ind < len(time) else np.nan]
-                            stop_amps += [heading[stop_ind] if stop_ind < len(heading) else np.nan]
-                            start_amps += [heading[start_ind] if start_ind < len(heading) else np.nan]
-                    if lines_plotted > 0:
-                        sample_size += 1
-                        total_lines += [lines_plotted]
-                sample_sizes += [sample_size]
-                # make a scatterplot of the start and stop times
-                if bottom_margin:
-                    # choose a different linestyle for each row
-                    linestyle = ['-', '--', ':', '-.'][row_num // 4]
-                    # and a different line color for each set of rows
-                    linecolor = ['k', 'gray', blue, green, yellow, orange, red, purple][row_num % 8]
-                    xvals = np.array(stop_amps)
-                    vals, _, _ = col_summ_ax.hist(xvals, bins=np.linspace(xlim[0], xlim[1], bins), 
-                        color=linecolor, histtype='step', alpha=.5, density=False, linestyle=linestyle,
-                        label=f"{row_val}")
-                    max_count = max(max_count, max(vals))
-                    if time_var == 'relative_time':
-                        xvals = np.array(start_amps)
-                        vals, _, _ = col_summ_ax.hist(xvals, bins=np.linspace(xlim[0], xlim[1], bins), histtype='step', color=color, alpha=.5)
-                        max_count = max(max_count, max(vals))
-                # todo: plot different rows if reversal_split is specified
-                # try:
-                if not isinstance(col, (list, np.ndarray)):
-                    col = [col]
-                if row_summ_axes is None:
-                    row_summ_axes = [None]
-                for ax, row_summ_ax, same_dir in zip(col, row_summ_axes, [True, False]):
-                    # get the mean time and heading within 20 evenly distributed bins
-                    time_bins_pos = []
-                    saccade_bins_mean_pos = []
-                    saccade_bins_sem_pos = []
-                    time_bins_neg = []
-                    saccade_bins_mean_neg = []
-                    saccade_bins_sem_neg = []
-                    time_edges = np.linspace(start, stop, mean_bins)
-                    signs = [1, -1]
-                    if positive_amplitude:
-                        # reducing to just the positive sign, the nested zip loops will skip the negative calculations
-                        signs = signs[:1]
-                    for time_start, time_stop in zip(time_edges[:-1], time_edges[1:]):
-                        for sign, time_bins, saccade_bins_mean, saccade_bins_sem in zip(
-                            signs, [time_bins_pos, time_bins_neg], 
-                            [saccade_bins_mean_pos, saccade_bins_mean_neg],
-                            [saccade_bins_sem_pos, saccade_bins_sem_neg]):
-                            # time_bin = []
-                            saccade_bin = []
-                            time_bins += [np.mean([time_start, time_stop])]
-                            for time, heading, direction in zip(time_arr, saccade_arr, same_direction):
-                                if direction == same_dir:
-                                    # include only points within the time interval
-                                    include = (time >= time_start) * (time < time_stop)
-                                    # and only those within headings in the same sign
-                                    if np.any(include):
-                                        headings_mean = np.nanmean(heading[include])
-                                        if headings_mean/abs(headings_mean) == sign or positive_amplitude:
-                                            saccade_bin += [heading[include]]
-                                    else:
-                                        saccade_bin += [np.array([np.nan])]
-                            if len(saccade_bin) > 0:
-                                saccade_bin = np.concatenate(saccade_bin)
-                                # saccade_bins_mean += [np.nanmean(saccade_bin)]
-                                saccade_bins_mean += [np.nanmedian(saccade_bin)]
-                                saccade_bins_sem += [np.nanstd(saccade_bin)/np.sqrt(len(saccade_bin))]
-                            else:
-                                saccade_bins_mean += [np.nan]
-                                saccade_bins_sem += [np.nan]
-                    # make into numpy arrays
-                    if not positive_amplitude:
-                        saccade_bins_mean_neg, saccade_bins_sem_neg = np.array(saccade_bins_mean_neg), np.array(saccade_bins_sem_neg)
-                    time_bins = np.array(time_bins)
-                    saccade_bins_mean_pos, saccade_bins_sem_pos = np.array(saccade_bins_mean_pos), np.array(saccade_bins_sem_pos)
-                    for saccade_bins_mean, sign in zip([saccade_bins_mean_pos, saccade_bins_mean_neg], signs):
-                        ax.plot(saccade_bins_mean, time_bins, color='w', zorder=3, lw=2)
-                        ax.plot(saccade_bins_mean, time_bins, color=line_color, zorder=4, linestyle=['-', ':'][int(sign > 0)])
-                    # plot mean +/- SEM
-                    if right_margin:
-                        for sign, saccade_bins_mean, saccade_bins_sem in zip(
-                            signs,
-                            [saccade_bins_mean_pos, saccade_bins_mean_neg],
-                            [saccade_bins_sem_pos, saccade_bins_sem_neg]):
-                            row_summ_ax.plot(saccade_bins_mean, time_bins, color=color, alpha=.5, zorder=3)
-                            # plot the error
-                            # row_summ_ax.errorbar(
-                            #     saccade_bins_mean, time_bins, xerr=saccade_bins_sem, 
-                            #     color=color, alpha=.5, zorder=2)
-                            # plot the mean stop amplitude and time
-                            # mean_stop_amp = np.mean(stop_amps)
-                            # mean_stop_time = np.mean(stop_times)
-                            # todo: replace with arrows
-                            # row_summ_ax.scatter(mean_stop_amp, mean_stop_time, color=color, zorder=3, marker='o', edgecolor='none', alpha=.5)
-                            # scale = 1
-                            # row_summ_ax.scatter(mean_stop_amp, mean_stop_time, color='w', zorder=5, marker='X', edgecolor='none', alpha=1, lw=5)
-                            # row_summ_ax.scatter(mean_stop_amp, mean_stop_time, color=color, zorder=6, marker='X', edgecolor='none', alpha=.75)
-                            # row_summ_ax.scatter(mean_stop_amp, mean_stop_time, color=color, zorder=4, marker='X', alpha=1)
-                            # if time_var == 'relative_time':
-                            #     mean_start_amp = np.mean(start_amps)
-                            #     mean_start_time = np.mean(start_times)
-                            #     # row_summ_ax.scatter(mean_start_amp, mean_start_time, color='w', zorder=5, marker='X', edgecolor='none', alpha=1, lw=5)
-                            #     row_summ_ax.scatter(mean_start_amp, mean_start_time, color=color, zorder=4, marker='X', alpha=1)
-
-                    # if bottom_margin:
-                    #     for sign, saccade_bins_mean, saccade_bins_sem in zip(
-                    #         signs,
-                    #         [saccade_bins_mean_pos, saccade_bins_mean_neg],
-                    #         [saccade_bins_sem_pos, saccade_bins_sem_neg]):
-                            # col_summ_ax.plot(saccade_bins_mean, time_bins, color=color)
-                            # col_summ_ax.errorbar(
-                            #     saccade_bins_mean, time_bins, xerr=saccade_bins_sem, 
-                            #     color=color, alpha=.5)
-                            # col_summ_ax.fill_betweenx(
-                            #     time_bins, saccade_bins_mean - saccade_bins_sem, 
-                            #     saccade_bins_mean + saccade_bins_sem, color=color, alpha=.3,
-                            #     linewidth=0.0)
-                # except:
-                #     breakpoint()
-        # breakpoint()
-        # add the xticks, yticks, and axis labels
-        self.display.format(xlim=xlim, ylim=ylim, 
-                            xlabel='heading', ylabel=time_var+' (s)', 
-                            xticks=xticks, yticks=yticks,
-                            special_bottom_left=bottom_margin)
-        # format the bottom and right margins to show the 
-        if bottom_margin:
-            bottom_row = self.display.bottom_row
-            for num, (ax) in enumerate(bottom_row):
-                while isinstance(ax, np.ndarray):
-                    ax = ax[0]
-                ax.set_ylim(0, max_count)
-                if num == 0:
-                    ax.legend(fontsize=6)
-                    ax.set_yticks([0, max_count])
-                    ax.set_ylabel("count")
-                else:
-                    ax.set_yticks([])
-                sbn.despine(ax=ax, bottom=False, left=num!=0, trim=num!=0)
-        if right_margin and bottom_margin:
-            self.display.corner_ax.axis('off')
-        # add the row values
-        # make specific labels if reversal_split
-        if reversal_split:
-            new_row_vals = []
-            for val in row_vals:
-                # new_row_vals += [val]
-                # new_row_vals += [val]
-                new_row_vals += [f"same\n{val}"]
-                new_row_vals += [f"reversal\n{val}"]
-            row_vals = new_row_vals
-        self.display.label_margins(row_vals, row_var, col_vals, col_var)
-        # add the sample size to the first subplot
-        try:
-            self.display.fig.suptitle(f"N={min(sample_sizes)} - {max(sample_sizes)}, {min(total_lines)} - {max(total_lines)} lines per subject")
-        except:
-            breakpoint()
+            warnings.warn(
+                "'reversal_split' is not supported by plot() and will be "
+                "ignored.",
+                DeprecationWarning, stacklevel=2,
+            )
+        if start != 0 or stop != 0.5:
+            warnings.warn(
+                "The 'start'/'stop' time-window parameters are not supported "
+                "by plot(); the full saccade time series will be shown.",
+                DeprecationWarning, stacklevel=2,
+            )
+        pk = {}
+        pk['alpha'] = line_alpha
+        pk['trace_color'] = line_color
+        pk['mean_bins'] = mean_bins
+        eff_max_speed = None if max_speed == np.inf else max_speed
+        return self.plot(
+            saccade_var, time_var, col_var=col_var, row_var=row_var,
+            object='saccade', plot_type='line',
+            row_cmap=row_cmap, col_cmap=col_cmap, color=color,
+            right_margin=right_margin, bottom_margin=bottom_margin,
+            xlim=xlim, ylim=ylim, xticks=xticks, yticks=yticks,
+            positive_amplitude=positive_amplitude,
+            min_speed=min_speed, max_speed=eff_max_speed,
+            scale=scale, bins=bins,
+            plot_kwargs=pk, **query_kwargs,
+        )
 
     def plot_saccade_dynamics(self, col_var, row_var, row_cmap=None, col_cmap=None,
                               time_var='time',
@@ -3585,492 +3476,280 @@ class TrackingExperiment():
         **query_kwargs
             These get passed to the query 
         """
-        # for now, no bottom or right margins
-        bottom_margin, right_margin = False, False
-        assert output in ['start', 'stop'], "output parameter must be either 'start' or 'stop'"
-        if 'subset' not in query_kwargs:
-            query_kwargs['subset'] = {}
-        if 'sort_by' not in query_kwargs:
-            query_kwargs['sort_by'] = 'test_ind'
-        subset = copy.copy(query_kwargs['subset'])
-        # get the values used for coloring each subplot
-        if row_var is not None:
-            row_vals = self.query(output=row_var, sort_by=row_var, subset=subset, skip_empty=True, same_size=False)
-        else:
-            row_vals = [None]
-        if col_var is not None:
-            col_vals = self.query(output=col_var, sort_by=col_var, subset=subset, skip_empty=True, same_size=False)
-        else:
-            col_vals = [None]
-        assert len(col_vals) > 0 or len(row_vals) > 0, "The subset is empty!"
-        # todo: what's up with the number of axes?
-        row_vals = np.unique(row_vals)
-        col_vals = np.unique(col_vals)
-        new_row_vals, new_col_vals = [], []
-        for num, (vals, storage) in enumerate(zip([row_vals, col_vals], [new_row_vals, new_col_vals])):
-            if vals.dtype.type == np.bytes_:
-                non_nans = vals != b'nan'
-            elif vals.dtype.type == np.str_:
-                non_nans = vals != 'nan'
-            else:
-                non_nans = np.isnan(vals) == False
-            storage += [arr for arr in vals[non_nans]]
-        row_vals, col_vals = np.array(new_row_vals), np.array(new_col_vals)
-        num_rows, num_cols = len(row_vals), len(col_vals)
-        # Use the resolve_colors helper to generate the color array
-        color_arr = resolve_colors(row_cmap, col_cmap, row_vals, col_vals, default_color=color)
-        # todo: add extra rows if split_reversal
-        # test: check that the colors are aligned properly. we want this array shape to be num_rows X num_cols
-        # add a row or column if plotting in the margins
-        if bottom_margin:
-            num_rows += 1
-        if right_margin:
-            num_cols += 1
-        # make the figure and axes with a grid defined by num_rows and num_cols
-        figsize = (scale * num_cols + 1, scale*num_rows + 1)
-        if display is not None:
-            self.display = display
-        else:
-            fig = plt.figure(figsize=figsize)
-            subfig = fig.subfigures(1,1)
-            self.display = SummaryDisplay(
-                num_rows=num_rows, num_cols=num_cols, right_margin=right_margin, 
-                bottom_margin=bottom_margin, fig=subfig)
-        trace_axes = self.display.trace_axes
-        # plot the data
-        num_frames = self.trials[0].num_frames
-        means = np.zeros((trace_axes.shape[0], trace_axes.shape[1], int(num_frames)), dtype=float)
-        max_count = 0
-        # split trace axes if reversal split
+        import warnings
+        warnings.warn(
+            "plot_saccade_dynamics() is deprecated and will be removed in a "
+            "future version.  Use "
+            "plot(object='saccade', plot_type='scatter'/'hist2d') instead.",
+            DeprecationWarning, stacklevel=2,
+        )
+        if fig is not None:
+            warnings.warn(
+                "The 'fig' parameter is not forwarded to plot().",
+                DeprecationWarning, stacklevel=2,
+            )
         if reversal_split:
-            new_num_rows = round(num_rows / 2)
-            trace_axes = trace_axes.reshape((new_num_rows, 2, trace_axes.shape[1]))
-        for row_num, (row, row_val, row_colors, row_means) in enumerate(zip(
-            trace_axes, row_vals, color_arr, means)):
-            if right_margin:
-                if reversal_split:
-                    row_summ_axes = self.display.right_col[2 * row_num: 2 * row_num + 2]
-                else:
-                    row_summ_axes = [self.display.right_col[row_num]]
-            else:
-                row_summ_axes = []
-            # update the subset dictionary
-            if row_var is not None and row_val is not None:
-                subset[row_var] = row_val
-            if reversal_split:
-                row = row.T
-            for col_num, (col, col_val, color, ax_mean) in enumerate(zip(
-                row, col_vals, row_colors, row_means)):
-                if reversal_split:
-                    same_ax, diff_ax = col
-                else:
-                    ax = col
-                if bottom_margin:
-                    col_summ_ax = self.display.bottom_row[col_num]
-                else:
-                    col_summ_ax = None
-                if col_var is not None and col_val is not None:
-                    subset[col_var] = col_val
-                # plot the indvidual saccades and a separate mean line for left- and rightward saccades
-                # update the subset dictionary
-                sample_size = len(self.trials)
-                start_pos, stop_pos = [], []
-                key_pos = []
-                amps = []
-                # collect the saccade starting positions and amplitudes for making a 2D plot 
-                for trial in self.trials:
-                    #bouts = trial.query_bouts(sort_by=query_kwargs['sort_by'], subset=subset)
-                    bouts = trial.query('bouts', sort_by=query_kwargs['sort_by'], subset=subset)
-                    resps = trial.query(heading_var, sort_by=query_kwargs['sort_by'], subset=subset)
-                    resp_times = trial.query(time_var, sort_by=query_kwargs['sort_by'], subset=subset)
-                    # convert the bar_positions variable to a general reference angle input parameter
-                    if reference_var in dir(trial):
-                        reference_positions = trial.query(reference_var, sort_by=query_kwargs['sort_by'], subset=subset)
-                    else:
-                        reference_positions = np.zeros(len(bouts), dtype=int)
-                    # go through each bout and grab the saccade variables
-                    for bout, reference_position, resp, resp_time in zip(bouts, reference_positions, resps, resp_times):
-                        if reference_var in dir(trial):
-                            # if reference angle is specified, subtract it from the heading
-                            reference_position = np.unwrap(reference_position)
-                            reference_position += np.pi
-                            reference_position %= 2*np.pi
-                            reference_position -= np.pi
-                        # grab the subsetted saccades
-                        # times, saccades = bout.query_saccades(output='saccade', sort_by=query_kwargs['sort_by'], subset=subset)
-                        times, saccades = bout.query_saccades(output='saccade', sort_by=query_kwargs['sort_by'], subset=subset, min_speed=min_speed)
-                        # for each saccade, check if it's within the speed range and store the specified position
-                        for saccade in saccades:
-                            peak_speed = abs(saccade.peak_velocity) * 180 / np.pi
-                            if (peak_speed >= min_speed) * (peak_speed <= max_speed):
-                                # store the start position, stop position, and signed amplitude
-                                key_time = saccade.__getattribute__(f'{output}_time')
-                                pos = saccade.__getattribute__(f'{output}')
-                                # find the nearest resp_time 
-                                diffs = abs(resp_time - key_time)
-                                resp_ind = np.nanargmin(diffs)
-                                if diffs[resp_ind] < 1. / bout.trial.framerate:
-                                    head = resp[resp_ind]
-                                    if reference_var in dir(trial):
-                                        ref = reference_position[pos]
-                                        key_pos += [ref - head]
-                                    else:
-                                        key_pos += [head]
-                                    amps += [saccade.__getattribute__(saccade_var)]
-                if not isinstance(col, (list, np.ndarray)):
-                    col = [col]
-                amplitude = np.array(amps)
-                position = np.array(key_pos)
-                # Insert NaNs at discontinuities in position (heading) for robust plotting
-                wrapped_position, mask = omit_wrapping(position, return_mask=True)
-                wrapped_amplitude = np.full_like(wrapped_position, np.nan)
-                wrapped_amplitude[mask] = amplitude[:np.count_nonzero(mask)]
-                for ax in col:
-                    data = {'amplitude': wrapped_amplitude, 'position': wrapped_position}
-                    if scatter:
-                        marker_size = plot_kwargs.get('ms', 1)
-                        alpha = plot_kwargs.get('alpha', 0.25)
-                        ax.scatter(position, amplitude, marker='o', alpha=alpha, color='k', edgecolor='none', s=marker_size)
-                    else:
-                        if xlim is None:
-                            xlim = (-180, 180)
-                        if ylim is None:
-                            if saccade_var == 'amplitude':
-                                ylim = (-180, 180)
-                            elif saccade_var == 'peak_velocity':
-                                ylim = (-max_speed, max_speed)
-                        # if the saccade_var is amplitude, convert to degrees
-                        plot_amplitude = wrapped_amplitude.copy()
-                        plot_position = wrapped_position.copy()
-                        if saccade_var == 'amplitude':
-                            plot_amplitude *= 180 / np.pi
-                        if log_cmap:
-                            # use a logarithmic colormap to better visualize low density regions
-                            hist, xedges, yedges = np.histogram2d(
-                                position * 180 / np.pi, plot_amplitude, bins=bins, 
-                                range=[[xlim[0], xlim[1]],[ylim[0], ylim[1]]])
-                            hist = np.log1p(hist)
-                            xcenters = (xedges[:-1] + xedges[1:]) / 2
-                            ycenters = (yedges[:-1] + yedges[1:]) / 2
-                            X, Y = np.meshgrid(xcenters, ycenters)
-                            pcm = ax.pcolormesh(X, Y, hist.T, cmap='Greys')
-                        else:
-                            ax.hist2d(plot_position * 180 / np.pi, plot_amplitude, bins=bins, 
-                                range=[[xlim[0], xlim[1]],[ylim[0], ylim[1]]], cmap='Greys')
-                    # let's also get the correlation between position and amplitude and display it
-                    if correlation:
-                        valid = np.isfinite(position) * np.isfinite(amplitude)
-                        if np.sum(valid) > 2:
-                            # corr, pval = scipy.stats.pearsonr(position[valid], amplitude[valid])
-                            # spearman_corr, spearman_pval = scipy.stats.spearmanr(position[valid], amplitude[valid])
-                            corr = mardia_circ_lin(position[valid]*np.pi/180, amplitude[valid])
-                            # use bootstrapping to get a p-value
-                            # so, let's make 10000 re-samples with replacement of the amplitude and position data
-                            num_samples = len(position[valid])
-                            reps = 10000
-                            rand_inds = np.random.randint(0, num_samples, (reps, num_samples))
-                            rand_position, rand_amplitude = position[valid][rand_inds], amplitude[valid][rand_inds]
-                            rand_corrs = np.array([mardia_circ_lin(rand_position[i]*np.pi/180, rand_amplitude[i]) for i in range(reps)])
-                            # get the 95% confidence interval of the null distribution
-                            lower, mid, upper = np.percentile(rand_corrs, [2.5, 50, 97.5])
-                            if mid < 0:
-                                pval = np.sum(rand_corrs >= 0) / reps
-                            else:
-                                pval = np.sum(rand_corrs <= 0) / reps
-                            # plot the correlation, it's confidence interval, and p-value
-                            ax.set_title(f"r={corr:.2f} ({lower:.2f}, {upper:.2f}) {sigAsterisk(pval)}", fontsize=8)
-                    # ax.set_xlabel(None)
-                    # ax.set_ylabel(None)
-                    # ax.set_xlabel('position')
-                    # ax.set_ylabel('amplitude')
-                    # ax.set_aspect('equal')
-                    # ax.set_xticks([-np.pi, -np.pi/2, 0, np.pi/2, np.pi], ['-$\pi$', '-$\pi$/2', '0', '$\pi$/2', '$\pi$'])
-                    # ax.set_yticks([-np.pi, -np.pi/2, 0, np.pi/2, np.pi], ['-$\pi$', '-$\pi$/2', '0', '$\pi$/2', '$\pi$'])
-                    # plot mean +/- SEM
-        # add the xticks, yticks, and axis labels
-        # ticks = ([-np.pi, -np.pi/2, 0, np.pi/2, np.pi], ['-$\pi$', '0', '$\pi$'])
-        self.display.format(xlim=xlim, ylim=ylim, 
-                            # xlabel='orientation', ylabel='amplitude', 
-                            xlabel=heading_var, ylabel=saccade_var,
-                            xticks=xticks, yticks=yticks)
-        # format the bottom and right margins to show the 
-        if bottom_margin:
-            bottom_row = self.display.bottom_row
-            for num, (ax) in enumerate(bottom_row):
-                ax.set_ylim(0, max_count)
-                if num == 0:
-                    ax.set_yticks([0, max_count])
-                    ax.set_ylabel("count")
-                else:
-                    ax.set_yticks([])
-                sbn.despine(ax=ax, bottom=False, left=num!=0)
-            self.display.corner_ax.axis('off')
-        self.display.label_margins(row_vals, row_var, col_vals, col_var)
-        # add the sample size to the first subplot
-        # self.display.fig.suptitle(f"N={sample_size}")
+            warnings.warn(
+                "'reversal_split' is not supported by plot() and will be "
+                "ignored.",
+                DeprecationWarning, stacklevel=2,
+            )
+        if reference_var is not None:
+            warnings.warn(
+                f"'reference_var' ({reference_var!r}) is not supported by "
+                "plot() and will be ignored.",
+                DeprecationWarning, stacklevel=2,
+            )
+        if heading_var != 'camera_heading':
+            warnings.warn(
+                f"'heading_var={heading_var!r}' is not supported; "
+                "saccade start_angle / stop_angle will be used directly.",
+                DeprecationWarning, stacklevel=2,
+            )
+        xvar = 'start_angle' if output == 'start' else 'stop_angle'
+        eff_plot_type = 'scatter' if scatter else 'hist2d'
+        pk = dict(plot_kwargs)
+        pk.setdefault('jitter_std', jitter_std)
+        pk.setdefault('correlation', correlation)
+        pk.setdefault('log_cmap', log_cmap)
+        return self.plot(
+            xvar, saccade_var, col_var=col_var, row_var=row_var,
+            object='saccade', plot_type=eff_plot_type,
+            row_cmap=row_cmap, col_cmap=col_cmap, color=color,
+            right_margin=right_margin, bottom_margin=bottom_margin,
+            xlim=xlim, ylim=ylim, xticks=xticks, yticks=yticks,
+            display=display,
+            scale=scale, bins=bins,
+            min_speed=min_speed, max_speed=max_speed,
+            rad2deg=True,
+            plot_kwargs=pk, **query_kwargs,
+        )
 
-    def main_sequence_analysis(self, group_var='bg_gain', cmap='viridis', scale=1, subset={}, colors=None, **plot_kwargs):
-        """Plot the relation between saccade peak velocity, duration, and magnitude. 
-        
+    def main_sequence_analysis(self, group_var='bg_gain', cmap='viridis', scale=1,
+                                subset=None, colors=None,
+                                confidence=0.84, n_boot=1000,
+                                jitter_std=0.1, alpha=0.5):
+        """Plot the relation between saccade peak velocity, duration, and magnitude.
+
+        Draws a 3×2 fixed-layout figure:
+
+        - Top-left / middle-left: scatter plots of magnitude vs. duration and
+          magnitude vs. peak speed for every saccade, colored by group.
+        - Top-right / middle-right: bootstrap CI strip plots of per-trial means
+          per group, sharing the y-axis with the corresponding scatter panels.
+        - Bottom-left: bootstrap CI strip plot of magnitude per group.
+        - Bottom-right: unused (hidden).
+
         Parameters
         ----------
         group_var : str, default='bg_gain'
-            The variable to use for subsetting the saccade bouts and coloring individually.
-        cmap : str or func
-            The colormap applied to the group values.
+            Trial variable used to form groups and color the data.
+        cmap : str, callable, or list, default='viridis'
+            Colormap for the groups.  Forwarded to :func:`resolve_colors`;
+            accepts a named matplotlib colormap string, a callable, or an
+            explicit list of colors equal in length to the number of groups.
         scale : float, default=1
-            Scale parameter for determining the figure size. 1 results in a 3x5 figure.
-        subset : dict, default={}
-            Optionally filter data before plotting. See TrackingTrial.query for more info.
-        colors : list, np.ndarray, or tuple, default=None
-            A list of colors to use for each group. If None, the colors will be generated. 
-        **plot_kwargs
-            Additional keyword arguments passed to plt.subplots.
+            Figure size multiplier (base figure is 4×6 inches).
+        subset : dict or None, default=None
+            Filter conditions forwarded to every query call.
+        colors : list, ndarray, or None, default=None
+            Explicit list of ``len(group_vals)`` colors.  Overrides ``cmap``.
+        confidence : float, default=0.84
+            Confidence level for bootstrap CIs in the strip/margin plots.
+        n_boot : int, default=1000
+            Number of bootstrap resamples.
+        jitter_std : float, default=0.1
+            Standard deviation of Gaussian jitter on strip-plot positions.
+        alpha : float, default=0.5
+            Point opacity for scatter and strip-plot markers.
         """
-        jitter_std = .1
-        if 'jitter_std' in plot_kwargs:
-            jitter_std = plot_kwargs.pop('jitter_std')
-        # allow for filtering of the data using subset
-        group_vals = np.unique(self.query(output=group_var, sort_by=group_var, subset=subset, skip_empty=True, same_size=False))
-        # get the color for each group
-        if colors is None:
-            if isinstance(cmap, str):
-                vals = group_vals
-                if isinstance(vals[0], (str, bytes)):
-                    # if values are strings, sort them in alphabetical order and use their index for the colors
-                    vals = np.argsort(vals)
-                norm = matplotlib.colors.Normalize(vals.min(), vals.max())
-                cmap = matplotlib.cm.ScalarMappable(norm=norm, cmap=cmap)
-                colors = cmap.to_rgba(vals)[:, :-1]
-            elif callable(cmap):
-                colors = cmap(group_vals)
-            elif isinstance(cmap, (list, np.ndarray, tuple)):
-                assert len(cmap) == len(group_vals), (
-                    f"Colormap list has {len(cmap)} elements but there are {len(group_vals)} colors listed.")
-                colors = cmap
-        assert len(colors) == len(group_vals), (
-            f"There are {len(group_vals)} group values but {len(colors)} colors specified.")
-        # make a plot with subplots for saccade peak velocity and duration
-        # but also include marginal plots for boxplot comparisons
-        fig, axes = plt.subplots(nrows=3, ncols=2, width_ratios=[1, 1], height_ratios=[1, 1, 1], figsize=(4*scale, 6*scale))
-        # turn off the corner subplot
-        axes[-1, -1].axis('off')
+        if subset is None:
+            subset = {}
+
+        # ---------------------------------------------------------------- #
+        # Group values and colors                                           #
+        # ---------------------------------------------------------------- #
+        group_vals = get_grid_vals(self, group_var, subset)
+
+        if colors is not None:
+            colors = np.array([matplotlib.colors.to_rgb(c) for c in colors])
+            if len(colors) != len(group_vals):
+                raise ValueError(
+                    f"colors has {len(colors)} entries but there are "
+                    f"{len(group_vals)} group values.")
+        else:
+            color_arr = resolve_colors(cmap, None, group_vals, [None])
+            colors = color_arr[:, 0, :]  # (n_groups, 3)
+
+        # ---------------------------------------------------------------- #
+        # Figure layout                                                     #
+        # ---------------------------------------------------------------- #
+        fig, axes = plt.subplots(
+            nrows=3, ncols=2,
+            width_ratios=[1, 1], height_ratios=[1, 1, 1],
+            figsize=(4 * scale, 6 * scale),
+        )
+        axes[-1, -1].set_visible(False)
         bottom_ax = axes[-1, 0]
         right_col = axes[:-1, -1]
         scatter_axes = axes[:-1, 0]
-        # for each group, plot the peak velocity and duration as a function of magnitude
-        dur_meds, speed_meds, mag_meds = [], [], []
-        for num, (group, color) in enumerate(zip(group_vals, colors)):
-            subset[group_var] = group
-            peak_velo = abs(np.array(self.query(output='saccade_peak_velocity', sort_by=group_var, subset=subset, skip_empty=True)))
-            peak_velo *= 180. / np.pi
-            duration = np.array(self.query(output='saccade_duration', sort_by=group_var, subset=subset, skip_empty=True))
-            amplitude = abs(np.array(self.query(output='saccade_amplitude', sort_by=group_var, subset=subset, skip_empty=True)))
+
+        # ---------------------------------------------------------------- #
+        # Data-extraction and scatter draw pass                             #
+        # ---------------------------------------------------------------- #
+        dur_means = []    # per-group: 1-D array of per-trial mean durations
+        speed_means = []  # per-group: 1-D array of per-trial mean peak speeds
+        mag_means = []    # per-group: 1-D array of per-trial mean amplitudes
+
+        for num, (group_val, color) in enumerate(zip(group_vals, colors)):
+            cell_subset = dict(subset)
+            cell_subset[group_var] = group_val
+
+            peak_velo = abs(np.array(self.query(
+                output='saccade_peak_velocity', sort_by=group_var,
+                subset=cell_subset, skip_empty=True,
+                same_size=False))) * (180. / np.pi)
+            duration = np.array(self.query(
+                output='saccade_duration', sort_by=group_var,
+                subset=cell_subset, skip_empty=True,
+                same_size=False))
+            amplitude = abs(np.array(self.query(
+                output='saccade_amplitude', sort_by=group_var,
+                subset=cell_subset, skip_empty=True,
+                same_size=False)))
+
             sizes = np.unique([arr.size for arr in amplitude])
             same_sizes = len(sizes) == 1
-            # todo: get the 95% CI of the mean duration, amplitude, and speed
-            # 0. for each variable, 
-            for var, storage in zip([peak_velo, duration, amplitude], [speed_meds, dur_meds, mag_meds]):
-                # 1. get the mean per trial
+
+            # Accumulate per-trial means for margin bootstrap CIs.
+            for sac_var, storage in zip(
+                    [peak_velo, duration, amplitude],
+                    [speed_means, dur_means, mag_means]):
                 if same_sizes:
-                    avg = np.nanmean(var, axis=1)
+                    avg = np.nanmean(sac_var, axis=1)
                 else:
-                    avg = np.array([np.nanmean(subvar) for subvar in var])
-                # later, bootstrap entire sequences, one per subject
-                storage += [avg]
-            # dur_meds += [np.nanmedian(duration)]
-            # mag_meds += [np.nanmedian(amplitude)]
-            # speed_meds += [np.nanmedian(peak_velo)]
-            for ys, ax, right_ax in zip([duration, peak_velo], scatter_axes, right_col):
-                # scatterplot for the main sequence
-                # check if the subsets are of different sizes
-                alpha, marker, edgecolor = .5, '.', 'none'
-                if 'alpha' in plot_kwargs:
-                    alpha = plot_kwargs['alpha']
+                    avg = np.array([np.nanmean(v) for v in sac_var])
+                storage.append(avg)
+
+            # Scatter: amplitude (x) vs duration / peak speed (y).
+            for ys, ax in zip([duration, peak_velo], scatter_axes):
                 if len(sizes) > 1:
-                    breakpoint()
                     for yvals, amp in zip(ys, amplitude):
-                        # add y-jitter
-                        # yjitter = np.random.normal(0, jitter_std, size=len(yvals))
-                        ax.scatter(amp, yvals, color=color, marker=marker, edgecolor=edgecolor, alpha=alpha)
+                        ax.scatter(amp, yvals, color=color,
+                                   marker='.', edgecolors='none', alpha=alpha)
                 else:
-                    # remove unnecessary nesting
-                    ys = np.squeeze(ys)
-                    amplitude = np.squeeze(amplitude)
-                    # add y-jitter
-                    # yjitter = np.random.normal(0, jitter_std, size=len(ys))
-                    # get the pearson correlation coefficient and p-value
-                    # use only the non-NaN values
-                    non_nans = np.isnan(ys) == False
+                    ys_flat = np.squeeze(ys)
+                    amp_flat = np.squeeze(amplitude)
+                    non_nan = ~(np.isnan(amp_flat) | np.isnan(ys_flat))
                     try:
-                        corr, pval = scipy.stats.pearsonr(amplitude[non_nans], ys[non_nans])
+                        corr, pval = scipy.stats.pearsonr(
+                            amp_flat[non_nan], ys_flat[non_nan])
                         label = f"{corr:.2f} {sigAsterisk(pval)}"
-                    except:
+                    except Exception:
                         label = ""
-                    ax.scatter(amplitude, ys, color=color, marker=marker, edgecolor=edgecolor, alpha=alpha, label=label)
-                # jitterplot of yvalues in the right axis
-                # xjitter = np.random.normal(0, .1, size=len(ys))
-                # xvals = num + xjitter
-                # right_ax.scatter(xvals, ys, color=color, marker='.', edgecolor='none', alpha=.5)
-                # todo: bootstrap 84% confidence intervals for comparing the group means
-            # jitterplot of the group values on the margins
-            # yjitter = np.random.normal(0, .1, size=len(ys))
-            # yvals = num + yjitter
-            # bottom_ax.scatter(amplitude, yvals, color=color, marker='.', edgecolor='none', alpha=.5)
-        # plot the medians:
-        # dur_meds, speed_meds, mag_meds = np.array(dur_meds), np.array(speed_meds), np.array(mag_meds)
-        # get the bootstrapped 95% CI for each group val by randomly sampling on a per-subject basis
+                    ax.scatter(amp_flat, ys_flat, color=color, marker='.',
+                               edgecolors='none', alpha=alpha, label=label)
+
         for ax in scatter_axes:
-            ax.legend(fontsize=6)
-        dur_lows, dur_mids, dur_highs = [], [], []
-        speed_lows, speed_mids, speed_highs = [], [], []
-        mag_lows, mag_mids, mag_highs = [], [], []
-        num_groups = len(dur_meds)
-        # num_groups, num_trials = dur_meds.shape
-        for lows, mids, highs, vals in zip(
-            [dur_lows, speed_lows, mag_lows], 
-            [dur_mids, speed_mids, mag_mids],
-            [dur_highs, speed_highs, mag_highs],
-            [dur_meds, speed_meds, mag_meds]):
-            lows_per_group, mids_per_group, highs_per_group = [], [], []
-            for arr in vals:
-                num_trials = len(arr)
-                # vals has shape len(group_vals) x len(self.trials)
-                inds = np.random.randint(0, num_trials, size=(num_trials, 10000))
-                # note: each vals has a mean value per subject
-                pseudo_distro = arr[inds]
-                pseudo_distro = np.nanmean(pseudo_distro, axis=1)
-                low, mid, high = np.nanpercentile(pseudo_distro, [8, 50, 92], axis=-1)
-                mids_per_group += [mid]
-                lows_per_group += [low]
-                highs_per_group += [high]
-            lows += [lows_per_group]
-            mids += [mids_per_group]
-            highs += [highs_per_group]
-        dur_lows, dur_mids, dur_highs = dur_lows[0], dur_mids[0], dur_highs[0]
-        speed_lows, speed_mids, speed_highs = speed_lows[0], speed_mids[0], speed_highs[0]
-        mag_lows, mag_mids, mag_highs = mag_lows[0], mag_mids[0], mag_highs[0]
-        # dur_meds, speed_meds, mag_meds = dur_meds.mean(-1), speed_meds.mean(-1), mag_meds.mean(-1)
-        for ax, lows, meds, highs, vals in zip(
-            right_col[:2], [dur_lows, speed_lows], [dur_mids, speed_mids], [dur_highs, speed_highs], [dur_meds, speed_meds]):
-            for num, (low, meds, high, val, color) in enumerate(zip(lows, meds, highs, vals, colors)):
-                # add some x-jitter to the points
-                xjitter = np.random.normal(0, jitter_std, size=len(val))
-                xvals = np.repeat(num, len(val)) + xjitter
-                # ax.plot(xvals, val, color='gray', alpha=.25, zorder=2)
-                # grab plot_kwargs if present, defaulting to:
-                alpha, marker, edgecolor = .5, 'o', 'none'
-                for var in ['alpha', 'marker', 'edgecolor']:
-                    if var in plot_kwargs:
-                        exec(f"{var} = plot_kwargs['{var}']")
-                ax.scatter(xvals, val, c=color, edgecolors=edgecolor, marker=marker, zorder=3, alpha=alpha)
+            handles, _ = ax.get_legend_handles_labels()
+            if handles:
+                ax.legend(fontsize=6)
+
+        # ---------------------------------------------------------------- #
+        # Bootstrap CI margin draw pass                                     #
+        # ---------------------------------------------------------------- #
+        rng = np.random.default_rng()
+
+        # Right-column strip plots (shared y-axis with scatter_axes).
+        for ax, group_trial_means in zip(right_col[:2], [dur_means, speed_means]):
+            for num, (per_trial, color) in enumerate(zip(group_trial_means, colors)):
+                low, high = bootstrap_ci(
+                    per_trial, np.nanmean,
+                    confidence=confidence, n_boot=n_boot)
+                mid = float(np.nanmean(per_trial))
+                xjitter = rng.standard_normal(len(per_trial)) * jitter_std
+                ax.scatter(num + xjitter, per_trial, color=color,
+                           edgecolors='none', marker='o', zorder=3, alpha=alpha)
                 ax.plot([num, num], [low, high], color='k', zorder=4)
-                ax.scatter(num, np.nanmean(meds, axis=-1), color='k', marker='o', edgecolors='w', linewidths=2, zorder=5)
-        lows, meds, highs = mag_lows, mag_meds, mag_highs
-        ax = bottom_ax
-        for num, (low, meds, high, color) in enumerate(zip(lows, meds, highs, colors)):
-            # add some y-jitter to the points
-            yjitter = np.random.normal(0, .1, size=len(meds))
-            yvals = np.repeat(num, len(meds)) + yjitter
-            # ax.plot(meds, yvals, color='gray', alpha=.25, zorder=2)
-            ax.scatter(meds, yvals, c=color, edgecolors='none', marker='o', zorder=3, alpha=.5)
-            ax.plot([low, high], [num, num], color='k', zorder=4)
-            ax.scatter(np.nanmean(meds, axis=-1), num, color='k', marker='o', edgecolors='w', linewidths=2, zorder=5)
-        # formatting:
-        # transform the x-axes to log scale
+                ax.scatter(num, mid, color='k', marker='o',
+                           edgecolors='w', linewidths=2, zorder=5)
+
+        # Bottom strip plot: magnitude (horizontal orientation).
+        for num, (per_trial, color) in enumerate(zip(mag_means, colors)):
+            low, high = bootstrap_ci(
+                per_trial, np.nanmean,
+                confidence=confidence, n_boot=n_boot)
+            mid = float(np.nanmean(per_trial))
+            yjitter = rng.standard_normal(len(per_trial)) * jitter_std
+            bottom_ax.scatter(per_trial, num + yjitter, color=color,
+                              edgecolors='none', marker='o', zorder=3, alpha=alpha)
+            bottom_ax.plot([low, high], [num, num], color='k', zorder=4)
+            bottom_ax.scatter(mid, num, color='k', marker='o',
+                              edgecolors='w', linewidths=2, zorder=5)
+
+        # ---------------------------------------------------------------- #
+        # Formatting                                                        #
+        # ---------------------------------------------------------------- #
+        deg_ticks = np.array([1, 2, 4, 8, 16, 32, 64, 128])
+        deg_ticks_rad = deg_ticks * np.pi / 180.
+
         for ax in [scatter_axes[0], scatter_axes[1], bottom_ax]:
-            xticks = np.pi / np.array([64, 32, 16, 8, 4, 2, 1])
-            xticks = np.array([1, 2, 4, 8, 16, 32, 64, 128])
-            # ax.set_xticks(
-            #     xticks,
-            #     [r'$\pi$/64', r'$\pi$/32', r'$\pi$/16', r'$\pi$/8', r'$\pi$/4', r'$\pi$/2', r'$\pi$']
-            # )
             ax.set_xscale('log')
-            ax.set_xticks(
-                xticks * np.pi / 180.,
-                xticks.astype(str),
-            )
-        # transform the y-axes to log scale
+            ax.set_xticks(deg_ticks_rad, deg_ticks.astype(str))
+
         for ax, ylim in zip(
-            [scatter_axes[0], scatter_axes[1], right_col[0], right_col[1]],
-            [(.01, .5), (1, 2000), (.01, .5), (1, 2000)]):
-        # for ax in [scatter_axes[0], right_col[0]]:
+                [scatter_axes[0], scatter_axes[1], right_col[0], right_col[1]],
+                [(.01, .5), (1, 2000), (.01, .5), (1, 2000)]):
             ax.set_yscale('log')
             ax.set_ylim(ylim)
-        # remove the minor ticks
+
         for ax in [right_col[0], right_col[1], bottom_ax]:
             ax.minorticks_off()
         for ax in scatter_axes:
             ax.tick_params(axis='x', which='minor', bottom=False)
-        # set limits on the scatterplots
-        ylims = []
-        # scatter_axes[1].set_ylim(0)
-        # xmin = scatter_axes[0].get_xlim()[0]
-        for ax in scatter_axes:
-            # ax.set_xlim(0)
-            # ax.set_ylim(0)
-            ylims += [ax.get_ylim()]
-        #     xmin = min(xmin, ax.get_xlim()[0])
-        # for ax in scatter_axes:
-        #     ax.set_xlim(xmin, np.pi)
-        # xmin = np.pi / 16
-        xmin = 1 * np.pi / 180
-        xmax = 2*np.pi
+
+        xmin = np.pi / 180.
+        xmax = 2 * np.pi
         bottom_ax.set_xlim(xmin, xmax)
-        # for ax in np.append(scatter_axes, [bottom_ax]):
-        #     ax.set_xlim(xmin, xmax)
-        # set limits on the marginal plots to match the scatterplots
-        # for ax, ylim in zip(right_col, ylims):
-        #     ax.set_ylim(ylim[0], ylim[1])
-        #     ax.set_xticklabels([])
-        # remove the bottom spines of both scatter axes
-        for ax, lbl in zip(scatter_axes, ["duration (s)", r"peak speed ($\degree$/s)"]):
-            # ax.set_xticks([])
+
+        for ax, lbl in zip(scatter_axes,
+                           ["duration (s)", r"peak speed ($\degree$/s)"]):
             ax.set_xticklabels([])
-            # ax.set_yticks([])
             sbn.despine(ax=ax, bottom=True, trim=False)
-            # label the y-axis
             ax.set_ylabel(lbl)
-        # make right_col[0] share the y-axis with scatter_axes[0],
-        # right_col[1] share the y-axis with scatter_axes[1],
-        # and scatter_axes[0], scatter_axes[1], and bottom_ax share the x-axis
+
         right_col[0].sharey(scatter_axes[0])
         right_col[1].sharey(scatter_axes[1])
         scatter_axes[0].sharex(bottom_ax)
         scatter_axes[1].sharex(bottom_ax)
-        # remove the bottom spines of the top right axis
-        # right_col[0].set_xticks([])
-        # right_col[0].set_yticks([])
+
+        _n_grp = len(group_vals)
+        _strip_pad = 0.5
+
+        # Shorten path-like string labels (e.g. full filenames) to basename
+        # without extension for readable tick labels.
+        def _shorten(v):
+            s = str(v)
+            if '/' in s or os.sep in s or s.endswith('.h5'):
+                return os.path.splitext(os.path.basename(s))[0]
+            return s
+        group_labels = [_shorten(v) for v in group_vals]
+
         sbn.despine(ax=right_col[0], bottom=True, left=True, trim=True)
-        # remove the left spines of the top right axis
-        right_col[1].set_xticks(range(len(group_vals)), group_vals)
-        # right_col[1].set_yticks([])
-        # right_col[1].set_yticklabels([])
-        # label the x-axis
+        right_col[0].set_xlim(-_strip_pad, _n_grp - 1 + _strip_pad)
+
+        right_col[1].set_xticks(range(len(group_vals)), group_labels)
         right_col[1].set_xlabel(group_var.replace("_", " "))
         sbn.despine(ax=right_col[1], bottom=False, left=True, trim=True)
-        # trim spines for the bottom ax
-        bottom_ax.set_yticks(range(len(group_vals)), group_vals)
-        # bottom_ax.set_xticks(
-        #     [np.pi/16, np.pi/8, np.pi/4, np.pi/2, np.pi, 2*np.pi],
-        #     [r'$\pi$/16', r'$\pi$/8', r'$\pi$/4', r'$\pi$/2', r'$\pi$', r'2$\pi$']
-        # )
-        # xticks = np.pi / np.array([64, 32, 16, 8, 4, 2, 1])
-        # bottom_ax.set_xticks(
-        #     xticks,
-        #     [r'$\pi$/64', r'$\pi$/32', r'$\pi$/16', r'$\pi$/8', r'$\pi$/4', r'$\pi$/2', r'$\pi$']
-        # )
-        # bottom_ax.set_xticks(
-        #     xticks,
-        #     np.around(xticks * 180 / np.pi, 1).astype(str),
-        # )
-        # bottom_ax.set_xlim(xmin, xmax)
-        # label the bottom axis
+        right_col[1].set_xlim(-_strip_pad, _n_grp - 1 + _strip_pad)
+
+        bottom_ax.set_yticks(range(len(group_vals)), group_labels)
+        bottom_ax.set_ylim(-_strip_pad, _n_grp - 1 + _strip_pad)
         bottom_ax.set_xlabel(r"magnitude ($\degree$)")
         bottom_ax.set_ylabel(group_var.replace("_", " "))
         sbn.despine(ax=bottom_ax, trim=True)
+
         plt.tight_layout()
-        # plt.show()
 
     def plot_summary(self, xvar, yvar, col_var, row_var, 
                      row_cmap=None, col_cmap=None, fig=None,
@@ -4151,443 +3830,32 @@ class TrackingExperiment():
         **query_kwargs
             These get passed to the query 
         """
-        if 'subset' not in query_kwargs:
-            query_kwargs['subset'] = {}
-        if 'sort_by' not in query_kwargs:
-            query_kwargs['sort_by'] = 'test_ind'
-        subset = copy.copy(query_kwargs['subset'])
-        # Use get_grid_vals helper for unique, valid row/col values
-        row_vals = get_grid_vals(self, row_var, subset) if row_var is not None else [None]
-        col_vals = get_grid_vals(self, col_var, subset) if col_var is not None else [None]
-        num_rows, num_cols = len(row_vals), len(col_vals)
-        color_arr = resolve_colors(row_cmap, col_cmap, row_vals, col_vals, default_color=color)
-        # test: check that the colors are aligned properly. we want this array shape to be num_rows X num_cols
-        # add a row or column if plotting in the margins
-        if bottom_margin:
-            num_rows += 1
-        if right_margin:
-            num_cols += 1
-        # make the figure and axes with a grid defined by num_rows and num_cols
-        figsize = (scale * (num_cols + 1), scale*(num_rows + 1))
-        format_axes = True
-        if display is None:
-            fig = plt.figure(figsize=figsize)
-            self.display = SummaryDisplay(
-                num_rows=num_rows, num_cols=num_cols, right_margin=right_margin, 
-                bottom_margin=bottom_margin, fig=fig)
-        else:
-            self.display = display
-            format_axes = True
-        trace_axes = self.display.trace_axes
-        # plot the data
-        num_frames = self.trials[0].num_frames
-        repetitions = []
-        max_radius = 0
-        hists, hist_bins, hist_colors = [], [], []
-        for row_num, (row, row_val, row_colors) in enumerate(zip(
-            trace_axes, row_vals, color_arr)):
-            if right_margin:
-                row_summ_ax = self.display.right_col[row_num]
-            else:
-                row_summ_ax = None
-            # update the subset dictionary
-            subset[row_var] = row_val
-            for col_num, (ax, col_val, color) in enumerate(zip(
-                row, col_vals, row_colors)):
-                while isinstance(ax, np.ndarray):
-                    ax = ax[0]
-                if bottom_margin:
-                    col_summ_ax = self.display.bottom_row[col_num]
-                else:
-                    col_summ_ax = None
-                subset[col_var] = col_val
-                # todo: get the subset x- and y-values
-                # update the subset dictionary
-                xs = self.query(same_size=True, output=xvar, subset=subset, sort_by=query_kwargs['sort_by'], skip_empty=False)
-                ys = self.query(same_size=True, output=yvar, subset=subset, sort_by=query_kwargs['sort_by'], skip_empty=False)
-                xs, ys = np.array(xs), np.array(ys)
-                # todo: pad arrays in included_xs to match the longest one and convert to an array
-                # get sample size
-                # sample_size = xs[0].shape[0]
-                # breakpoint()
-                # if callable(summary_func):
-                #     # ax_mean = np.nanmean(xs, axis=0)
-                #     ax_mean = summary_func(xs, axis=0)
-                #     y = ys[0]
-                #     # mean_vals = np.array(mean_vals)
-                #     # ax_mean = mean_vals.mean(0)
-                #     ax.plot(ax_mean, y, color='w', zorder=4, lw=4)
-                #     ax.plot(ax_mean, y, color=color, zorder=5)
-                if isinstance(xs, np.ndarray):
-                    sample_size = xs.shape[0]
-                    if (xs.size > 0) and (ys.size > 0):
-                        reps = xs.shape[1]
-                        # reshape the data
-                        try:
-                            ys = ys.reshape(-1, ys.shape[-1])
-                        except:
-                            breakpoint()
-                        xs = xs.reshape(-1, xs.shape[-1])
-                        # plot individual traces and the mean
-                        # mean_vals = []
-                        # for num, x in enumerate(xs):
-                        #     if x.size > 0:
-                        #         y = ys[num]
-                        #         breakpoint()
-                        #         ax.plot(x, y, color='gray', lw=.5, alpha=.5)
-                        #         mean_vals += [x]
-                        nans = np.isnan(xs)
-                        not_all_nans = nans.mean(1) < 1
-                        new_xs, new_ys = xs[not_all_nans], ys[not_all_nans]
-                        if plot_type == 'hist2d':
-                            # take histogram of the x and y data in order to get the maximum
-                            # fig, ax = plt.subplots()
-                            no_nans = np.isnan(new_xs) == False
-                            no_nans = no_nans * (np.isnan(new_ys) == False)
-                            hist, xedges, yedges = np.histogram2d(new_xs[no_nans], new_ys[no_nans], bins=bins, density=use_density)
-                            self.hist, self.xedges, self.yedges = hist, xedges, yedges
-                            cmap = matplotlib.colors.LinearSegmentedColormap.from_list("", [(1,1,1), color])
-                            # cmap = matplotlib.colors.LinearSegmentedColormap.from_list("", [(1,1,1), (0, 0, 0)])
-                            max_val = hist.max()
-                            if 'vmax' in plot_kwargs:
-                                max_val = plot_kwargs['vmax']
-                                mesh = ax.pcolormesh(xedges, yedges, hist.T, cmap=cmap, vmin=0, vmax=max_val)
-                            else:
-                                mesh = ax.pcolormesh(xedges, yedges, hist.T, cmap=cmap, vmin=0, vmax=hist.max())
-                            cbar = True
-                            if 'cbar' in plot_kwargs:
-                                cbar = plot_kwargs['cbar']
-                            if cbar:
-                                if 'vmax' in plot_kwargs:
-                                    if row_num == 0 and col_num == 0:
-                                        # make a colorbar axis outside of the subplots
-                                        cbax = self.display.fig.add_axes([.92, .1, .02, .8])
-                                        plt.colorbar(mesh, cax=cbax)
-                                else:
-                                    plt.colorbar(mesh, ax=ax)
-                        elif plot_type == 'trajectory2d':
-                            # todo: plot the 2d trajectory for each fly 
-                            d_vectors = np.array([np.cos(new_xs), np.sin(new_xs)]).transpose(1, 0, 2)
-                            # replace d_vectors with 0 if nan
-                            d_vectors[np.isnan(d_vectors)] = 0
-                            trajectory = np.cumsum(d_vectors, axis=-1)
-                            trajectory /= trajectory.shape[-1]
-                            # find the last non-nan number in the trajectory
-                            last_pos = trajectory[..., -1]
-                            radii = np.linalg.norm(last_pos, axis=1)
-                            # normalize the trajectory to the maximum radius
-                            # trajectory /= radii[:, np.newaxis, np.newaxis]
-                            ax.plot(trajectory[:, 0].T, trajectory[:, 1].T, lw=.5, color='k', alpha=.25, zorder=2)
-                            # todo: plot the radius and corresponding circle for each fly
-                            max_radius = max(np.nanmax(radii), max_radius)
-                            # scatterplot of the last position
-                            ax.scatter(last_pos[..., 0], last_pos[..., 1], color='k', marker='.', s=.5, zorder=2)
-                            if 'circle' in plot_kwargs:
-                                if plot_kwargs['circle']:
-                                    for radius, pos in zip(radii, last_pos):
-                                        circle = plt.Circle((0, 0), radius=radius, color=color, alpha=.25, fill=False, lw=.5)
-                                        ax.add_artist(circle)
-                            if 'contour' in plot_kwargs:
-                                if plot_kwargs['contour']:
-                                    # make a linear colormap from white to color
-                                    cmap = matplotlib.colors.LinearSegmentedColormap.from_list("", [(1,1,1), color])
-                                    # plot the contour plot of the last positions
-                                    # sbn.kdeplot(x=last_pos[:, 0], y=last_pos[:, 1], ax=ax, levels=2, fill=True, 
-                                    #             cmap=cmap, alpha=.3, zorder=1, linewidth=0, )
-                                    # can we use bootstrapping to get the 95% CI of the mean in 2D?
-                                    # let's sample with replacement 10000 times
-                                    inds = np.arange(len(last_pos))
-                                    rand_inds = np.random.choice(inds, size=(10000, len(inds)), replace=True)
-                                    rand_last_pos = last_pos[rand_inds]
-                                    # take the mean for each sample
-                                    bootstrapped_means = np.nanmean(rand_last_pos, axis=1)
-    
-                                    # Compute mean and covariance of bootstrapped means
-                                    mean = np.mean(bootstrapped_means, axis=0)
-                                    cov = np.cov(bootstrapped_means, rowvar=False)
-                                    
-                                    # Get chi-square value for desired confidence level with 2 degrees of freedom
-                                    chi2 = scipy.stats.chi2
-                                    chi2_val = chi2.ppf(confidence, 2)
-                                    
-                                    # Compute eigenvalues and eigenvectors
-                                    eigenvals, eigenvecs = np.linalg.eigh(cov)
-                                    
-                                    # Order by eigenvalue in descending order
-                                    idx = eigenvals.argsort()[::-1]
-                                    eigenvals = eigenvals[idx]
-                                    eigenvecs = eigenvecs[:, idx]
-                                    
-                                    # Compute semi-axis lengths for the ellipse
-                                    a = np.sqrt(chi2_val * eigenvals[0])
-                                    b = np.sqrt(chi2_val * eigenvals[1])
-                                    
-                                    # Calculate the angle of the ellipse
-                                    angle = np.arctan2(eigenvecs[1, 0], eigenvecs[0, 0])
-
-                                    # now, plot the ellipse
-                                    ellipse = matplotlib.patches.Ellipse(mean, 2*a, 2*b, angle=np.degrees(angle),
-                                                color=color, alpha=.25, fill=True, lw=.5, zorder=2)
-                                    ax.add_artist(ellipse)
-
-                            if 'circ_hist' in plot_kwargs:
-                                from matplotlib.patches import Wedge
-                                if plot_kwargs['circ_hist']:
-                                    # get the histogram of the last heading angles, new_xsx
-                                    angles = np.arctan2(last_pos[..., 1], last_pos[..., 0])
-                                    # angles = new_xs
-                                    bins = 100
-                                    if 'bins' in plot_kwargs:
-                                        bins = plot_kwargs['bins']
-                                    if isinstance(bins, int):
-                                        bins = np.linspace(-np.pi, np.pi, bins+1)
-                                    hist, bins = np.histogram(angles, bins=bins, density=False)
-                                    hists += [hist]
-                                    hist_bins += [bins]
-                                    hist_colors += [color]
-                                    # and use bootstrapping to get the confidence interval for the angles
-                                    inds = np.arange(len(last_pos))
-                                    rand_inds = np.random.choice(inds, size=(10000, len(inds)), replace=True)
-                                    rand_last_pos = last_pos[rand_inds]
-                                    # take the mean for each sample
-                                    bootstrapped_means = np.nanmean(rand_last_pos, axis=1)
-                                    # now, get the angles for these means
-                                    boot_angles = np.arctan2(bootstrapped_means[..., 1], bootstrapped_means[..., 0])
-                                    # get the mean angle
-                                    mean_angle = np.arctan2(bootstrapped_means[..., 1].mean(), bootstrapped_means[..., 0].mean())
-                                    # now, get the bounds for the confidence interval and determine which is low vs. high based on the mean
-                                    lb_diff, ub_diff = np.percentile(boot_angles - mean_angle, [100*(1-confidence)/2, 100*(1+confidence)/2])
-                                    lb, ub = mean_angle + lb_diff, mean_angle + ub_diff
-                                    # now, plot an arc between the lower and upper bounds and a spot at the mean
-                                    radius = 1.125
-                                    arc = matplotlib.patches.Arc((0, 0), width=2*radius, height=2*radius, angle=0,
-                                                                 theta1=np.degrees(lb), theta2=np.degrees(ub),
-                                                                 color='w', lw=4, zorder=4, capstyle='round')
-                                    ax.add_artist(arc)
-                                    arc = matplotlib.patches.Arc((0, 0), width=2*radius, height=2*radius, angle=0,
-                                                                 theta1=np.degrees(lb), theta2=np.degrees(ub),
-                                                                 color=color, lw=2, zorder=5)
-                                    ax.add_artist(arc)
-                                    ax.scatter(radius*np.cos(mean_angle), radius*np.sin(mean_angle), color='w', marker='o', s=40, zorder=4)
-                                    ax.scatter(radius*np.cos(mean_angle), radius*np.sin(mean_angle), color=color, marker='o', s=20, zorder=5)
-
-                            if 'mean_line' in plot_kwargs:
-                                if plot_kwargs['mean_line']:
-                                    # get the mean 2D trajectory
-                                    mean_trajectory = np.nanmean(trajectory, axis=0)
-                                    ax.plot(mean_trajectory[0], mean_trajectory[1], color='w', lw=4, zorder=4)
-                                    ax.plot(mean_trajectory[0], mean_trajectory[1], color=color, lw=1, zorder=5)
-                                    # add a spot at the last position
-                                    ax.scatter(mean_trajectory[0, -1], mean_trajectory[1, -1], color='w', marker='o', s=10, zorder=4)
-                                    ax.scatter(mean_trajectory[0, -1], mean_trajectory[1, -1], color=color, marker='o', s=5, zorder=5)
-                        else:
-                            # remove regions that wrap around the circle
-                            # diffs = np.diff(new_xs, axis=-1)
-                            # too_fast = abs(diffs) > np.pi/2
-                            # starts = too_fast[1:] * np.logical_not(too_fast[:-1])
-                            # stops = np.logical_not(too_fast[1:]) * too_fast[:-1]
-                            # starts, stops = np.array(np.where(starts)), np.array(np.where(stops))
-                            # todo: instead of working on the array as a whole, do this for each trial
-                            # Use omit_wrapping helper to insert NaNs at discontinuities and mask new_ys accordingly
-                            wrapped_xs, mask = omit_wrapping(new_xs, return_mask=True)
-                            # Mask new_ys to match wrapped_xs shape and NaN positions
-                            wrapped_ys = np.full_like(wrapped_xs, np.nan)
-                            for i in range(min(new_ys.shape[0], wrapped_ys.shape[0])):
-                                valid_len = min(new_ys.shape[1], wrapped_ys.shape[1])
-                                wrapped_ys[i, :valid_len] = new_ys[i, :valid_len]
-                            wrapped_ys[~mask] = np.nan
-                            ax.plot(wrapped_xs.T, wrapped_ys.T, color='gray', lw=.5, alpha=.5)
-                            # if np.squeeze(xs).ndim > 1:
-                            #     # ax.plot(xs.T, ys.T, color='gray', lw=.5, alpha=.5)
-                            #     reps = 0
-                            #     for num, (x, y) in enumerate(zip(xs, ys)):
-                            #         try:
-                            #             ax.plot(x, y, color='gray', lw=.5, alpha=.5)
-                            #             reps += 1
-                            #         except:
-                            #             pass
-                            # else:
-                        # use the y-values from the trial with the fewest NaNs
-                        nans = np.isnan(ys)
-                        fewest_nans = nans.sum(1).min()
-                        fewest_nans = nans.sum(1) == fewest_nans
-                        y = np.nanmean(ys[fewest_nans], axis=0)
-                        if callable(summary_func) and plot_type in ['hist2d', 'line']:
-                            ax_mean = summary_func(xs, axis=0)
-                            # mean_vals = np.array(mean_vals)
-                            # ax_mean = mean_vals.mean(0)
-                            if plot_type == 'hist2d':
-                                ax.scatter(ax_mean, y, color='w', zorder=4, marker='.', s=1)
-                                ax.scatter(ax_mean, y, color=color, zorder=5, marker='.', s=.5)
-                            else:
-                                # todo: remove regions that wrap around the circle
-                                diffs = np.append([0], np.diff(ax_mean))
-                                too_fast = abs(diffs) > np.pi/2
-                                starts = too_fast[1:] * np.logical_not(too_fast[:-1])
-                                stops = np.logical_not(too_fast[1:]) * too_fast[:-1]
-                                for start, stop in zip(np.where(starts)[0], np.where(stops)[0]): 
-                                    ax_mean[start:stop] = np.nan
-                                ax.plot(ax_mean, y, color='w', zorder=4, lw=1)
-                                ax.plot(ax_mean, y, color=color, zorder=5)
-                        # plot the mean in the two summary plots
-                        if row_summ_ax is not None:
-                            if plot_type in ['hist2d', 'line']:
-                                if callable(summary_func):
-                                    summary = summary_func(xs, axis=0)
-                                    if omit_too_fast:
-                                        diffs = np.append([0], np.diff(summary))
-                                        too_fast = abs(diffs) > np.pi/2
-                                        starts = too_fast[1:] * np.logical_not(too_fast[:-1])
-                                        stops = np.logical_not(too_fast[1:]) * too_fast[:-1]
-                                        for start, stop in zip(np.where(starts)[0], np.where(stops)[0]): 
-                                            summary[start:stop] = np.nan
-                                    row_summ_ax.plot(summary, y, color=color, zorder=1)
-                                    if confidence_interval:
-                                        lows, highs = bootstrap_ci(xs, summary_func, confidence=confidence, axis=0)
-                                        row_summ_ax.fill_betweenx(y, lows, highs, color=color, alpha=.3, zorder=2, linewidth=0)
-                            else:
-                                # if 'circ_hist' in plot_kwargs:
-                                #     # todo: make better summary plots.
-                                #     # if 'circ_hist' is specified, add all of the circle 
-
-                                # else:
-                                if 'circ_hist' not in plot_kwargs:
-                                    # measure the radial distance travelled
-                                    try:
-                                        dist = np.linalg.norm(trajectory, axis=1)
-                                    except:
-                                        breakpoint()
-                                    row_summ_ax.plot(dist.T, new_ys.T, color=color, lw=.5, alpha=.5)
-                                    # plot the mean distance travelled
-                                    mean_dist = np.nanmean(dist, axis=0)
-                                    row_summ_ax.plot(mean_dist, y, color='w', lw=3, zorder=3)
-                                    row_summ_ax.plot(mean_dist, y, color=color, lw=2, zorder=4)
-                        if col_summ_ax is not None:
-                            if plot_type in ['hist2d', 'line']:
-                                if callable(summary_func):
-                                    summary = summary_func(xs, axis=0)
-                                    diffs = np.append([0], np.diff(summary))
-                                    too_fast = abs(diffs) > np.pi/2
-                                    starts = too_fast[1:] * np.logical_not(too_fast[:-1])
-                                    stops = np.logical_not(too_fast[1:]) * too_fast[:-1]
-                                    for start, stop in zip(np.where(starts)[0], np.where(stops)[0]): 
-                                        summary[start:stop] = np.nan
-                                    col_summ_ax.plot(summary, y, color=color, zorder=1)
-                                # repeat the same confidence interval process as the row_summ_ax above
-                                if confidence_interval:
-                                    lows, highs = bootstrap_ci(xs, summary_func, confidence=confidence, axis=0)
-                                    col_summ_ax.fill_betweenx(y, lows, highs, color=color, alpha=.3, zorder=2, linewidth=0)
-                            else:
-                                y = new_ys[0]
-                                # measure the radial distance travelled
-                                dist = np.linalg.norm(trajectory, axis=1)
-                                col_summ_ax.plot(dist.T, new_ys.T, color=color, lw=.5, alpha=.5)
-                                # plot the mean distance travelled
-                                mean_dist = np.nanmean(dist, axis=0)
-                                col_summ_ax.plot(mean_dist, y, color='w', lw=3, zorder=3)
-                                col_summ_ax.plot(mean_dist, y, color=color, lw=2, zorder=4)
-                        repetitions += [not_all_nans.sum()]
-                    # else:
-                    #     breakpoint()
-                elif len(xs) > 0:
-                    # reshape the data
-                    sample_size = len(xs)
-                    # xvals, yvals = np.concatenate(xs), np.concatenate(ys)
-                    # repetitions += [len(xvals)]
-                    reps = 0
-                    # ax.plot(xvals.T, yvals.T, color='gray', lw=.5, alpha=.5)
-                    xvals = []
-                    for x, y in zip(xs, ys):
-                        if x.size > 0 and y.size > 0:
-                            alpha = .5
-                            lw = .5
-                            if 'alpha' in plot_kwargs:
-                                alpha = plot_kwargs['alpha']
-                            if 'lw' in plot_kwargs:
-                                lw = plot_kwargs['lw']
-                            ax.plot(x, y, color='gray', lw=lw, alpha=alpha)
-                            reps += 1
-                            xvals += [x]
-                            good_y = y
-                    y = good_y
-                    xvals = np.array(xvals)
-                    if callable(summary_func):
-                        ax_mean = summary_func(xvals, axis=0)
-                        # mean_vals = np.array(mean_vals)
-                        # ax_mean = mean_vals.mean(0)
-                        ax.plot(ax_mean, y, color='w', zorder=4, lw=4)
-                        ax.plot(ax_mean, y, color=color, zorder=5)
-                    # plot the mean in the two summary plots
-                    if row_summ_ax is not None:
-                        if callable(summary_func):
-                            summary = summary_func(xvals, axis=0)
-                            row_summ_ax.plot(summary, y, color=color)
-                    if col_summ_ax is not None:
-                        if callable(summary_func):
-                            summary = summary_func(xvals, axis=0)
-                            col_summ_ax.plot(summary, y, color=color)
-                # add the xticks, yticks, and axis labels
-        if plot_type == 'trajectory2d' and 'circ_hist' in plot_kwargs:
-            # normalize the counts by the total count to make the colormap unbiased to sample size
-            hists = np.array(hists)
-            hists = hists / hists.sum(1)[:, None]
-            max_val = hists.max()
-            for ax, hist, hist_bin, col in zip(trace_axes.flatten(), hists, hist_bins, hist_colors):
-                # make a polar histogram using wedges of equal area for each bin, wach with an inner radius of 1.01 and outer radius of 1.25
-                # and colorize them according to the histogram counts
-                cmap = matplotlib.colors.LinearSegmentedColormap.from_list("", [(1,1,1), col])
-                cvals = cmap(hist/max_val)
-                for start, stop, cval in zip(hist_bin[:-1], hist_bin[1:], cvals):
-                    ax.add_artist(Wedge((0, 0), 1.01, start*180/np.pi, stop*180/np.pi, color=cval, alpha=1, lw=.25, width=-.25, edgecolor=cval))
-        if format_axes:
-            # if plotting trajectories, let's keep the an equal aspect ratio
-            if plot_type == 'trajectory2d':
-                for ax in trace_axes.flatten():
-                    ax.set_aspect('equal')
-                    radius = max_radius
-                    if 'circ_hist' in plot_kwargs:
-                        if plot_kwargs['circ_hist']:
-                            radius = 1.27
-                    ax.set_xlim(-radius, radius)
-                    ax.set_ylim(-radius, radius)
-            if xlabel is None:
-                xlabel = xvar
-            if ylabel is None:
-                ylabel = yvar
-            # the trajectory plots plot different variables along the margins
-            despine_right = True
-            if plot_type == 'trajectory2d':
-                ylabel = 'y'
-                xlabel = 'x'
-                # ylabel = '\n'
-                # xlabel = '\n'
-            self.display.format(xlim=xlim, ylim=ylim, xlabel=xlabel, ylabel=ylabel,
-                                xticks=xticks, yticks=yticks, logx=logx, logy=logy,
-                                despine_right=despine_right)
-            if plot_type == 'trajectory2d':
-                if 'circle' in plot_kwargs:
-                    if plot_kwargs['circle']:
-                        if right_margin:
-                            for num, ax in enumerate(self.display.right_col):
-                                # if last bottom row, add the x-axis label
-                                if num == len(self.display.right_col) - 1:
-                                    ax.set_xlabel("radial distance (au)")
-                                ax.set_ylabel("time")
-                                ax.invert_yaxis()
-                        if bottom_margin:
-                            for num, ax in enumerate(self.display.bottom_row):
-                                ax.set_xlabel("radial distance (au)")
-                                if num == 0:
-                                    ax.set_ylabel("time")
-                                ax.invert_yaxis()
-            # add the row 
-            col_label = plot_kwargs.get('col_label', col_var)
-            row_label = plot_kwargs.get('row_label', row_var)
-            
-            self.display.label_margins(row_vals, row_label, col_vals, col_label)
-            # add the sample size to the first subplot
-            # self.display.fig.suptitle(f"N={sample_size}, {min(repetitions)}–{max(repetitions)} traces per subplot")
-        # plt.show()
+        import warnings
+        warnings.warn(
+            "plot_summary() is deprecated and will be removed in a future version. "
+            "Use plot() instead.",
+            DeprecationWarning, stacklevel=2,
+        )
+        if fig is not None:
+            warnings.warn(
+                "The 'fig' parameter is not forwarded to plot(); "
+                "a new figure is always created.",
+                DeprecationWarning, stacklevel=2,
+            )
+        if omit_too_fast:
+            pass  # omit_too_fast is now handled by omit_wrap=True inside plot()
+        return self.plot(
+            xvar, yvar, col_var=col_var, row_var=row_var,
+            plot_type=plot_type, object='trial',
+            row_cmap=row_cmap, col_cmap=col_cmap, color=color,
+            right_margin=right_margin, bottom_margin=bottom_margin,
+            xlim=xlim, ylim=ylim, xticks=xticks, yticks=yticks,
+            logx=logx, logy=logy, display=display,
+            summary_func=summary_func, xlabel=xlabel, ylabel=ylabel,
+            scale=scale, bins=bins, density=use_density,
+            confidence_interval=confidence_interval, confidence=confidence,
+            plot_kwargs=plot_kwargs or {}, **query_kwargs,
+        )
 
     def plot_histogram_summary(
             self, xvar, col_var, row_var, use_probability=False, bins=None,
@@ -4641,144 +3909,59 @@ class TrackingExperiment():
         **query_kwargs
             These get passed to the query 
         """
-        if 'subset' not in query_kwargs:
-            query_kwargs['subset'] = {}
-        if 'sort_by' not in query_kwargs:
-            query_kwargs['sort_by'] = 'test_ind'
-        subset = copy.copy(query_kwargs['subset'])
-        # get the values used for coloring each subplot
-        # get the values used for coloring each subplot
-        row_vals = self.query(output=row_var, sort_by=row_var, subset=subset, same_size=False)
-        col_vals = self.query(output=col_var, sort_by=col_var, subset=subset, same_size=False)
-        assert len(col_vals) > 0 or len(row_vals) > 0, "The subset is empty!"
-        # todo: what's up with the number of axes?
-        row_vals = np.unique(np.concatenate(row_vals))
-        col_vals = np.unique(np.concatenate(col_vals))
-        new_row_vals, new_col_vals = [], []
-        for num, (vals, storage) in enumerate(zip([row_vals, col_vals], [new_row_vals, new_col_vals])):
-            # non_nans = np.ones_like(vals, dtype=bool)
-            if vals.dtype.type == np.bytes_:
-                non_nans = vals != b'nan'
-            elif vals.dtype.type in [np.bytes_, np.str_, ]:
-                non_nans = vals != 'nan'
-            else:
-                non_nans = np.isnan(vals) == False
-            storage += [arr for arr in vals[non_nans]]
-        row_vals, col_vals = np.array(new_row_vals), np.array(new_col_vals)
-        num_rows, num_cols = len(row_vals), len(col_vals)
-        color_arr = resolve_colors(row_cmap, col_cmap, row_vals, col_vals, default_color=color)
-        # test: check that the colors are aligned properly. we want this array shape to be num_rows X num_cols
-        # add a row or column if plotting in the margins
-        if bottom_margin:
-            num_rows += 1
-        if right_margin:
-            num_cols += 1
-        # make the figure and axes with a grid defined by num_rows and num_cols
-        figsize = (1.5 * num_cols + 1, 1.5*num_rows + 1)
-        format_axes = True
-        if display is None:
-            self.display = SummaryDisplay(
-                num_rows=num_rows, num_cols=num_cols, right_margin=right_margin, 
-                bottom_margin=bottom_margin, figsize=figsize)
-        else:
-            self.display = display
-            format_axes = False
-        trace_axes = self.display.trace_axes
-        # plot the data
-        num_frames = self.trials[0].num_frames
-        repetitions = []
-        if 'histograms' not in dir(self):
-            self.histograms = {}
-        self.histograms[xvar] = {}
-        for row_num, (row, row_val, row_colors) in enumerate(zip(
-            trace_axes, row_vals, color_arr)):
-            row_hists = []
-            if right_margin:
-                row_summ_ax = self.display.right_col[row_num]
-            else:
-                row_summ_ax = None
-            # update the subset dictionary
-            subset[row_var] = row_val
-            for col_num, (ax, col_val, color) in enumerate(zip(
-                row, col_vals, row_colors)):
-                while isinstance(ax, np.ndarray):
-                    ax = ax[0]
-                if bottom_margin:
-                    col_summ_ax = self.display.bottom_row[col_num]
-                else:
-                    col_summ_ax = None
-                subset[col_var] = col_val
-                # todo: get the subset x- and y-values
-                # update the subset dictionary
-                xs = self.query(same_size=True, output=xvar, subset=subset, sort_by=query_kwargs['sort_by'])
-                if isinstance(xs, np.ndarray):
-                    sample_size = xs.shape[0]
-                    if xs.size > 0:
-                        reps = xs.shape[1]
-                        # reshape the data
-                        xs = xs.reshape(-1, xs.shape[-1])
-                        nans = np.isnan(xs)
-                        not_all_nans = nans.mean(1) < 1
-                        # get the histogram and then normalize to probability
-                        counts, edges = np.histogram(xs[not_all_nans].flatten(), bins=bins)
-                        if use_probability:
-                            counts = counts / counts.sum()
-                        # now plot the histogram as a step plot
-                        # counts, _, _ = ax.hist(xs[not_all_nans].flatten(), color=color, alpha=1, bins=bins, histtype='stepfilled')
-                        mid_points = (edges[:-1] + np.diff(edges)/2)
-                        # hist = ax.step(mid_points, counts, where='mid', color=color, zorder=1)
-                        hist = ax.bar(mid_points, counts, color=color, zorder=1, width=np.diff(edges), align='center')
-                        self.histograms[xvar][(row_val, col_val)] = counts
-                        if callable(summary_func):
-                            no_nans = np.isnan(xs) == False
-                            ax_mean = summary_func(xs[no_nans])
-                            # ax_mean = mean_vals.mean(0)
-                            ax.axvline(ax_mean, color='w', zorder=4, lw=4)
-                            ax.axvline(ax_mean, color='r', zorder=4)
-                            # ax.plot(ax_mean, y, color=color, zorder=5)
-                        # plot the mean in the two summary plots
-                        for ax, vals in zip([row_summ_ax, col_summ_ax], [row_vals, col_vals]):
-                            if ax is not None:
-                                if callable(summary_func):
-                                    no_nans = np.isnan(xs) == False
-                                    summary = summary_func(xs[no_nans])
-                                    alpha = 1./float(len(vals))
-                                    # get the histogram first and then apply normalization if specified
-                                    # ax.hist(xs.flatten(), color=color, zorder=1, alpha=1, bins=bins, histtype='step', density=use_probability)
-                                    ax.step(mid_points, counts, color=color, zorder=1, alpha=alpha, where='mid')
-                                    ax.axvline(summary, color='w', zorder=4, lw=4)
-                                    ax.axvline(summary, color=color, zorder=4)
-                        # if col_summ_ax is not None:
-                        #     if callable(summary_func):
-                        #         summary = summary_func(xs, axis=0)
-                        #         col_summ_ax.plot(summary, y, color=color)
-                        repetitions += [not_all_nans.sum()]
-        if format_axes:
-            if xlabel is None:
-                xlabel = xvar
-            if use_probability:
-                # ylim = (0, 1)
-                ylabel = "Density"
-            else:
-                ylabel = "Count"
-            self.display.format(xlim=xlim, ylim=ylim, xlabel=xlabel, ylabel=ylabel,
-                                xticks=xticks, logx=logx, logy=logy)
-            # add the row values
-            self.display.label_margins(row_vals, row_var, col_vals, col_var)
-            # add the sample size to the first subplot
-            self.display.fig.suptitle(f"N={min(repetitions)}–{max(repetitions)} traces per subplot")
-        # plt.show()
+        import warnings
+        warnings.warn(
+            "plot_histogram_summary() is deprecated and will be removed in a "
+            "future version.  Use plot(plot_type='histogram') instead.",
+            DeprecationWarning, stacklevel=2,
+        )
+        if fig is not None:
+            warnings.warn(
+                "The 'fig' parameter is not forwarded to plot(); "
+                "a new figure is always created.",
+                DeprecationWarning, stacklevel=2,
+            )
+        return self.plot(
+            xvar, yvar=None, col_var=col_var, row_var=row_var,
+            plot_type='histogram', object='trial',
+            row_cmap=row_cmap, col_cmap=col_cmap, color=color,
+            right_margin=right_margin, bottom_margin=bottom_margin,
+            xlim=xlim, ylim=ylim, xticks=xticks,
+            logx=logx, logy=logy, display=display,
+            summary_func=summary_func, xlabel=xlabel,
+            bins=bins, probability=use_probability,
+            **query_kwargs,
+        )
 
     def save(self):
-        """
-        Save all contained trials as NetCDF files.
+        """Persist in-memory changes for every trial to disk.
+
+        Calls :meth:`TrackingTrial.save` on each trial.  Only trials with
+        pending variable / attribute changes actually write to disk; others
+        return immediately.
+
+        Examples
+        --------
+        ::
+
+            exp.add_dataset('my_var', arrays)   # one array per trial
+            exp.save()                          # write all to Zarr stores
         """
         for trial in self.trials:
             trial.save()
 
     def load(self):
-        """
-        Load all contained trials, preferring NetCDF if available.
+        """Reload each trial from its Zarr store, discarding in-memory state.
+
+        Useful after an external process writes to the store.  Replaces
+        ``self.trials`` in-place with freshly opened lazy handles.
+
+        Examples
+        --------
+        ::
+
+            exp.save()   # flush changes
+            exp.load()   # reopen — safe for subsequent lazy access
         """
         loaded_trials = []
         for trial in self.trials:
@@ -5175,8 +4358,8 @@ class SummaryDisplay():
                 if xlim is not None:
                     try:
                         ax.set_xlim(xlim[0], xlim[1])
-                    except:
-                        breakpoint()
+                    except Exception:
+                        raise
                 if ylim is not None:
                     if not (special_bottom_left and is_bottom and is_left):
                         ax.set_ylim(ylim[0], ylim[1])
@@ -5584,8 +4767,7 @@ class TrackingTrial():
                         index += [np.newaxis for p in range(pad)]
                         include = include * inds[tuple(index)]
                     else:
-                        breakpoint()
-                        print(f"A subset variable, {key}, has length {len(var)} but should be {len(include)}.")
+                        raise ValueError(f"A subset variable, {key}, has length {len(var)} but should be {len(include)}.")
         # grab the indexing variable
         sort_by = self.__getattribute__(sort_by)
         if isinstance(sort_by, (str, bytes)):
@@ -5595,10 +4777,7 @@ class TrackingTrial():
         assert sort_by.ndim == 1, f"the sort_by array must be flat. instead sort_by.ndim={sort_by.ndim}"
         while include.ndim > sort_by.ndim: 
             include = np.any(include, axis=-1).astype(bool)
-        try:
-            sort_by = sort_by[include]
-        except:
-            breakpoint()
+        sort_by = sort_by[include]
         bouts = self.bouts[include]   # use only the subseted bouts
         # sort using the sort_by
         order = np.argsort(sort_by)
@@ -5926,29 +5105,93 @@ class TrackingTrial():
               object='trial', groupby='saccade', agg_func=np.nanmean):
         """Return trial data filtered and sorted by subset conditions.
 
-        When ``object='saccade'``, queries the saccade table instead of the
-        heading data.  ``detect_saccades()`` must have been called first.
+        Parameters
+        ----------
+        output : str, default ``'camera_heading'``
+            Variable to retrieve.  For ``object='trial'`` this is any dataset
+            or attribute stored on the trial.  For ``object='saccade'`` it is
+            a scalar saccade-table column (``'amplitude'``, ``'peak_velocity'``,
+            ``'duration'``, ``'start_angle'``, ``'stop_angle'``,
+            ``'start_frame'``, ``'stop_frame'``, ``'test_ind'``) or
+            ``'saccade'`` to get reconstructed :class:`Saccade` objects.
+        sort_by : str, default ``'test_ind'``
+            Trial-level variable used to sort the returned rows.
+        subset : dict, default ``{}``
+            Filter conditions.  Each key is a variable name; the value can be:
 
-        Saccade query parameters
-        ------------------------
-        output : str
-            A scalar saccade-table column (``'amplitude'``, ``'peak_velocity'``,
-            ``'duration'``, ``'start_angle'``, ``'stop_angle'``, ``'test_ind'``,
-            ``'start_frame'``, ``'stop_frame'``), or ``'saccade'`` to get
-            reconstructed ``Saccade`` objects.
-        subset : dict
-            Keys that match saccade-table columns are applied to saccade rows
-            directly.  Keys that match trial-level variables are matched against
-            the test each saccade belongs to (e.g. ``{'is_test': True}``).
-        groupby : {'saccade', 'test', 'trial'}
-            ``'saccade'`` — flat result (one value per saccade).
-            ``'test'`` — one value per test via ``agg_func``.
-            ``'trial'`` — one value for the whole trial via ``agg_func``.
-        agg_func : callable, default=np.nanmean
-            Applied as ``agg_func(group_values)`` per group.  Use ``list`` to
-            collect raw values without reducing (returns ragged lists).
+            - A scalar → exact equality.
+            - A list of scalars → membership (OR).
+            - An inequality string such as ``'>0.5'`` or ``'<=180'``.
+            - ``float('nan')`` → match NaN entries.
+            - A list of inequality strings → all conditions ANDed together.
 
-        **Trial query (object='trial') — unchanged behaviour**
+            For ``object='saccade'`` keys that match saccade-table columns
+            filter individual saccade rows; all other keys are matched against
+            the test-level value for each saccade's ``test_ind``.
+        object : {'trial', 'saccade'}, default ``'trial'``
+            Data source.  ``'saccade'`` requires :meth:`detect_saccades` to
+            have been called first.
+        groupby : {'saccade', 'test', 'trial'}, default ``'saccade'``
+            Only used when ``object='saccade'``.
+
+            - ``'saccade'`` — flat list, one value per saccade.
+            - ``'test'`` — one value per test, reduced via ``agg_func``.
+            - ``'trial'`` — one scalar for the whole trial via ``agg_func``.
+        agg_func : callable, default ``np.nanmean``
+            Reduction applied per group for ``groupby='test'`` or
+            ``groupby='trial'``.  Use ``list`` to collect raw values without
+            reducing (returns ragged lists when saccade counts differ).
+
+        Returns
+        -------
+        ndarray or list
+            For ``object='trial'``: ``ndarray`` of shape
+            ``(n_tests[, n_frames])`` after subsetting and sorting.
+            For ``object='saccade'``: list of scalars / :class:`Saccade`
+            objects (``groupby='saccade'``), list of scalars
+            (``groupby='test'``), or a single scalar (``groupby='trial'``).
+
+        Raises
+        ------
+        RuntimeError
+            If ``object='saccade'`` and :meth:`detect_saccades` has not been
+            called yet.
+
+        Examples
+        --------
+        Full heading time-series for all tests::
+
+            heading = trial.query('camera_heading')
+            # \u2192 ndarray shape (n_tests, n_frames)
+
+        Subset to one condition::
+
+            heading = trial.query('camera_heading', subset={'condition': 1})
+
+        Membership filter (conditions 1 and 3)::
+
+            heading = trial.query('camera_heading', subset={'condition': [1, 3]})
+
+        Inequality string filter::
+
+            heading = trial.query('camera_heading', subset={'bg_gain': '>0'})
+
+        Flat list of saccade amplitudes::
+
+            amps = trial.query(output='amplitude', object='saccade')
+
+        Mean amplitude per test::
+
+            amps_per_test = trial.query(
+                output='amplitude', object='saccade', groupby='test'
+            )
+
+        On-demand Saccade objects filtered by speed::
+
+            saccades = trial.query(
+                output='saccade', object='saccade',
+                subset={'peak_velocity': '>5'},
+            )
         """
         # ------------------------------------------------------------------ #
         # Saccade query branch                                                 #
@@ -6766,7 +6009,6 @@ class Bout():
                     for start, stop in zip(np.round(starts).astype(int), np.round(stops).astype(int)): axes[1].axvspan(self.time[start], self.time[stop], color='gray', alpha=.2)
                     for start, stop in zip(np.round(starts).astype(int), np.round(stops).astype(int)): axes[2].axvspan(self.time[start], self.time[stop], color='gray', alpha=.2)
                     plt.show()
-                    breakpoint()
         elif kalman_method:
             kfilter = KalmanFitter(np.unwrap(arr[0]))
             smoothed_arr = np.unwrap(kfilter.generate_vals(100, .01))

@@ -470,22 +470,34 @@ Key design notes:
 
 ## Phase 6 — Deprecate old methods and clean up
 
-- [ ] **6.1 Rewrite `plot_summary` as a thin wrapper** around `plot()` (for backward compat), mark deprecated.
+- [x] **6.1 Rewrite `plot_summary` as a thin wrapper** around `plot()` (for backward compat), mark deprecated.
       Note: `color`, `row_cmap`, `col_cmap` already forward correctly via Phase 3.0
       changes — the wrapper mainly needs to translate old `plot_kwargs` keys.
 
-- [ ] **6.2 Rewrite `plot_histogram_summary`** as `plot(..., plot_type='histogram')`, mark deprecated.
+- [x] **6.2 Rewrite `plot_histogram_summary`** as `plot(..., plot_type='histogram')`, mark deprecated.
       Note: `color='k'` param and `resolve_colors` replacement already done in Phase 3.0.
 
-- [ ] **6.3 Rewrite `plot_saccades`** as `plot(..., object='saccade', plot_type='line')`, mark deprecated.
+- [x] **6.3 Rewrite `plot_saccades`** as `plot(..., object='saccade', plot_type='line')`, mark deprecated.
       Note: `color='k'` param already added in Phase 3.0.
 
-- [ ] **6.4 Rewrite `plot_saccade_dynamics`** as `plot(..., object='saccade', plot_type='scatter')`, mark deprecated.
+- [x] **6.4 Rewrite `plot_saccade_dynamics`** as `plot(..., object='saccade', plot_type='scatter')`, mark deprecated.
       Note: `color='k'` param already added in Phase 3.0.
 
-- [ ] **6.5 Remove dead code:** `breakpoint()` calls, large commented-out blocks throughout all methods.
+- [x] **6.5 Remove dead code:** `breakpoint()` calls, large commented-out blocks throughout all methods.
 
-- [ ] **6.6 Add/update docstrings** for all new and modified public functions and methods.
+- [x] **6.6 Add/update docstrings** for all new and modified public functions and methods.
+
+### Implementation summary (April 2026)
+
+**6.1–6.4 complete.** Each deprecated method now:
+- Emits `DeprecationWarning` pointing callers to `plot()`.
+- Warns on unsupported params (`fig`, `reversal_split`, `reference_var`, `start`/`stop`).
+- Translates old param names (`use_density`→`density`, `use_probability`→`probability`,
+  `saccade_var`/`time_var`/`line_color`/`line_alpha`/`mean_bins`→`plot_kwargs`,
+  `output`→`xvar`, `scatter`→`plot_type`).
+- `plot_saccade_dynamics` sets `rad2deg=True` so the degree-conversion previously
+  done inline is now handled by `plot()`.
+- All 84 existing tests still pass.
 
 ---
 
@@ -494,6 +506,15 @@ Key design notes:
 - `main_sequence_analysis` has a unique layout (3×2 with shared axes, log scales,
   marginal jitter+CI strips) that doesn't fit the grid pattern. Leave it as-is
   for now but have it use Phase 1 helpers (`resolve_colors`, `bootstrap_ci`).
+  **Refactored (April 2026):** now uses `get_grid_vals`, `resolve_colors`,
+  `bootstrap_ci`; bugs fixed (mutable default, mutated outer variable, `exec()`
+  anti-pattern, missing `same_size=False`). `group_var='filename'` supported,
+  full-path filenames auto-shortened to basename in tick labels. Axis padding
+  fixed: right-margin x and bottom-margin y both use `[-0.5, N−0.5]` symmetric
+  range. Strip scatter uses `color=` kwarg (not `c=`) to avoid RGB-as-colormap
+  confusion. Legend only shown when labeled artists exist. `set_visible(False)`
+  used instead of `axis('off')` for the hidden bottom-right cell.
+  15 integration tests in `TestMainSequenceAnalysis` (all passing).
 - The `SummaryDisplay` class and its `format()`/`label_margins()` methods are
   already solid. No changes needed there.
 - Each phase is independently mergeable: Phase 1 is pure extraction with no
@@ -589,6 +610,147 @@ resize events.  Two usability improvements are requested:
         the correct relative widths (check `ax.get_position().width`).
       - Verify that the margin column width is unaffected by `width_ratios`
         and remains ~0.25 × the largest data column.
+
+---
+
+## Phase 8 — Tutorial notebooks and docstring improvements
+
+### Motivation
+
+The library has a solid, tested API but no user-facing documentation beyond
+docstrings.  New collaborators (and LLMs) need worked examples on real data
+to understand the query system, saccade extraction, and the full plotting API.
+Simultaneously, many docstrings are terse or out-of-date and do not reflect
+the Phase 2–6 API.
+
+### Doctest strategy
+
+**Selective doctests — not universal.**
+
+*Good candidates for runnable doctests*: pure, side-effect-free utility
+functions with simple deterministic outputs — `omit_wrapping`, `resolve_colors`,
+`bootstrap_ci`, `get_grid_vals`.  A 3-line doctest here adds value for both
+readers and `pytest --doctest-modules`.
+
+*Bad candidates*: `TrackingTrial`/`TrackingExperiment` methods.  They require
+real files on disk, produce matplotlib figures as side-effects, and their repr
+is fragile across NumPy/Python versions.  Use an `Examples:` section with a
+non-executable code block instead — looks like a tutorial, is not run by pytest.
+
+*Rule of thumb*: if the function can be fully exercised with `np.array([…])` in
+two lines, add a doctest.  If it needs fixture data or opens a file, use
+`Examples:` prose only.
+
+### Tasks
+
+#### 8.1 Docstring improvements
+
+- [ ] **8.1.1 Add `Examples:` sections to `TrackingTrial` and `TrackingExperiment`**
+      Every public method that lacks one should get a minimal, realistic usage
+      snippet (non-executable, under an `Examples:` heading).  Priority list:
+      `load()`, `save()`, `add_dataset()`, `remove_dataset()`, `add_attr()`,
+      `query()`, `detect_saccades()`, `saccade_table_df()`, `plot()`.
+
+- [ ] **8.1.2 Add runnable doctests to Phase 1 helpers**
+      `omit_wrapping`, `resolve_colors`, `bootstrap_ci`, `get_grid_vals` —
+      each gets 1–2 `>>>` examples with simple `np.array` inputs.
+      Verify with `pytest --doctest-modules magno_tracker/tracking.py`.
+
+- [ ] **8.1.3 Update stale parameter descriptions**
+      Several docstrings still describe old parameter names (`use_density`,
+      `saccade_var`, `output_var`) or omit newer params (`rad2deg`,
+      `relative_to`, `show_n`, `groupby`, `agg_func`).  Audit every public
+      method and bring parameter lists up to date.
+
+- [ ] **8.1.4 Document `plot()` `plot_kwargs` keys per `plot_type`**
+      The `plot_kwargs` parameter accepts different keys depending on
+      `plot_type` and `object`.  Add a table or sub-section in the `plot()`
+      docstring listing recognised keys for each combination (e.g.
+      `plot_type='trajectory2d'`: `circle`, `contour`, `circ_hist`,
+      `mean_line`, `bins`; `plot_type='line'`: `mean_bins`, `split_by_sign`,
+      `saccade_spans`, `trace_color`, `alpha`; etc.).
+
+#### 8.2 Query tutorial notebook (`notebooks/tutorial_query.ipynb`)
+
+Target reader: a new collaborator who has never used the library.
+
+- [ ] **8.2.1 Loading data**
+      - Load one or more real `.h5` files from `h5_files/` via `TrackingTrial`.
+      - Show `trial.data` xarray Dataset structure, list available variables.
+      - Demonstrate `add_dataset()` and `save()` on a derived variable.
+
+- [ ] **8.2.2 Basic queries**
+      - `query(output='camera_heading')` — full time series.
+      - `query(output='camera_heading', subset={'condition': 1})` — subset by scalar.
+      - `query(output='camera_heading', subset={'condition': [1, 3]})` —
+        membership filter.
+      - `query(output='camera_heading', subset={'bg_gain': '>0'})` — inequality string.
+      - `query(same_size=True, ...)` — explain the padding behaviour.
+
+- [ ] **8.2.3 Experiment-level queries**
+      - Combine trials into a `TrackingExperiment`.
+      - `exp.query(...)` across all subjects — show shape of returned array.
+      - `groupby='trial'` vs `groupby='test'` vs default.
+
+- [ ] **8.2.4 Saccade detection and extraction**
+      - `trial.detect_saccades()` — show the resulting `saccade_table`.
+      - `trial.query(object='saccade', output='amplitude')`.
+      - `trial.query(object='saccade', output='amplitude', groupby='test')`.
+      - `trial.query(object='saccade', subset={'peak_velocity': '>5'})`.
+      - `trial.saccade_table_df()` — pandas export, useful for seaborn/statsmodels.
+      - On-demand `Saccade` object reconstruction: show `s.arr_relative`,
+        `s.velocity`, `s.peak_velocity`, `s.amplitude`.
+
+- [ ] **8.2.5 Saving and reloading**
+      - Show round-trip: `save()`, close, reload, verify saccade table intact.
+
+#### 8.3 Plotting tutorial notebook (`notebooks/tutorial_plot.ipynb`)
+
+Target reader: a collaborator who understands the data but is new to `plot()`.
+
+- [ ] **8.3.1 Setup**
+      - Load a multi-subject, multi-condition dataset into `TrackingExperiment`.
+      - Run `detect_saccades()` on every trial (needed for saccade plot sections).
+
+- [ ] **8.3.2 `plot_type='line'` — trial-level traces**
+      - `exp.plot('camera_heading', 'time', col_var='condition', row_var=None)`.
+      - Add `row_cmap` / `col_cmap` for color.
+      - `xlim`, `ylim`, `xticks` formatting.
+      - `right_margin=True`, `bottom_margin=True`.
+
+- [ ] **8.3.3 `plot_type='histogram'`**
+      - `exp.plot('amplitude', col_var='condition', row_var=None, plot_type='histogram')`.
+      - `probability=True`, custom `bins`.
+
+- [ ] **8.3.4 `plot_type='hist2d'` and `plot_type='scatter'`**
+      - Show both on the same dataset for comparison.
+
+- [ ] **8.3.5 `plot_type='trajectory2d'`**
+      - `exp.plot('camera_heading', 'time', ..., plot_type='trajectory2d')`.
+      - `plot_kwargs={'circle': True, 'contour': True, 'circ_hist': True,
+        'mean_line': True}`.
+
+- [ ] **8.3.6 Saccade traces — `object='saccade', plot_type='line'`**
+      - `exp.plot('arr_relative', 'relative_time', object='saccade',
+        plot_type='line', ...)`.
+      - `relative_to='peak'` vs `'start'`.
+      - `mean_bins`, `split_by_sign`, `show_n`.
+      - `rad2deg=True` — show the degree-converted version side-by-side.
+
+- [ ] **8.3.7 Saccade dynamics — `object='saccade', plot_type='hist2d'`**
+      - Position vs amplitude 2D histogram.
+      - Demonstrate `rad2deg=True` and `xlim=(-180, 180)`.
+
+- [ ] **8.3.8 Margin customisation**
+      - `right_margin_xlim`, `bottom_margin_ylim` overrides.
+      - `right_margin='histogram'`, `bottom_margin='circ_hist'` explicit types.
+
+#### 8.4 Real-data requirement
+
+Both notebooks must run on the actual files in `h5_files/`.  At least one
+subject must have saccades detected during the notebook run (not pre-cached)
+so the saccade extraction workflow is demonstrated live.  Use a minimal
+hardcoded subset (e.g. `fh_baja_1_new_trial_*.h5`) to keep runtime short.
 
 ---
 Add new items as needed. Check off items as they are completed.

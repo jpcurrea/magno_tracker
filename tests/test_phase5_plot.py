@@ -1128,6 +1128,148 @@ class TestRad2Deg:
         assert np.allclose(ratio, 180 / np.pi, atol=1e-6), \
             f"Expected ratio 180/pi, got mean={ratio.mean():.4f}"
 
+
+# ---------------------------------------------------------------------------
+# main_sequence_analysis — requires real h5 files
+# ---------------------------------------------------------------------------
+@pytest.mark.skipif(
+    not any(H5_FILES),
+    reason="No h5 files found — skipping main_sequence_analysis tests",
+)
+class TestMainSequenceAnalysis:
+    """Integration tests for TrackingExperiment.main_sequence_analysis().
+
+    Uses real h5 files from fh_baja_1 (cond1, 3 trial repetitions).
+    The precomputed saccade variables (saccade_peak_velocity, saccade_duration,
+    saccade_amplitude) stored in the h5 datasets are used directly — no call to
+    detect_saccades() is needed.
+    """
+
+    @pytest.fixture(scope='class')
+    def exp(self):
+        files = sorted(H5_DIR.glob('fh_baja_1_new_trial_*_cond1_new.h5'))[:3]
+        e = TrackingExperiment.__new__(TrackingExperiment)
+        e.trials = [TrackingTrial(str(f)) for f in files]
+        for t in e.trials:
+            assert t.load_success, f"Failed to load {t.filename}"
+        return e
+
+    # ------------------------------------------------------------------
+    # Smoke test: runs end-to-end without raising
+    # ------------------------------------------------------------------
+    def test_runs_without_error(self, exp):
+        exp.main_sequence_analysis(group_var='filename', n_boot=20)
+
+    # ------------------------------------------------------------------
+    # Figure structure
+    # ------------------------------------------------------------------
+    def test_creates_3x2_axes(self, exp):
+        exp.main_sequence_analysis(group_var='filename', n_boot=20)
+        fig = plt.gcf()
+        # 6 axes: 2 scatter + 2 right-col strip + 1 bottom strip + 1 hidden
+        assert len(fig.axes) == 6
+
+    def test_bottom_right_axis_invisible(self, exp):
+        exp.main_sequence_analysis(group_var='filename', n_boot=20)
+        axes = plt.gcf().axes
+        # bottom-right corner: last axis in the 3x2 grid (index 5)
+        assert not axes[5].get_visible(), \
+            "Bottom-right axis should be hidden via axis('off')"
+
+    # ------------------------------------------------------------------
+    # Scatter panels have data drawn
+    # ------------------------------------------------------------------
+    def test_scatter_panels_have_collections(self, exp):
+        from matplotlib.collections import PathCollection
+        exp.main_sequence_analysis(group_var='filename', n_boot=20)
+        axes = plt.gcf().axes
+        scatter_axes = [axes[0], axes[2]]  # top-left, middle-left
+        for ax in scatter_axes:
+            scatters = [c for c in ax.get_children()
+                        if isinstance(c, PathCollection)]
+            assert len(scatters) > 0, \
+                f"Scatter axis '{ax.get_ylabel()}' has no PathCollections"
+
+    # ------------------------------------------------------------------
+    # Bootstrap CI strip plots have data drawn
+    # ------------------------------------------------------------------
+    def test_margin_axes_have_collections(self, exp):
+        from matplotlib.collections import PathCollection
+        exp.main_sequence_analysis(group_var='filename', n_boot=20)
+        axes = plt.gcf().axes
+        # axes[1], axes[3]: right-col strip plots; axes[4]: bottom strip
+        margin_axes = [axes[1], axes[3], axes[4]]
+        for ax in margin_axes:
+            scatters = [c for c in ax.get_children()
+                        if isinstance(c, PathCollection)]
+            assert len(scatters) > 0, \
+                "Margin axis has no scatter points (no data drawn)"
+
+    # ------------------------------------------------------------------
+    # Bootstrap CI lines (error bars) drawn in margin axes
+    # ------------------------------------------------------------------
+    def test_margin_axes_have_ci_lines(self, exp):
+        exp.main_sequence_analysis(group_var='filename', n_boot=20)
+        axes = plt.gcf().axes
+        for ax in [axes[1], axes[3], axes[4]]:
+            assert len(ax.lines) > 0, \
+                "Bootstrap CI line missing from margin axis"
+
+    # ------------------------------------------------------------------
+    # colors= kwarg overrides cmap
+    # ------------------------------------------------------------------
+    def test_explicit_colors_accepted(self, exp):
+        """Passing colors= list should not raise when length matches group count."""
+        from magno_tracker.tracking import get_grid_vals
+        group_vals = get_grid_vals(exp, 'filename', {})
+        explicit = ['steelblue'] * len(group_vals)
+        exp.main_sequence_analysis(
+            group_var='filename', colors=explicit, n_boot=20)
+
+    def test_explicit_colors_wrong_length_raises(self, exp):
+        """colors= list of wrong length should raise ValueError."""
+        with pytest.raises(ValueError, match="colors has"):
+            exp.main_sequence_analysis(
+                group_var='filename', colors=['r'], n_boot=5)
+
+    # ------------------------------------------------------------------
+    # subset= isolation (regression for mutable-default bug)
+    # ------------------------------------------------------------------
+    def test_subset_not_mutated_by_call(self, exp):
+        """The caller's subset dict must not be modified by main_sequence_analysis."""
+        user_subset = {}
+        exp.main_sequence_analysis(
+            group_var='filename', subset=user_subset, n_boot=20)
+        assert user_subset == {}, \
+            "main_sequence_analysis mutated the caller's subset dict"
+
+    def test_repeated_calls_with_same_subset_give_same_groups(self, exp):
+        """Calling twice with an identical subset should produce the same groups."""
+        from magno_tracker.tracking import get_grid_vals
+        subset_a = {}
+        subset_b = {}
+        groups_a = get_grid_vals(exp, 'is_test', subset_a)
+        exp.main_sequence_analysis(group_var='filename', subset=subset_b, n_boot=5)
+        groups_b = get_grid_vals(exp, 'is_test', subset_b)
+        np.testing.assert_array_equal(groups_a, groups_b)
+
+    # ------------------------------------------------------------------
+    # Log-scale axes
+    # ------------------------------------------------------------------
+    def test_scatter_axes_x_log_scale(self, exp):
+        exp.main_sequence_analysis(group_var='filename', n_boot=20)
+        axes = plt.gcf().axes
+        for ax in [axes[0], axes[2], axes[4]]:
+            assert ax.get_xscale() == 'log', \
+                "Expected log x-scale on magnitude axis"
+
+    def test_scatter_axes_y_log_scale(self, exp):
+        exp.main_sequence_analysis(group_var='filename', n_boot=20)
+        axes = plt.gcf().axes
+        for ax in [axes[0], axes[2]]:
+            assert ax.get_yscale() == 'log', \
+                "Expected log y-scale on scatter axis"
+
     def test_rad2deg_trajectory2d_exempt(self):
         """trajectory2d is exempt from rad2deg conversion (uses xs as raw radians)."""
         exp = _make_experiment(n_trials=3)
