@@ -2536,6 +2536,7 @@ class TrackingExperiment():
              n_boot=1000, groupby=None, agg_func=None,
              positive_amplitude=False, min_speed=None, max_speed=None,
              show_n=False, relative_to='start',
+             rad2deg=False,
              right_margin_xlim=None, right_margin_ylim=None,
              bottom_margin_xlim=None, bottom_margin_ylim=None,
              plot_kwargs=None, **query_kwargs):
@@ -2858,6 +2859,10 @@ class TrackingExperiment():
                 if col_var is not None:
                     cell_subset[col_var] = col_val
                 xs, ys, cell_extra = _get_xs_ys(cell_subset)
+                # Convert x data from radians to degrees when requested.
+                # trajectory2d is exempt — it feeds xs into cos/sin directly.
+                if rad2deg and xs is not None and plot_type != 'trajectory2d':
+                    xs = np.degrees(xs)
                 cell_cache[(row_i, col_i)] = (xs, ys, cell_extra)
                 if xs is None or xs.size == 0:
                     continue
@@ -3060,7 +3065,7 @@ class TrackingExperiment():
         # Default axis limits for saccade line plots.
         if object == 'saccade' and plot_type == 'line':
             if xlim is None:
-                xlim = (-np.pi, np.pi)
+                xlim = (-180, 180) if rad2deg else (-np.pi, np.pi)
             if ylim is None:
                 ylim = (0.5, -0.25)
 

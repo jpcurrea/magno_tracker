@@ -1054,3 +1054,119 @@ class TestPlotNewParams:
         ax = exp.display.trace_axes[0, 0]
         # Two groups: at least 4 extra lines (2 white + 2 colored).
         assert len(ax.lines) >= 5
+
+
+# ---------------------------------------------------------------------------
+# rad2deg parameter
+# ---------------------------------------------------------------------------
+class TestRad2Deg:
+    """Tests for the rad2deg conversion parameter in TrackingExperiment.plot()."""
+
+    @pytest.fixture(scope='class')
+    def exp(self):
+        files = sorted(H5_DIR.glob('fh_baja_1_new_trial_*_cond1_new.h5'))[:3]
+        e = TrackingExperiment.__new__(TrackingExperiment)
+        e.trials = [TrackingTrial(str(f)) for f in files]
+        for t in e.trials:
+            assert t.load_success
+            t.detect_saccades()
+        return e
+
+    def _xdata(self, exp):
+        """All non-NaN x values from the first trace cell."""
+        ax = exp.display.trace_axes[0, 0]
+        vals = []
+        for line in ax.lines:
+            xd = line.get_xdata()
+            vals.extend(xd[~np.isnan(xd)].tolist())
+        return np.array(vals)
+
+    def test_rad2deg_false_xlim_in_radians(self, exp):
+        """Default rad2deg=False: auto xlim should be (-pi, pi) for saccade lines."""
+        exp.plot('arr_relative', 'relative_time',
+                 col_var=None, row_var=None,
+                 object='saccade', plot_type='line',
+                 rad2deg=False,
+                 right_margin=False, bottom_margin=False)
+        ax = exp.display.trace_axes[0, 0]
+        lo, hi = ax.get_xlim()
+        assert abs(lo - (-np.pi)) < 0.2, f"Expected xlim ~(-pi, pi), got ({lo:.3f}, {hi:.3f})"
+        assert abs(hi - np.pi) < 0.2
+
+    def test_rad2deg_true_xlim_in_degrees(self, exp):
+        """rad2deg=True: auto xlim should be (-180, 180) for saccade lines."""
+        exp.plot('arr_relative', 'relative_time',
+                 col_var=None, row_var=None,
+                 object='saccade', plot_type='line',
+                 rad2deg=True,
+                 right_margin=False, bottom_margin=False)
+        ax = exp.display.trace_axes[0, 0]
+        lo, hi = ax.get_xlim()
+        assert abs(lo - (-180)) < 5, f"Expected xlim ~(-180, 180), got ({lo:.1f}, {hi:.1f})"
+        assert abs(hi - 180) < 5
+
+    def test_rad2deg_xdata_scaled_by_180_over_pi(self, exp):
+        """x values with rad2deg=True should be ~180/pi times those with rad2deg=False."""
+        exp.plot('arr_relative', 'relative_time',
+                 col_var=None, row_var=None,
+                 object='saccade', plot_type='line',
+                 rad2deg=False,
+                 right_margin=False, bottom_margin=False)
+        xrad = self._xdata(exp)
+
+        exp.plot('arr_relative', 'relative_time',
+                 col_var=None, row_var=None,
+                 object='saccade', plot_type='line',
+                 rad2deg=True,
+                 right_margin=False, bottom_margin=False)
+        xdeg = self._xdata(exp)
+
+        assert xrad.size == xdeg.size, "Different number of data points"
+        valid = np.isfinite(xrad) & np.isfinite(xdeg) & (np.abs(xrad) > 1e-6)
+        assert valid.sum() > 0, "No valid points to compare"
+        ratio = xdeg[valid] / xrad[valid]
+        assert np.allclose(ratio, 180 / np.pi, atol=1e-6), \
+            f"Expected ratio 180/pi, got mean={ratio.mean():.4f}"
+
+    def test_rad2deg_trajectory2d_exempt(self):
+        """trajectory2d is exempt from rad2deg conversion (uses xs as raw radians)."""
+        exp = _make_experiment(n_trials=3)
+        # With rad2deg=True, trajectory2d should still draw without error and
+        # produce the same trajectory shapes as without it.
+        exp.plot('camera_heading', col_var=None, row_var=None,
+                 plot_type='trajectory2d', rad2deg=True,
+                 right_margin=False, bottom_margin=False)
+        ax = exp.display.trace_axes[0, 0]
+        # Should have drawn trajectory lines (not errored out).
+        assert len(ax.lines) > 0, "trajectory2d should still draw lines when rad2deg=True"
+
+    def test_rad2deg_trial_plot_type_line(self):
+        """rad2deg=True also works for object='trial', plot_type='line'."""
+        exp = _make_experiment(n_trials=3)
+        exp.plot('camera_heading', 'time',
+                 col_var=None, row_var=None,
+                 plot_type='line', rad2deg=True,
+                 right_margin=False, bottom_margin=False)
+        ax = exp.display.trace_axes[0, 0]
+        xd = np.concatenate([l.get_xdata() for l in ax.lines])
+        xd = xd[np.isfinite(xd)]
+        # camera_heading is in (-pi, pi); after conversion it should be in (-180, 180).
+        assert xd.max() <= 185, f"Max x={xd.max():.1f} should be ≤180 deg"
+        assert xd.min() >= -185, f"Min x={xd.min():.1f} should be ≥-180 deg"
+
+    def test_rad2deg_histogram(self):
+        """rad2deg=True with plot_type='histogram' scales x data to degrees."""
+        exp = _make_experiment(n_trials=3)
+        exp.plot('camera_heading', col_var=None, row_var=None,
+                 plot_type='histogram', rad2deg=True,
+                 right_margin=False, bottom_margin=False)
+        ax = exp.display.trace_axes[0, 0]
+        # Histogram patches should span [-180, 180], not [-pi, pi].
+        patches = ax.patches
+        assert len(patches) > 0
+        left_edges = [p.get_x() for p in patches]
+        assert min(left_edges) >= -185, \
+            f"Leftmost bin edge {min(left_edges):.2f} should be ≥ -180 deg"
+        assert max(left_edges) <= 185, \
+            f"Rightmost bin edge {max(left_edges):.2f} should be ≤ 180 deg"
+
