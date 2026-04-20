@@ -305,7 +305,9 @@ def bootstrap_ci(data, stat_func, confidence=0.84, n_boot=1000, axis=0, return_b
 # ---------------------------------------------------------------------------
 
 def plot_line(ax, xs, ys, color, summary_func=None, ci=False,
-              confidence=0.84, n_boot=1000, trace_color='gray', **kw):
+              confidence=0.84, n_boot=1000, trace_color='gray',
+              split_by_sign=False, mean_bins=None, ylim=None,
+              saccade_durations=None, saccade_spans=None, **kw):
     """Plot individual traces with an optional colored mean and CI.
 
     Parameters
@@ -319,17 +321,34 @@ def plot_line(ax, xs, ys, color, summary_func=None, ci=False,
         Color for the mean line and CI shading.
     summary_func : callable or None
         If provided, compute and overlay a summary trace (e.g. np.nanmean).
+        Ignored when ``mean_bins`` is set.
     ci : bool
-        If True (and summary_func is set), shade a bootstrap CI around the mean.
+        If True (and summary_func is set and mean_bins is None), shade a
+        bootstrap CI around the mean.
     confidence : float
         Confidence level for the CI (default 0.84).
     n_boot : int
         Bootstrap resamples for the CI (default 1000).
     trace_color : color spec, default 'gray'
         Color for the individual background traces.
+    split_by_sign : bool, default False
+        If True, draw separate summary lines for positive-amplitude
+        (last non-NaN x ≥ 0) and negative-amplitude traces.  Positive
+        group: solid line; negative group: dotted line.
+        Has no effect when both ``summary_func`` and ``mean_bins`` are None.
+    mean_bins : int or None, default None
+        If None, the summary uses ``summary_func(xs, axis=0)``.
+        If an int, the y-axis is divided into that many equal bins and the
+        summary per bin is ``np.nanmedian`` — useful for variable-length
+        NaN-padded traces where a column-wise mean is uneven near the edges.
+    saccade_durations : array-like of shape (n_traces,) or None, default None
+        If provided, the segment of each trace where
+        ``0 ≤ ys[i] ≤ saccade_durations[i]`` is overlaid in ``color`` to
+        highlight the saccade body.  Assumes ``ys`` is a time axis with
+        t = 0 marking saccade start (e.g. ``Saccade.time``).
     **kw
         Extra kwargs forwarded to ax.plot for the individual traces.
-        Use ``alpha`` (default 0.5) and ``lw`` (default 0.5) to control
+        Use ``alpha`` (default 0.5) and ``lw`` (default 1.0) to control
         trace opacity and line width.
 
     Returns
@@ -339,26 +358,96 @@ def plot_line(ax, xs, ys, color, summary_func=None, ci=False,
     """
     artists = []
     alpha = kw.pop('alpha', 0.5)
-    lw = kw.pop('lw', 0.5)
+    lw = kw.pop('lw', 1.0)
     lines = ax.plot(xs.T, ys.T, color=trace_color, lw=lw, alpha=alpha, **kw)
     artists.extend(lines)
-    if summary_func is not None:
-        mean_x = summary_func(xs, axis=0)
-        y = ys[np.isnan(ys).sum(1).argmin()]
-        white, = ax.plot(mean_x, y, color='w', lw=4, zorder=4)
-        mean_line, = ax.plot(mean_x, y, color=color, zorder=5)
-        artists.extend([white, mean_line])
-        if ci:
-            lows, highs = bootstrap_ci(xs, summary_func,
+
+    # Highlight the saccade body per trace.
+    # saccade_spans: list of (y_start, y_stop) per trace (reference-aware).
+    # saccade_durations: legacy — list of durations assuming y=0 at saccade start.
+    _spans = None
+    if saccade_spans is not None:
+        _spans = saccade_spans
+    elif saccade_durations is not None:
+        dur_arr = np.asarray(saccade_durations)
+        _spans = [(0.0, float(d)) for d in dur_arr]
+    if _spans is not None:
+        for i in range(min(len(_spans), xs.shape[0])):
+            y0, y1 = float(_spans[i][0]), float(_spans[i][1])
+            if np.isnan(y0) or np.isnan(y1):
+                continue
+            y_lo, y_hi = min(y0, y1), max(y0, y1)
+            xi, yi = xs[i], ys[i]
+            in_saccade = (yi >= y_lo) & (yi <= y_hi) & ~np.isnan(xi) & ~np.isnan(yi)
+            if in_saccade.any():
+                seg_x = np.where(in_saccade, xi, np.nan)
+                seg_y = np.where(in_saccade, yi, np.nan)
+                ln, = ax.plot(seg_x, seg_y, color=color, lw=lw * 2,
+                              alpha=0.5, zorder=2)
+                artists.append(ln)
+
+    if summary_func is None and mean_bins is None:
+        return artists
+
+    def _bin_mean(xs_sub, ys_sub):
+        """Bin-average xs along the y axis using np.nanmedian."""
+        if ylim is not None:
+            y_min, y_max = min(ylim), max(ylim)
+        else:
+            y_min = np.nanmin(ys_sub)
+            y_max = np.nanmax(ys_sub)
+        edges = np.linspace(y_min, y_max, mean_bins + 1)
+        centers = (edges[:-1] + edges[1:]) / 2
+        mx = np.full(mean_bins, np.nan)
+        for b_i in range(mean_bins):
+            # Use <= for the last bin so the maximum y value is included.
+            hi_op = np.less_equal if b_i == mean_bins - 1 else np.less
+            in_b = (ys_sub >= edges[b_i]) & hi_op(ys_sub, edges[b_i + 1])
+            vals = xs_sub[in_b]
+            valid = vals[~np.isnan(vals)]
+            if valid.size > 0:
+                mx[b_i] = np.nanmedian(valid)
+        return mx, centers
+
+    def _summary_xy(xs_sub, ys_sub):
+        """Return (mean_x, y_ref) for the summary line."""
+        if mean_bins is not None:
+            return _bin_mean(xs_sub, ys_sub)
+        mx = summary_func(xs_sub, axis=0)
+        y_ref = ys_sub[np.isnan(ys_sub).sum(1).argmin()]
+        return mx, y_ref
+
+    def _draw_summary(xs_sub, ys_sub, ls='-'):
+        if xs_sub.shape[0] == 0:
+            return
+        mean_x, y_ref = _summary_xy(xs_sub, ys_sub)
+        white, = ax.plot(mean_x, y_ref, color='w', lw=4, zorder=4)
+        ml, = ax.plot(mean_x, y_ref, color=color, zorder=5, linestyle=ls)
+        artists.extend([white, ml])
+        if ci and summary_func is not None and mean_bins is None:
+            lows, highs = bootstrap_ci(xs_sub, summary_func,
                                        confidence=confidence, n_boot=n_boot)
-            band = ax.fill_betweenx(y, lows, highs,
+            band = ax.fill_betweenx(y_ref, lows, highs,
                                     color=color, alpha=0.3,
                                     zorder=3, linewidth=0)
             artists.append(band)
+
+    if split_by_sign:
+        last_valid = np.array([
+            xs[i][~np.isnan(xs[i])][-1] if np.any(~np.isnan(xs[i])) else 0.0
+            for i in range(xs.shape[0])
+        ])
+        for mask, ls in [(last_valid >= 0, '-'), (last_valid < 0, ':')]:
+            if mask.sum() == 0:
+                continue
+            _draw_summary(xs[mask], ys[mask], ls=ls)
+    else:
+        _draw_summary(xs, ys)
     return artists
 
 
-def plot_hist2d(ax, xs, ys, color, bins=100, density=False, **kw):
+def plot_hist2d(ax, xs, ys, color, bins=100, density=False, n_contours=0,
+                contour_alpha=0.3, return_summary=False, **kw):
     """Plot a 2-D histogram with a white-to-color linear colormap.
 
     Parameters
@@ -372,6 +461,17 @@ def plot_hist2d(ax, xs, ys, color, bins=100, density=False, **kw):
         Passed to np.histogram2d.
     density : bool
         If True, normalise the histogram to a probability density.
+    n_contours : int, default 0
+        Number of KDE HDR contour levels to draw on margin axes.  These
+        are *not* drawn on the main histogram panel.  Pass via
+        ``plot_kwargs={'n_contours': N}`` in ``TrackingExperiment.plot()``.
+    contour_alpha : float, default 0.3
+        Alpha used to fill the HDR contour regions on margin axes.  Set to
+        0 to draw lines only (no fill).
+    return_summary : bool, default False
+        If True, return ``(mesh, summary_dict)`` instead of just ``mesh``.
+        ``summary_dict`` contains ``'hist'``, ``'xedges'``, ``'yedges'``,
+        ``'n_contours'``, ``'contour_alpha'``, ``'xs'``, and ``'ys'``.
     **kw
         Extra kwargs forwarded to ax.pcolormesh.  Pass ``vmax`` to fix the
         colour scale; pass ``cbar=False`` to suppress the colorbar.
@@ -379,6 +479,7 @@ def plot_hist2d(ax, xs, ys, color, bins=100, density=False, **kw):
     Returns
     -------
     mesh : QuadMesh
+        Or ``(mesh, summary_dict)`` when ``return_summary=True``.
     """
     cmap = matplotlib.colors.LinearSegmentedColormap.from_list(
         '', [(1, 1, 1), color])
@@ -389,6 +490,17 @@ def plot_hist2d(ax, xs, ys, color, bins=100, density=False, **kw):
                          cmap=cmap, vmin=0, vmax=vmax, **kw)
     if cbar:
         plt.colorbar(mesh, ax=ax)
+    if return_summary:
+        sd = {
+            'hist': hist,
+            'xedges': xedges,
+            'yedges': yedges,
+            'n_contours': n_contours,
+            'contour_alpha': contour_alpha,
+            'xs': xs,
+            'ys': ys,
+        }
+        return mesh, sd
     return mesh
 
 
@@ -427,6 +539,7 @@ def plot_trajectory2d(ax, xs, ys, color, trace_color='k', **kw):
     confidence = kw.pop('confidence', 0.84)
     alpha = kw.pop('alpha', 0.25)
     lw = kw.pop('lw', 0.5)
+    return_summary = kw.pop('return_summary', False)
     artists = []
 
     ax.set_aspect('equal', adjustable='box')
@@ -436,7 +549,11 @@ def plot_trajectory2d(ax, xs, ys, color, trace_color='k', **kw):
     trajectory = np.cumsum(d_vectors, axis=-1)
     trajectory /= trajectory.shape[-1]
     last_pos = trajectory[..., -1]
-    radii = np.linalg.norm(last_pos, axis=1)
+    # get the radii (vector strength) for all points in the trajectories
+    radii = np.linalg.norm(trajectory, axis=1)
+    last_radii = radii[..., -1]
+
+    summary_dict = {'last_pos': last_pos, 'radii': radii, 'trajectory': trajectory}
 
     lines = ax.plot(trajectory[:, 0].T, trajectory[:, 1].T,
                     lw=lw, color=trace_color, alpha=alpha, zorder=2)
@@ -446,11 +563,18 @@ def plot_trajectory2d(ax, xs, ys, color, trace_color='k', **kw):
     artists.append(scatter)
 
     if kw.get('circle'):
-        for radius in radii:
+        mean_radius = float(np.nanmean(last_radii))
+        for radius in last_radii:
             c = plt.Circle((0, 0), radius=radius,
                            color=color, alpha=0.25, fill=False, lw=0.5)
             ax.add_artist(c)
             artists.append(c)
+        # Mean circle: thick outline on top.
+        mc = plt.Circle((0, 0), radius=mean_radius,
+                        color=color, fill=False, lw=2, zorder=4)
+        ax.add_artist(mc)
+        artists.append(mc)
+        summary_dict['mean_radius'] = mean_radius
 
     if kw.get('contour'):
         cmap_overlay = matplotlib.colors.LinearSegmentedColormap.from_list(
@@ -472,16 +596,28 @@ def plot_trajectory2d(ax, xs, ys, color, trace_color='k', **kw):
             color=color, alpha=0.25, fill=True, lw=0.5, zorder=2)
         ax.add_artist(ellipse)
         artists.append(ellipse)
+        summary_dict.update({
+            'ellipse_mean': mean,
+            'ellipse_a': a,
+            'ellipse_b': b,
+            'ellipse_angle': angle,
+        })
 
     if kw.get('circ_hist'):
         angles = np.arctan2(last_pos[..., 1], last_pos[..., 0])
         hist_bins = kw.get('bins', 100)
         if isinstance(hist_bins, int):
             hist_bins = np.linspace(-np.pi, np.pi, hist_bins + 1)
-        hist, hist_bins = np.histogram(angles, bins=hist_bins, density=False)
-        # draw ring histogram as Wedge tiles (normalized within this panel)
+        # Use pre-computed, cross-panel-normalised histogram if provided by plot().
+        _precomp_hist = kw.get('_precomputed_hist', None)
+        if _precomp_hist is not None:
+            hist = _precomp_hist
+            hist_bins = kw.get('_precomputed_bins', hist_bins)
+        else:
+            hist, hist_bins = np.histogram(angles, bins=hist_bins, density=False)
+        # draw ring histogram as Wedge tiles
         ring_cmap = matplotlib.colors.LinearSegmentedColormap.from_list('', [(1, 1, 1), color])
-        max_val = hist.max() if hist.max() > 0 else 1
+        max_val = kw.get('_global_vmax', hist.max() if hist.max() > 0 else 1)
         cvals = ring_cmap(hist / max_val)
         for start, stop, cval in zip(hist_bins[:-1], hist_bins[1:], cvals):
             w = Wedge((0, 0), 1.01, start * 180 / np.pi, stop * 180 / np.pi,
@@ -512,6 +648,14 @@ def plot_trajectory2d(ax, xs, ys, color, trace_color='k', **kw):
             sc = ax.scatter(radius * np.cos(mean_angle), radius * np.sin(mean_angle),
                             color=sc_color, marker='o', s=s, zorder=z)
             artists.append(sc)
+        # Store circ_hist results in summary_dict for optional margin drawing.
+        summary_dict.update({
+            'hist': hist,
+            'bin_edges': hist_bins,
+            'mean_angle': mean_angle,
+            'lb': lb,
+            'ub': ub,
+        })
 
     if kw.get('mean_line'):
         mean_traj = np.nanmean(trajectory, axis=0)
@@ -523,6 +667,8 @@ def plot_trajectory2d(ax, xs, ys, color, trace_color='k', **kw):
                           color=color, marker='o', s=5, zorder=5)
         artists.extend([white, mean_l, sc_w, sc_c])
 
+    if return_summary:
+        return artists, summary_dict
     return artists
 
 
@@ -555,7 +701,8 @@ def plot_histogram(ax, xs, bins, color, probability=False, summary_func=None,
         density=probability, **kw)
     if summary_func is not None:
         val = summary_func(valid)
-        vline = ax.axvline(val, color=color, lw=1.5, zorder=3)
+        ax.axvline(val, color='w', lw=6, zorder=4)
+        vline = ax.axvline(val, color=color, lw=2, zorder=5)
         return n, bin_edges, patches, vline
     return n, bin_edges, patches
 
@@ -615,6 +762,295 @@ def plot_scatter(ax, xs, ys, color, jitter_std=0.0, correlation=False,
                 f"r={r:.2f} ({lower:.2f}, {upper:.2f}) {sigAsterisk(pval)}",
                 fontsize=8)
     return sc
+
+
+# ---------------------------------------------------------------------------
+# Margin resolution helpers for TrackingExperiment.plot()
+# ---------------------------------------------------------------------------
+
+_MARGIN_DEFAULTS = {
+    'line': ['line'],
+    'hist2d': ['contour'],
+    'histogram': ['histogram'],
+    'trajectory2d': ['trajectory2d'],
+    'scatter': ['histogram'],
+}
+_1D_PLOT_TYPES = {'histogram'}
+
+
+def _resolve_margin(margin, plot_type):
+    """Return a list of margin plot-type strings, or [] if the margin is disabled.
+
+    Parameters
+    ----------
+    margin : bool | str | list[str]
+        ``False`` → disabled; ``True`` → per-plot_type default;
+        ``str`` or ``list[str]`` → explicit override(s).
+    plot_type : str
+        Main plot type (used to look up defaults and enforce 1-D restriction).
+
+    Returns
+    -------
+    list[str]
+    """
+    if margin is False or margin is None:
+        return []
+    if margin is True:
+        return list(_MARGIN_DEFAULTS.get(plot_type, ['line']))
+    types = [margin] if isinstance(margin, str) else list(margin)
+    if plot_type in _1D_PLOT_TYPES:
+        valid = [t for t in types if t in ('line', 'histogram')]
+        dropped = [t for t in types if t not in valid]
+        if dropped:
+            import warnings as _w
+            _w.warn(
+                f"Margin type(s) {dropped!r} are not valid for "
+                f"plot_type={plot_type!r} (1-D output). Dropping.",
+                stacklevel=3,
+            )
+        types = valid
+    return types
+
+
+def _draw_margin_cell(margin_ax, mtype, xs, ys, color, dim,
+                      summary_func, bins, probability,
+                      confidence_interval, confidence, n_boot,
+                      plot_type, summary_dict, n_overlays,
+                      overlay_index=0):
+    """Draw one cell's contribution into a margin axis.
+
+    Parameters
+    ----------
+    margin_ax : Axes or None
+    mtype : str  — 'line', 'histogram', 'scatter', 'circ_hist', 'contour',
+        or 'trajectory2d'
+    xs, ys : ndarray or None
+        Cell data as cached by TrackingExperiment.plot().
+    color : color spec
+    dim : 'right' or 'bottom'
+    summary_func : callable
+    bins : int or array-like
+    probability : bool
+    confidence_interval : bool
+    confidence : float
+    n_boot : int
+    plot_type : str  — main-panel plot type (used to select trajectory logic)
+    summary_dict : dict or None  — from plot_trajectory2d(return_summary=True)
+    n_overlays : int  — number of cells sharing this margin (controls alpha)
+    overlay_index : int, default 0
+        Zero-based index of this cell among all cells sharing the margin.
+        Used by the 'trajectory2d' mtype to stack concentric CI arcs.
+    """
+    if margin_ax is None or xs is None:
+        return
+    alpha_overlay = max(0.2, 1.0 / max(1, n_overlays))
+
+    if mtype == 'line':
+        if plot_type == 'trajectory2d':
+            # Radial distance vs time (y) for the trajectory margin.
+            if summary_dict is None or ys is None or ys.ndim < 2:
+                return
+            trajectory = summary_dict.get('trajectory')
+            if trajectory is None:
+                return
+            dist = np.linalg.norm(trajectory, axis=1)
+            y_axis = ys[np.isnan(ys).sum(1).argmin()]
+            margin_ax.plot(dist.T, ys.T, color=color, lw=0.5, alpha=alpha_overlay)
+            mean_dist = np.nanmean(dist, axis=0)
+            margin_ax.plot(mean_dist, y_axis, color='w', lw=3, zorder=3)
+            margin_ax.plot(mean_dist, y_axis, color=color, lw=2, zorder=4)
+        elif xs.ndim == 2 and ys is not None and ys.ndim == 2:
+            mean_x = summary_func(xs, axis=0)
+            y = ys[np.isnan(ys).sum(1).argmin()]
+            margin_ax.plot(mean_x, y, color=color, zorder=1)
+            if confidence_interval:
+                lows, highs = bootstrap_ci(xs, summary_func,
+                                           confidence=confidence, n_boot=n_boot)
+                margin_ax.fill_betweenx(y, lows, highs,
+                                        color=color, alpha=0.3,
+                                        zorder=2, linewidth=0)
+
+    elif mtype == 'histogram':
+        # Right margin: distribution of y-values, count on x-axis.
+        # Bottom margin: distribution of x-values, count on y-axis.
+        data = (ys if dim == 'right' else xs)
+        if data is None:
+            return
+        flat = data.flatten() if data.ndim > 1 else np.asarray(data)
+        flat = flat[~np.isnan(flat)]
+        if flat.size == 0:
+            return
+        counts, edges = np.histogram(flat, bins=bins)
+        if probability:
+            counts = counts / max(counts.sum(), 1)
+        mid_points = (edges[:-1] + edges[1:]) / 2
+        if dim == 'right':
+            margin_ax.step(counts, mid_points, color=color, where='mid',
+                           alpha=alpha_overlay)
+        else:
+            margin_ax.step(mid_points, counts, color=color, where='mid',
+                           alpha=alpha_overlay)
+
+    elif mtype == 'scatter':
+        if summary_dict is None:
+            return
+        last_pos = summary_dict.get('last_pos')
+        if last_pos is None:
+            return
+        # right: x=endpoint-x (new), y=endpoint-y (shared with main)
+        # bottom: x=endpoint-x (shared with main), y=endpoint-y (new)
+        margin_ax.scatter(last_pos[:, 0], last_pos[:, 1],
+                          color=color, s=1, alpha=alpha_overlay,
+                          edgecolors='none')
+
+    elif mtype == 'circ_hist':
+        if summary_dict is None:
+            return
+        hist = summary_dict.get('hist')
+        bin_edges = summary_dict.get('bin_edges')
+        if hist is None or bin_edges is None:
+            return
+        mid_points = (bin_edges[:-1] + bin_edges[1:]) / 2
+        if dim == 'right':
+            margin_ax.step(hist, mid_points, color=color,
+                           where='mid', alpha=alpha_overlay)
+        else:
+            margin_ax.step(mid_points, hist, color=color,
+                           where='mid', alpha=alpha_overlay)
+
+    elif mtype == 'trajectory2d':
+        # Mirror the main-panel trajectory2d summary objects onto the margin.
+        # Priority:
+        #   1. circ_hist — draw a confidence arc on a unit circle, with each
+        #      overlay stacked at a different radius (concentric).
+        #      The mean-angle dot is drawn at the same radius.
+        #   2. mean_line only — draw the mean 2-D trajectory on the margin.
+        #   3. Fallback — scatter of endpoint positions.
+        if summary_dict is None:
+            return
+        from matplotlib.patches import Arc as _Arc
+        mean_angle = summary_dict.get('mean_angle')
+        lb = summary_dict.get('lb')
+        ub = summary_dict.get('ub')
+        trajectory = summary_dict.get('trajectory')
+        last_pos = summary_dict.get('last_pos')
+        arc_gap = 0.14  # radial spacing between concentric overlays
+        mean_radius = summary_dict.get('mean_radius')
+        ellipse_mean = summary_dict.get('ellipse_mean')
+        ellipse_a = summary_dict.get('ellipse_a')
+        ellipse_b = summary_dict.get('ellipse_b')
+        ellipse_angle = summary_dict.get('ellipse_angle')
+        if mean_angle is not None and lb is not None and ub is not None:
+            # circ_hist path — concentric CI arcs.
+            base_r = 1.0
+            radius = base_r + overlay_index * arc_gap
+            margin_ax.set_aspect('equal', adjustable='box')
+            for arc_color, lw, zo in [('w', 4, 4), (color, 2, 5)]:
+                arc = _Arc((0, 0),
+                           width=2 * radius, height=2 * radius,
+                           angle=0,
+                           theta1=np.degrees(lb), theta2=np.degrees(ub),
+                           color=arc_color, lw=lw, zorder=zo,
+                           capstyle='round')
+                margin_ax.add_artist(arc)
+            for sc_color, s, zo in [('w', 40, 4), (color, 20, 5)]:
+                margin_ax.scatter(
+                    radius * np.cos(mean_angle),
+                    radius * np.sin(mean_angle),
+                    color=sc_color, marker='o', s=s, zorder=zo)
+            # Expand limits to show all concentric arcs.
+            max_r = base_r + (n_overlays - 1) * arc_gap + 0.08
+            margin_ax.set_xlim(-max_r, max_r)
+            margin_ax.set_ylim(-max_r, max_r)
+            # Flag this axis so the post-loop sync step skips it.
+            margin_ax._traj2d_circ_hist = True
+        elif mean_radius is not None:
+            # circle path — draw mean circle on the margin (same x/y bounds as main).
+            margin_ax.set_aspect('equal', adjustable='box')
+            mc = plt.Circle((0, 0), radius=mean_radius,
+                            color=color, fill=False, lw=2,
+                            alpha=alpha_overlay, zorder=3)
+            margin_ax.add_artist(mc)
+        elif ellipse_mean is not None:
+            # contour path — draw the confidence ellipse at 1/n_overlays opacity.
+            ellipse_alpha = max(0.1, 1.0 / max(1, n_overlays))
+            el = matplotlib.patches.Ellipse(
+                ellipse_mean,
+                2 * ellipse_a, 2 * ellipse_b,
+                angle=np.degrees(ellipse_angle),
+                color=color, alpha=ellipse_alpha,
+                fill=True, lw=0.5, zorder=2)
+            margin_ax.add_artist(el)
+            margin_ax.set_aspect('equal', adjustable='box')
+        elif trajectory is not None:
+            # mean_line path — draw mean 2-D trajectory.
+            mean_traj = np.nanmean(trajectory, axis=0)
+            margin_ax.plot(mean_traj[0], mean_traj[1],
+                           color=color, lw=1.5, alpha=alpha_overlay, zorder=3)
+            margin_ax.scatter(mean_traj[0, -1], mean_traj[1, -1],
+                              color=color, marker='o', s=8, zorder=4)
+        elif last_pos is not None:
+            # Fallback: endpoint scatter.
+            margin_ax.scatter(last_pos[:, 0], last_pos[:, 1],
+                              color=color, s=1, alpha=alpha_overlay,
+                              edgecolors='none')
+
+    elif mtype == 'contour':
+        # Draw a KDE-based HDR contour on the margin axis.
+        # Bandwidth is chosen by Scott's rule (scipy default: n^{-1/(d+4)},
+        # optimal for unimodal near-Gaussian data).
+        # The contour level is the 50th percentile of the density evaluated
+        # at the data points — this encloses the ~50% highest-density region.
+        # For n_contours > 1 multiple HDR levels are drawn (wide → narrow).
+        if summary_dict is None:
+            return
+        xs_raw = summary_dict.get('xs')
+        ys_raw = summary_dict.get('ys')
+        xedges = summary_dict.get('xedges')
+        yedges = summary_dict.get('yedges')
+        if xs_raw is None or ys_raw is None or xedges is None or yedges is None:
+            return
+        valid = ~(np.isnan(xs_raw) | np.isnan(ys_raw))
+        xv, yv = xs_raw[valid], ys_raw[valid]
+        if xv.size < 5:
+            return
+        try:
+            from scipy.stats import gaussian_kde
+            kde = gaussian_kde(np.vstack([xv, yv]))  # Scott's rule by default
+            xcen = (xedges[:-1] + xedges[1:]) / 2
+            ycen = (yedges[:-1] + yedges[1:]) / 2
+            XX, YY = np.meshgrid(xcen, ycen)
+            ZZ = kde(np.vstack([XX.ravel(), YY.ravel()])).reshape(XX.shape)
+            # HDR levels: evaluate kde at data points, use percentiles so that
+            # each level encloses a known fraction of the data mass.
+            kde_at_data = kde(np.vstack([xv, yv]))
+            n_req = summary_dict.get('n_contours') or 1
+            if n_req == 1:
+                pcts = [50]
+            else:
+                # e.g. n_req=3 → [10, 30, 50] → 90%, 70%, 50% HDR
+                pcts = np.linspace(100 / (n_req + 1), 50, n_req)
+            levels = np.unique(np.percentile(kde_at_data, pcts))
+            if levels.size == 0:
+                return
+            contour_alpha = summary_dict.get('contour_alpha', 0.3)
+            cmap = matplotlib.colors.LinearSegmentedColormap.from_list(
+                '', [(1, 1, 1), color])
+            norm = matplotlib.colors.Normalize(
+                vmin=levels[0], vmax=ZZ.max())
+            if contour_alpha and contour_alpha > 0:
+                fill_levels = np.concatenate([levels, [ZZ.max() * 1.001]])
+                margin_ax.contourf(xcen, ycen, ZZ,
+                                   levels=fill_levels,
+                                   cmap=cmap,
+                                   norm=norm,
+                                   alpha=contour_alpha)
+            margin_ax.contour(xcen, ycen, ZZ,
+                              levels=levels,
+                              colors=[color],
+                              linewidths=0.8)
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -2087,6 +2523,640 @@ class TrackingExperiment():
         for trial in self.trials:
             trial.butterworth_filter(key, low, high, sample_rate)
             trial.__setattr__(key, trial.__getattribute__(key+"_smoothed"))
+
+    def plot(self, xvar, yvar=None, col_var=None, row_var=None,
+             plot_type='line', object='trial',
+             row_cmap=None, col_cmap=None, color='k',
+             right_margin=True, bottom_margin=True,
+             xlim=None, ylim=None, xticks=None, yticks=None,
+             logx=False, logy=False, display=None,
+             summary_func=np.nanmean, xlabel=None, ylabel=None,
+             scale=1.5, bins=100, density=False, probability=False,
+             omit_wrap=True, confidence_interval=False, confidence=0.84,
+             n_boot=1000, groupby=None, agg_func=None,
+             positive_amplitude=False, min_speed=None, max_speed=None,
+             show_n=False, relative_to='start',
+             right_margin_xlim=None, right_margin_ylim=None,
+             bottom_margin_xlim=None, bottom_margin_ylim=None,
+             plot_kwargs=None, **query_kwargs):
+        """Unified grid-plot entry point for TrackingExperiment.
+
+        Parameters
+        ----------
+        xvar : str
+            Variable for each panel's x-axis. For
+            ``object='saccade', plot_type='line'``, this must be a
+            time-series attribute of ``Saccade`` (e.g. ``'arr_relative'``).
+        yvar : str or None
+            Variable for each panel's y-axis. Not used by
+            ``plot_type='trajectory2d'``; ignored by ``plot_type='histogram'``.
+        col_var, row_var : str or None
+            Variables that parameterise the grid columns and rows.
+        plot_type : {'line', 'hist2d', 'trajectory2d', 'histogram', 'scatter'}
+            Drawing style per panel.
+        object : {'trial', 'saccade'}
+            Data source.  ``'saccade'`` requires ``detect_saccades()`` to
+            have been called on every trial.
+        row_cmap, col_cmap : colormap or list, optional
+            Forwarded to ``resolve_colors``.
+        color : color spec, default 'k'
+            Fallback colour when no cmap is given.
+        right_margin, bottom_margin : bool | str | list[str]
+            Margin configuration.  ``True`` → smart default per
+            ``plot_type``; ``False`` → disabled; a string or list of
+            strings selects explicit margin plot type(s) (``'line'``,
+            ``'histogram'``, ``'scatter'``, ``'circ_hist'``).
+        xlim, ylim : tuple or None
+            Forwarded to ``SummaryDisplay.format()``.
+        xticks, yticks : list or None
+            Forwarded to ``SummaryDisplay.format()``.
+        logx, logy : bool
+            Forwarded to ``SummaryDisplay.format()``.
+        display : SummaryDisplay or None
+            Provide a pre-existing display to superimpose data.
+        summary_func : callable, default np.nanmean
+            Applied along axis=0 for mean overlays and margin 'line' plots.
+        xlabel, ylabel : str or None
+            Custom axis labels; default to variable names.
+        scale : float, default 1.5
+            Controls figure size.
+        bins : int or array-like, default 100
+            Histogram bins for 'hist2d', 'histogram', and 'circ_hist'.
+        density : bool, default False
+            Normalise 'hist2d' counts to density.
+        probability : bool, default False
+            Normalise 'histogram' counts to probability.
+        omit_wrap : bool, default True
+            Insert NaNs at angular discontinuities (for 'line' plot_type).
+        confidence_interval : bool, default False
+            Add bootstrap CI shading for 'line' plot_type.
+        confidence : float, default 0.84
+            CI level for bootstrap CI and trajectory2d overlays.
+        n_boot : int, default 1000
+            Bootstrap resamples for CI.
+        groupby : {'saccade', 'test', 'trial'} or None
+            Grouping for ``object='saccade'`` scalar queries.  ``None``
+            is treated as ``'saccade'`` (flat per-saccade).
+        agg_func : callable or None
+            Aggregation applied when ``groupby`` is ``'test'`` or
+            ``'trial'``.  Default ``np.nanmean``.
+        plot_kwargs : dict, optional
+            Extra kwargs forwarded to the Phase 3 plot function
+            (e.g. ``{'circ_hist': True, 'mean_line': True}``).
+            For ``plot_type='line'`` the following keys are also consumed
+            here before forwarding: ``split_by_sign`` (bool, default False),
+            ``mean_bins`` (int or None, default None).
+        positive_amplitude : bool, default False
+            Only for ``object='saccade', plot_type='line'``.  Flip the sign
+            of any saccade trace whose last non-NaN x-value is negative so
+            all traces end positive.  Useful for comparing saccade shapes
+            regardless of direction.
+        min_speed, max_speed : float or None, default None
+            Speed filters for ``object='saccade'`` (degrees/s).  Converted
+            internally to rad/s and applied as ``peak_velocity`` subset
+            conditions.
+        show_n : bool, default False
+            Add a ``N=<groups>, n=<items>`` annotation in the bottom-right
+            corner of each trace panel.  N counts the number of groupby
+            entities (trials for ``groupby='saccade'/'trial'``, tests for
+            ``groupby='test'``; number of trials for ``object='trial'``).
+            n counts individual saccades (``object='saccade'``) or trace
+            rows (``object='trial'``).
+
+        **query_kwargs
+            Forwarded to ``self.query()``
+            (e.g. ``subset={}``, ``sort_by='test_ind'``).
+        """
+        if plot_kwargs is None:
+            plot_kwargs = {}
+        if 'subset' not in query_kwargs:
+            query_kwargs['subset'] = {}
+        if 'sort_by' not in query_kwargs:
+            query_kwargs['sort_by'] = 'test_ind'
+        subset = copy.copy(query_kwargs['subset'])
+        sort_by = query_kwargs['sort_by']
+        _groupby = 'saccade' if groupby is None else groupby
+        if agg_func is not None:
+            _agg_func = agg_func
+        elif object == 'saccade' and plot_type == 'line':
+            import scipy.stats as _scipy_stats
+            _agg_func = partial(_scipy_stats.circmean, low=-np.pi, high=np.pi)
+        else:
+            _agg_func = np.nanmean
+
+        # Build speed filter conditions for saccade object queries.
+        _speed_conditions = []
+        if object == 'saccade':
+            if min_speed is not None:
+                _speed_conditions.append(f'>={min_speed * np.pi / 180:.8f}')
+            if max_speed is not None:
+                _speed_conditions.append(f'<={max_speed * np.pi / 180:.8f}')
+
+        # ---------------------------------------------------------------- #
+        # Grid setup                                                        #
+        # ---------------------------------------------------------------- #
+        row_vals = get_grid_vals(self, row_var, subset) if row_var is not None else [None]
+        col_vals = get_grid_vals(self, col_var, subset) if col_var is not None else [None]
+        n_data_rows, n_data_cols = len(row_vals), len(col_vals)
+        color_arr = resolve_colors(row_cmap, col_cmap, row_vals, col_vals,
+                                   default_color=color)
+
+        right_margin_types = _resolve_margin(right_margin, plot_type)
+        bottom_margin_types = _resolve_margin(bottom_margin, plot_type)
+        _has_right = len(right_margin_types) > 0
+        _has_bottom = len(bottom_margin_types) > 0
+
+        num_rows = n_data_rows + (1 if _has_bottom else 0)
+        num_cols = n_data_cols + (1 if _has_right else 0)
+        figsize = (scale * (num_cols + 1), scale * (num_rows + 1))
+
+        if display is None:
+            fig = plt.figure(figsize=figsize)
+            self.display = SummaryDisplay(
+                num_rows=num_rows, num_cols=num_cols,
+                right_margin=_has_right, bottom_margin=_has_bottom, fig=fig)
+        else:
+            self.display = display
+        trace_axes = self.display.trace_axes
+
+        # ---------------------------------------------------------------- #
+        # Data-extraction closure                                           #
+        # ---------------------------------------------------------------- #
+        def _get_xs_ys(cell_subset):
+            """Return (xs, ys, extras) for one cell.
+
+            ``extras`` is a dict with optional keys:
+              'durations' : ndarray, shape (n_saccades,) — saccade durations
+                            for trace highlighting in plot_line.
+            """
+            if object == 'saccade':
+                # Inject speed conditions into a working copy of the subset.
+                eff_subset = dict(cell_subset)
+                if _speed_conditions:
+                    _ex = eff_subset.get('peak_velocity', [])
+                    if isinstance(_ex, str):
+                        _ex = [_ex]
+                    elif not isinstance(_ex, (list, tuple)):
+                        _ex = []
+                    eff_subset['peak_velocity'] = list(_ex) + _speed_conditions
+
+                if plot_type == 'line':
+                    try:
+                        saccades = self.query(
+                            object='saccade', output='saccade',
+                            subset=eff_subset, groupby='saccade')
+                    except RuntimeError:
+                        return None, None, {}
+                    if not saccades:
+                        return None, None, {}
+                    xs_list, ys_list, span_list, ref_indices = [], [], [], []
+                    for s in saccades:
+                        xv = np.array(getattr(s, xvar))
+                        yv = np.array(getattr(s, yvar))
+                        # Centre both arrays on the reference frame.
+                        if relative_to == 'peak':
+                            ref_idx = s.peak_ind
+                        elif relative_to == 'stop':
+                            ref_idx = s.stop
+                        else:  # 'start' (default)
+                            ref_idx = s.start
+                        ref_idx = min(ref_idx, len(xv) - 1)
+                        if ref_idx < len(xv):
+                            xv = xv - xv[ref_idx]
+                        if ref_idx < len(yv):
+                            ref_y = yv[ref_idx]
+                            yv = yv - ref_y
+                        else:
+                            ref_y = 0.0
+                        if positive_amplitude and np.any(~np.isnan(xv)):
+                            if xv[~np.isnan(xv)][-1] < 0:
+                                xv = -xv
+                        xs_list.append(xv)
+                        ys_list.append(yv)
+                        ref_indices.append(ref_idx)
+                        # Saccade span in shifted y-coordinates (yv is already shifted).
+                        y_start = float(yv[s.start]) if s.start < len(yv) else 0.0
+                        y_stop  = float(yv[s.stop])  if s.stop  < len(yv) else float(yv[-1])
+                        span_list.append((y_start, y_stop))
+                    if not xs_list:
+                        return None, None, {}
+                    # Align all traces so their reference frame sits at the
+                    # same column index. This ensures nanmean(axis=0) passes
+                    # through (0, 0) when the traces are centred.
+                    max_before = max(ref_indices)
+                    max_after = max(len(xs_list[i]) - 1 - ref_indices[i]
+                                    for i in range(len(xs_list)))
+                    total_len = max_before + max_after + 1
+                    if total_len == 0:
+                        return None, None, {}
+                    xs_pad = np.full((len(xs_list), total_len), np.nan)
+                    ys_pad = np.full((len(ys_list), total_len), np.nan)
+                    for i, (xv, yv) in enumerate(zip(xs_list, ys_list)):
+                        offset = max_before - ref_indices[i]
+                        xs_pad[i, offset:offset + len(xv)] = xv
+                        ys_pad[i, offset:offset + len(yv)] = yv
+                    return xs_pad, ys_pad, {'spans': span_list}
+                else:
+                    # Scalar saccade-table column queries.
+                    try:
+                        xs_raw = self.query(
+                            object='saccade', output=xvar,
+                            subset=eff_subset, groupby=_groupby,
+                            agg_func=_agg_func)
+                        xs = np.array(xs_raw, dtype=float)
+                    except RuntimeError:
+                        return None, None, {}
+                    if yvar is None:
+                        return xs, None, {}
+                    try:
+                        ys_raw = self.query(
+                            object='saccade', output=yvar,
+                            subset=eff_subset, groupby=_groupby,
+                            agg_func=_agg_func)
+                        ys = np.array(ys_raw, dtype=float)
+                    except RuntimeError:
+                        ys = None
+                    return xs, ys, {}
+
+            # --- object='trial' ---
+            xs_raw = self.query(same_size=True, output=xvar,
+                                subset=cell_subset, sort_by=sort_by)
+            xs = np.array(xs_raw)
+            if xs.ndim > 1:
+                xs = xs.reshape(-1, xs.shape[-1])
+            # Build the row-keep mask *before* filtering xs so that ys can be
+            # filtered with the same mask later (rows correspond to the same
+            # same_size-padded order: trial_0_rows, trial_1_rows, …).
+            xs_row_mask = None
+            if xs.ndim == 2 and xs.shape[0] > 0:
+                xs_row_mask = np.isnan(xs).mean(1) < 1
+                xs = xs[xs_row_mask]
+            if xs.size == 0:
+                return None, None, {}
+
+            # Query yvar for all plot types that need it (or for margins).
+            ys = None
+            if yvar is not None:
+                ys_raw = self.query(same_size=True, output=yvar,
+                                    subset=cell_subset, sort_by=sort_by)
+                ys = np.array(ys_raw)
+                if ys.ndim > 1:
+                    ys = ys.reshape(-1, ys.shape[-1])
+                # Apply the same row filter used to drop all-NaN xs rows so
+                # that xs[i] and ys[i] always correspond to the same trace.
+                if (xs_row_mask is not None and ys.ndim == 2
+                        and ys.shape[0] == xs_row_mask.shape[0]):
+                    ys = ys[xs_row_mask]
+                elif ys.ndim == 2:
+                    # Fallback: align by row count.
+                    n = xs.shape[0]
+                    if ys.shape[0] > n:
+                        ys = ys[:n]
+                    elif ys.shape[0] < n:
+                        ys = np.vstack(
+                            [ys, np.full((n - ys.shape[0], ys.shape[1]),
+                                         np.nan)])
+
+            if plot_type in ('hist2d', 'scatter'):
+                xs_f = xs.flatten()
+                ys_f = ys.flatten() if ys is not None else None
+                if ys_f is not None:
+                    valid = ~np.isnan(xs_f) & ~np.isnan(ys_f)
+                    return xs_f[valid], ys_f[valid], {}
+                return xs_f[~np.isnan(xs_f)], None, {}
+
+            if plot_type == 'histogram':
+                xs_f = xs.flatten()
+                return xs_f[~np.isnan(xs_f)], None, {}
+
+            if plot_type == 'trajectory2d':
+                return xs, ys, {}
+
+            # plot_type == 'line': optionally insert NaN at wrapping discontinuities.
+            if omit_wrap and ys is not None and ys.ndim == 2:
+                xs_w, mask = omit_wrapping(xs, return_mask=True)
+                ys_w = np.full_like(xs_w, np.nan)
+                for i in range(min(ys.shape[0], ys_w.shape[0])):
+                    vl = min(ys.shape[1], ys_w.shape[1])
+                    ys_w[i, :vl] = ys[i, :vl]
+                ys_w[~mask] = np.nan
+                return xs_w, ys_w, {}
+            return xs, ys, {}
+
+        # ---------------------------------------------------------------- #
+        # Pre-query pass: collect data + compute cross-panel normalisers   #
+        # ---------------------------------------------------------------- #
+        cell_cache = {}
+        hist2d_maxes = []
+        _ch_hists, _ch_bins_edges, _ch_keys = [], None, []
+
+        for row_i, row_val in enumerate(row_vals):
+            cell_subset = copy.copy(subset)
+            if row_var is not None:
+                cell_subset[row_var] = row_val
+            for col_i, col_val in enumerate(col_vals):
+                if col_var is not None:
+                    cell_subset[col_var] = col_val
+                xs, ys, cell_extra = _get_xs_ys(cell_subset)
+                cell_cache[(row_i, col_i)] = (xs, ys, cell_extra)
+                if xs is None or xs.size == 0:
+                    continue
+
+                if plot_type == 'hist2d' and ys is not None and ys.size > 0:
+                    h, _, _ = np.histogram2d(xs, ys, bins=bins)
+                    hist2d_maxes.append(float(h.max()))
+
+                elif plot_type == 'trajectory2d' and plot_kwargs.get('circ_hist'):
+                    xs2 = xs if xs.ndim == 2 else xs[np.newaxis]
+                    d_v = np.array([np.cos(xs2), np.sin(xs2)]).transpose(1, 0, 2)
+                    d_v[np.isnan(d_v)] = 0
+                    traj = np.cumsum(d_v, axis=-1) / xs2.shape[-1]
+                    last_p = traj[..., -1]
+                    angles = np.arctan2(last_p[..., 1], last_p[..., 0])
+                    n_cbins = plot_kwargs.get('bins', 100)
+                    if isinstance(n_cbins, int):
+                        b_edges = np.linspace(-np.pi, np.pi, n_cbins + 1)
+                    else:
+                        b_edges = np.asarray(n_cbins)
+                    _ch_bins_edges = b_edges
+                    h, _ = np.histogram(angles, bins=b_edges, density=False)
+                    _ch_hists.append(h.astype(float))
+                    _ch_keys.append((row_i, col_i))
+
+        global_hist2d_vmax = max(hist2d_maxes) if hist2d_maxes else None
+
+        circ_hist_lookup = {}
+        circ_global_vmax = None
+        if _ch_hists:
+            hists_arr = np.array(_ch_hists)
+            row_sums = hists_arr.sum(1, keepdims=True).clip(min=1)
+            norm_hists = hists_arr / row_sums
+            circ_global_vmax = float(norm_hists.max())
+            for key, nh in zip(_ch_keys, norm_hists):
+                circ_hist_lookup[key] = (nh, _ch_bins_edges)
+
+        # ---------------------------------------------------------------- #
+        # Per-cell N / n counts  (only computed when show_n=True)          #
+        # ---------------------------------------------------------------- #
+        cell_counts = {}
+        if show_n:
+            for _ri, _rv in enumerate(row_vals):
+                _cs = copy.copy(subset)
+                if row_var is not None:
+                    _cs[row_var] = _rv
+                for _ci, _cv in enumerate(col_vals):
+                    if col_var is not None:
+                        _cs[col_var] = _cv
+                    _eff = dict(_cs)
+                    if _speed_conditions:
+                        _spex = _eff.get('peak_velocity', [])
+                        if isinstance(_spex, str):
+                            _spex = [_spex]
+                        elif not isinstance(_spex, (list, tuple)):
+                            _spex = []
+                        _eff['peak_velocity'] = list(_spex) + _speed_conditions
+                    if object == 'saccade':
+                        _N, _n = 0, 0
+                        for _trial in self.trials:
+                            try:
+                                _res = _trial.query(
+                                    object='saccade', output='amplitude',
+                                    subset=_eff, groupby='saccade')
+                                if len(_res) > 0:
+                                    _N += 1
+                                    _n += len(_res)
+                            except RuntimeError:
+                                continue
+                    else:
+                        _xc = cell_cache[(_ri, _ci)][0]
+                        _n = int(_xc.shape[0]) if _xc is not None else 0
+                        _N = 0
+                        for _trial in self.trials:
+                            try:
+                                _td = _trial.query(output=xvar, subset=_cs)
+                                if hasattr(_td, 'size') and _td.size > 0:
+                                    _N += 1
+                            except Exception:
+                                continue
+                    cell_counts[(_ri, _ci)] = (_N, _n)
+
+        # ---------------------------------------------------------------- #
+        # Draw pass                                                         #
+        # ---------------------------------------------------------------- #
+        # Effective ylim used to restrict mean_bins binning to the visible
+        # range, so 10 bins spans the display window rather than the full
+        # data extent (which may be much wider).
+        _effective_bin_ylim = ylim
+        if _effective_bin_ylim is None and object == 'saccade' and plot_type == 'line':
+            _effective_bin_ylim = (0.5, -0.25)
+
+        for row_i, (row_ax_row, row_val, row_colors) in enumerate(zip(
+                trace_axes, row_vals, color_arr)):
+            cell_subset = copy.copy(subset)
+            if row_var is not None:
+                cell_subset[row_var] = row_val
+            row_summ_ax = self.display.right_col[row_i] if _has_right else None
+
+            for col_i, (ax, col_val, cell_color) in enumerate(zip(
+                    row_ax_row, col_vals, row_colors)):
+                while isinstance(ax, np.ndarray):
+                    ax = ax[0]
+                if col_var is not None:
+                    cell_subset[col_var] = col_val
+                col_summ_ax = self.display.bottom_row[col_i] if _has_bottom else None
+
+                xs, ys, cell_extra = cell_cache[(row_i, col_i)]
+                if xs is None or xs.size == 0:
+                    continue
+
+                summary_dict = None
+                kw = dict(plot_kwargs)
+
+                if plot_type == 'line':
+                    plot_line(ax, xs, ys, cell_color,
+                              summary_func=summary_func,
+                              ci=confidence_interval,
+                              confidence=confidence,
+                              n_boot=n_boot,
+                              split_by_sign=kw.pop('split_by_sign', False),
+                              mean_bins=kw.pop('mean_bins', None),
+                              ylim=_effective_bin_ylim,
+                              saccade_spans=cell_extra.get('spans'),
+                              **kw)
+
+                elif plot_type == 'hist2d':
+                    if ys is None:
+                        continue
+                    if global_hist2d_vmax is not None and 'vmax' not in kw:
+                        kw['vmax'] = global_hist2d_vmax
+                    _n_contours = kw.pop('n_contours', 0)
+                    _contour_alpha = kw.pop('contour_alpha', 0.3)
+                    result = plot_hist2d(ax, xs, ys, cell_color,
+                                        bins=bins, density=density,
+                                        n_contours=_n_contours,
+                                        contour_alpha=_contour_alpha,
+                                        return_summary=True, **kw)
+                    if isinstance(result, tuple):
+                        _, summary_dict = result
+
+                elif plot_type == 'trajectory2d':
+                    if (row_i, col_i) in circ_hist_lookup:
+                        nh, b_edges = circ_hist_lookup[(row_i, col_i)]
+                        kw['_precomputed_hist'] = nh
+                        kw['_precomputed_bins'] = b_edges
+                        kw['_global_vmax'] = circ_global_vmax
+                    kw.setdefault('confidence', confidence)
+                    kw['return_summary'] = True
+                    result = plot_trajectory2d(ax, xs, None, cell_color, **kw)
+                    if isinstance(result, tuple):
+                        _, summary_dict = result
+
+                elif plot_type == 'histogram':
+                    plot_histogram(ax, xs, bins, cell_color,
+                                   probability=probability,
+                                   summary_func=(summary_func
+                                                 if callable(summary_func)
+                                                 else None),
+                                   **kw)
+
+                elif plot_type == 'scatter':
+                    if ys is None:
+                        continue
+                    plot_scatter(ax, xs, ys, cell_color, **kw)
+
+                # Per-cell N / n annotation.
+                if show_n and (row_i, col_i) in cell_counts:
+                    _N_val, _n_val = cell_counts[(row_i, col_i)]
+                    ax.text(0.98, 0.02, f'N={_N_val}, n={_n_val}',
+                            transform=ax.transAxes,
+                            fontsize=plt.rcParams.get('xtick.labelsize',
+                                                      plt.rcParams.get('font.size', 10)),
+                            ha='right', va='bottom', color='gray', zorder=10)
+
+                # Margin drawing for this cell.
+                for mtype in right_margin_types:
+                    _draw_margin_cell(
+                        row_summ_ax, mtype, xs, ys, cell_color, 'right',
+                        summary_func, bins, probability,
+                        confidence_interval, confidence, n_boot,
+                        plot_type, summary_dict, n_data_cols,
+                        overlay_index=col_i)
+                for mtype in bottom_margin_types:
+                    _draw_margin_cell(
+                        col_summ_ax, mtype, xs, ys, cell_color, 'bottom',
+                        summary_func, bins, probability,
+                        confidence_interval, confidence, n_boot,
+                        plot_type, summary_dict, n_data_rows,
+                        overlay_index=row_i)
+
+        # ---------------------------------------------------------------- #
+        # Format and label                                                  #
+        # ---------------------------------------------------------------- #
+        _xlabel = xlabel if xlabel is not None else xvar
+        _ylabel = ylabel if ylabel is not None else (yvar or '')
+        if plot_type == 'trajectory2d':
+            _xlabel, _ylabel = 'x', 'y'
+
+        # Default axis limits for saccade line plots.
+        if object == 'saccade' and plot_type == 'line':
+            if xlim is None:
+                xlim = (-np.pi, np.pi)
+            if ylim is None:
+                ylim = (0.5, -0.25)
+
+        self.display.format(
+            xlim=xlim, ylim=ylim, xlabel=_xlabel, ylabel=_ylabel,
+            xticks=xticks, yticks=yticks, logx=logx, logy=logy)
+
+        # For trajectory2d margins using the mean_line path, the main panel
+        # axes have their limits set internally by plot_trajectory2d (not via
+        # format()), so the margin axes need to be synced manually.
+        if plot_type == 'trajectory2d' and 'trajectory2d' in (
+                right_margin_types + bottom_margin_types):
+            _ref_ax = self.display.trace_axes.flat[0]
+            _main_xlim = _ref_ax.get_xlim()
+            _main_ylim = _ref_ax.get_ylim()
+            if _has_right:
+                for _max in self.display.right_col:
+                    if _max is not None:
+                        # circ_hist arcs manage their own limits; skip those.
+                        if not getattr(_max, '_traj2d_circ_hist', False):
+                            _max.set_xlim(_main_xlim)
+                            _max.set_ylim(_main_ylim)
+                            _max.set_aspect('equal', adjustable='box')
+            if _has_bottom:
+                for _bax in self.display.bottom_row:
+                    if _bax is not None:
+                        if not getattr(_bax, '_traj2d_circ_hist', False):
+                            _bax.set_xlim(_main_xlim)
+                            _bax.set_ylim(_main_ylim)
+                            _bax.set_aspect('equal', adjustable='box')
+        # Sync non-trajectory2d margin axes shared axis to match the main panels.
+        # Right margin shares the y-axis with the main panels.
+        # Bottom margin shares the x-axis with the main panels.
+        # When the margin uses the same plot type as the main panels, the
+        # independent axis is also synced; otherwise it is left auto-scaled.
+        # The user can override any axis with right_margin_xlim / right_margin_ylim
+        # / bottom_margin_xlim / bottom_margin_ylim.
+        if _has_right or _has_bottom:
+            # Union of all main-cell axis limits for consistent reference.
+            _all_ref = list(self.display.trace_axes.flat)
+            _main_xlim = (min(a.get_xlim()[0] for a in _all_ref),
+                          max(a.get_xlim()[1] for a in _all_ref))
+            _main_ylim = (min(a.get_ylim()[0] for a in _all_ref),
+                          max(a.get_ylim()[1] for a in _all_ref))
+            _same_type_right = bool(right_margin_types) and all(
+                t == plot_type for t in right_margin_types)
+            _same_type_bottom = bool(bottom_margin_types) and all(
+                t == plot_type for t in bottom_margin_types)
+
+            if _has_right and 'trajectory2d' not in right_margin_types:
+                for _rax in self.display.right_col:
+                    if _rax is None:
+                        continue
+                    # Shared y-axis.
+                    _rax.set_ylim(
+                        right_margin_ylim if right_margin_ylim is not None
+                        else _main_ylim)
+                    # Independent x-axis.
+                    if right_margin_xlim is not None:
+                        _rax.set_xlim(right_margin_xlim)
+                    elif _same_type_right:
+                        _rax.set_xlim(_main_xlim)
+                    else:
+                        _rax.relim()
+                        _rax.autoscale_view(scalex=True, scaley=False)
+
+            if _has_bottom and 'trajectory2d' not in bottom_margin_types:
+                for _bax in self.display.bottom_row:
+                    if _bax is None:
+                        continue
+                    # Shared x-axis.
+                    _bax.set_xlim(
+                        bottom_margin_xlim if bottom_margin_xlim is not None
+                        else _main_xlim)
+                    # Independent y-axis.
+                    if bottom_margin_ylim is not None:
+                        _bax.set_ylim(bottom_margin_ylim)
+                    elif _same_type_bottom:
+                        _bax.set_ylim(_main_ylim)
+                    else:
+                        _bax.relim()
+                        _bax.autoscale_view(scalex=False, scaley=True)
+
+        # Override the auto-assigned ylabel/xlabel on histogram margin axes:
+        # format() propagates the main plot's y/x label to margin axes, but
+        # histogram margins show counts, not the original variable.
+        _count_label = 'probability' if probability else 'count'
+        if _has_bottom and 'histogram' in bottom_margin_types:
+            for _bax in self.display.bottom_row:
+                if _bax is not None:
+                    _bax.set_ylabel(_count_label)
+        if _has_right and 'histogram' in right_margin_types:
+            for _rax in self.display.right_col:
+                if _rax is not None:
+                    _rax.set_xlabel(_count_label)
+        self.display.label_margins(row_vals, row_var, col_vals, col_var)
 
     def plot_saccades(self, col_var, row_var, output_var='camera_heading', time_var='time', start=0, 
                       stop=.5, row_cmap=None, col_cmap=None, 
@@ -4401,6 +5471,15 @@ class TrackingTrial():
                     for i in range(n)
                 ]
 
+        # Ensure surgical-save bookkeeping attrs exist (may be absent when the
+        # trial was constructed via __new__ + load_datasets() without __init__).
+        if not hasattr(self, '_pending_vars'):
+            self._pending_vars = {}
+        if not hasattr(self, '_removed_vars'):
+            self._removed_vars = set()
+        if not hasattr(self, '_dirty_attrs'):
+            self._dirty_attrs = False
+
     def get_saccade_stats(self, key='camera_heading', time_var='time', rerun=False, **saccade_kwargs):
         """List saccades for each trial using peak angular velocities.
         
@@ -4777,6 +5856,9 @@ class TrackingTrial():
                     'stop_angle':       float(saccade.stop_angle),
                 })
         self.saccade_table = rows
+        # Record which variable was used for detection so on-demand Saccade
+        # reconstruction uses the same array (see query / _row_to_value).
+        self.saccade_heading_variable = key
         # Invalidate any cached Saccade objects so the next query rebuilds them.
         self.saccades = None
         self._saccade_id_to_index = None
@@ -4920,7 +6002,8 @@ class TrackingTrial():
                 if output == 'saccade':
                     # Build the full Saccade cache on first access.
                     if not getattr(self, 'saccades', None):
-                        heading = self.query('camera_heading')  # (num_tests, num_frames)
+                        _saccade_key = getattr(self, 'saccade_heading_variable', 'camera_heading')
+                        heading = self.query(_saccade_key)  # (num_tests, num_frames)
                         self.saccades = [
                             Saccade(
                                 heading[r['test_ind']], self, r['test_ind'], self.framerate,
@@ -6041,6 +7124,7 @@ class Saccade():
             self.peak_time = new_times[peak_ind]
             self.relative_time = np.copy(self.time)
             self.relative_time -= self.peak_time
+            self.start_relative_time = np.copy(self.time)  # matches arr_relative reference
             # measure the max velocity from the few frames before the start and use as a threshold 
             # for the start of the saccade
             velos_included = self.velocity[start_frame:self.start]
@@ -6136,6 +7220,7 @@ class Saccade():
                             self.peak_time = new_times[peak_ind]
                             self.relative_time = np.copy(self.time)
                             self.relative_time -= self.peak_time
+                            self.start_relative_time = np.copy(self.time)  # matches arr_relative reference
                         else:
                             # try:    
                             peak_ind = np.argmax(abs(self.velocity[self.start: self.stop]))
@@ -6146,6 +7231,7 @@ class Saccade():
                             self.peak_time = self.time[self.start: self.stop][peak_ind]
                             self.relative_time = np.copy(self.time)
                             self.relative_time -= self.peak_time
+                            self.start_relative_time = np.copy(self.time)  # matches arr_relative reference
                         if self.stop - self.start < 2 or self.duration > 1.5:
                             self.success = False
                         # optionally, check if the new peak velocity is within the bounds
@@ -6169,6 +7255,7 @@ class Saccade():
             self.peak_time = self.time[self.start: self.stop][peak_ind]
             self.relative_time = np.copy(self.time)
             self.relative_time -= self.peak_time
+            self.start_relative_time = np.copy(self.time)  # matches arr_relative reference
 
     def query(self, output='heading', time_var='time', start=0, stop=0):
         """Grab the saccade data between the start and stop times.

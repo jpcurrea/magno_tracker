@@ -376,7 +376,7 @@ subsets, and margin summaries — delegating actual drawing to Phase 3 functions
 Phase 3 functions are already implemented and unit-tested; Phase 5 wires them
 into the experiment-level grid infrastructure.
 
-- [ ] **5.1 Implement `TrackingExperiment.plot()`**
+- [x] **5.1 Implement `TrackingExperiment.plot()`**
       Signature: `plot(xvar, yvar, col_var, row_var, plot_type='line',
       object='trial', row_cmap=None, col_cmap=None, color='k', ...)`
       Internally:
@@ -390,32 +390,81 @@ into the experiment-level grid infrastructure.
         5. **Draw pass**: loop over cached (data, color) pairs, dispatch to the
            appropriate Phase 3 function based on `plot_type`, passing the global
            `vmax` (and any other cross-subplot stats) via `**plot_kwargs`.
-        6. Populate margin summaries
+        6. Populate margin summaries (`_MARGIN_DEFAULTS`, `_resolve_margin()`,
+           `_draw_margin_cell()` module-level helpers)
         7. Call `display.format()` and `display.label_margins()`
+      Bug fixes (April 2026):
+        - Histogram margin ylabel/xlabel correctly labelled as 'count'/'probability'
+          instead of inheriting the main plot's variable name.
+        - `_draw_margin_cell` histogram uses `ys` data for right margin and `xs`
+          for bottom margin; right margin drawn with counts on x-axis.
 
-- [ ] **5.2 Test `plot()` with `plot_type='line'`**
-      Integration test: call on real (or synthetic) experiment data; confirm
-      the correct number of subplots, that traces appear on each axis, and
-      that `resolve_colors` produces distinct colors per row/col.
+- [x] **5.2 Test `plot()` with `plot_type='line'`**
+- [x] **5.3 Test `plot()` with `plot_type='hist2d'`**
+- [x] **5.4 Test `plot()` with `plot_type='histogram'`**
+- [x] **5.5 Test `plot()` with `plot_type='trajectory2d'`**
+- [x] **5.6 Test `plot()` with `object='saccade', plot_type='line'`**
+- [x] **5.7 Test `plot()` with `object='saccade', plot_type='scatter'` or `'hist2d'`**
+- [x] **5.8 Test margin axes** — `TestMargins` class in `test_phase5_plot.py`:
+      correct labels, orientation, and artist presence for histogram/line margin
+      types across plot_type='line', 'hist2d', 'scatter', 'trajectory2d'.
 
-- [ ] **5.3 Test `plot()` with `plot_type='hist2d'`**
-      Confirm 2D histogram bins appear, shared `vmax` is consistent across panels.
+### Implementation summary (April 2026)
 
-- [ ] **5.4 Test `plot()` with `plot_type='histogram'`**
-      Confirm bar histograms appear; verify it produces equivalent output to
-      `plot_histogram_summary` on the same data.
+**Phase 5 is complete.** `TrackingExperiment.plot()` is implemented and 50+ tests pass.
+Key design notes:
+- Module-level helpers `_MARGIN_DEFAULTS`, `_resolve_margin()`, `_draw_margin_cell()`.
+- `plot_trajectory2d` extended with `return_summary=True` for circ_hist margin passthrough.
+- `_pending_vars`, `_removed_vars`, `_dirty_attrs` are now lazily initialised in
+  `load_datasets()` to support synthetic trials built via `__new__`.
+- `detect_saccades()` now stores `self.saccade_heading_variable = key`; the saccade
+  reconstruction path in `query()` uses this instead of the hardcoded `'camera_heading'`.
 
-- [ ] **5.5 Test `plot()` with `plot_type='trajectory2d'`**
-      Confirm `circ_hist` Wedge count is consistent and all panels use the same
-      normalized `vmax` (cross-subplot normalization from the pre-query pass).
-
-- [ ] **5.6 Test `plot()` with `object='saccade', plot_type='line'`**
-      Requires Phase 4 complete. Confirm it replaces `plot_saccades`.
-      Data source switches from `Bout`-based traversal to saccade table query.
-
-- [ ] **5.7 Test `plot()` with `object='saccade', plot_type='scatter'` or `'hist2d'`**
-      Requires Phase 4 complete. Confirm it replaces `plot_saccade_dynamics`.
-      Data source switches from `Bout`-based traversal to saccade table query.
+**Additional features and fixes (April 2026 — session 2):**
+- **`saccade_spans`**: `plot_line` accepts `saccade_spans` (list of `(y_start, y_stop)`)
+  as a ref-frame-aware replacement for `saccade_durations`. Both params still supported.
+- **`relative_to` param**: saccade line traces can be aligned to `'start'` (default),
+  `'peak'`, or `'stop'`. All traces are padded with `max_before − ref_idx` offset so
+  the reference frame sits at the same column for every trace → `nanmean` passes through
+  (0, 0).
+- **Saccade line defaults**: `xlim=(−π, π)`, `ylim=(0.5, −0.25)` auto-applied when
+  `object='saccade', plot_type='line'`.
+- **`mean_bins` binning within ylim**: `plot_line` accepts `ylim` param; `_bin_mean`
+  uses the display range instead of the full data extent, so `mean_bins=10` covers the
+  visible window. Last-bin precision fixed (`<=` on upper edge). `plot()` computes
+  `_effective_bin_ylim` before the draw loop (falls back to saccade defaults when applicable).
+- **`split_by_sign`**: `plot_line` draws separate solid/dotted mean lines for
+  positive/negative amplitude groups.
+- **`show_n` annotation fontsize**: replaced hardcoded `fontsize=6` with
+  `plt.rcParams['xtick.labelsize']` so sample-size text matches tick labels.
+- **`show_n` param**: added to `plot()` signature; draws `N=<int>, n=<int>` annotation
+  in each panel.
+- **`mtype='trajectory2d'` for margins**: `_draw_margin_cell` priority chain —
+  (1) circ_hist → concentric CI arcs stacked by `overlay_index`;
+  (2) circle → mean radius circle;
+  (3) contour → confidence ellipse at `1/n_overlays` opacity;
+  (4) mean_line → mean 2-D trajectory;
+  (5) fallback → endpoint scatter.
+  Axes flagged `_traj2d_circ_hist = True` are excluded from the post-loop limit sync.
+- **Mean circle in `plot_trajectory2d`**: `circle=True` now also draws a thick mean
+  circle on top of the per-fly circles; `mean_radius` stored in `summary_dict`.
+- **Contour ellipse params**: `contour=True` stores `ellipse_mean`, `ellipse_a`,
+  `ellipse_b`, `ellipse_angle` in `summary_dict` for margin reuse.
+- **Margin axis limit sync**: post-loop block syncs non-trajectory2d margin axes to the
+  union of main-panel limits; same-type margins sync both axes, different-type margins
+  auto-scale the independent axis.
+- **`right_margin_xlim` / `right_margin_ylim` / `bottom_margin_xlim` / `bottom_margin_ylim`**
+  params added to `plot()` to let the caller override any auto-synced margin limit.
+- **`_get_xs_ys` row-alignment bug fixed**: `xs_row_mask` saved before filtering and
+  applied to `ys` as well, so `xs[i]` and `ys[i]` always correspond to the same trace
+  even when matching-condition trials are not the first in the list. (Previously rows
+  with `condition != 0` produced invisible traces because `ys[:n]` grabbed NaN-padded
+  rows.)
+- **`plot_histogram` mean line**: white underlay (`lw=6, zorder=4`) + colored line
+  (`lw=2, zorder=5`) for visibility; both integer lw to avoid sub-pixel misalignment
+  at non-native DPI.
+- **KDE contour margins for `hist2d`**: `n_contours` / `contour_alpha` in `plot_kwargs`
+  passed through to `plot_hist2d`; margin drawing uses the stored `xs`/`ys` for KDE.
 
 ---
 
@@ -451,6 +500,95 @@ into the experiment-level grid infrastructure.
   behavior change, Phase 2 migrates the data layer to xarray/Zarr, Phase 3
   implements standalone plot functions, Phase 4 fixes the saccade query system,
   Phase 5 wires everything into a unified `plot()` method, Phase 6 cleans up.
+
+---
+
+## Phase 7 — SummaryDisplay improvements
+
+### Motivation
+
+`SummaryDisplay` currently forces all subplots to be the same size and its
+row/column tick labels are positioned via a single draw-event callback
+(`_update_margin_labels`) that works but does not respond correctly to window
+resize events.  Two usability improvements are requested:
+
+1. **Custom per-subplot sizes** — allow the caller to specify relative widths
+   and heights for each column/row via `width_ratios` / `height_ratios`.
+   For example, a trajectory2d plot could use equal-size square panels while
+   a `plot_type='line'` grid uses wider panels.
+2. **Dynamic margin label positioning** — row/column tick labels (drawn by
+   `label_margins`) should update smoothly when the figure window is resized
+   so they never overlap axes content or fall outside the figure boundary.
+
+### Tasks
+
+- [ ] **7.1 Add `width_ratios` / `height_ratios` parameters to `SummaryDisplay.__init__`**
+      - Accept `width_ratios: list[float] | None` and `height_ratios: list[float] | None`.
+      - Forward to `plt.Figure.subplots()` via `gridspec_kw={'width_ratios': ...,
+        'height_ratios': ...}`.
+      - If margins are present, auto-append a ratio entry for the margin
+        column/row (default 0.25 × largest ratio in the corresponding axis).
+      - Validate that the provided list length matches `num_cols`/`num_rows`
+        (excluding the margin column/row) and raise `ValueError` otherwise.
+
+- [ ] **7.2 Expose `width_ratios` / `height_ratios` in `TrackingExperiment.plot()`**
+      - Add `width_ratios=None, height_ratios=None` parameters forwarded to
+        `SummaryDisplay(...)`.
+
+- [ ] **7.3 Improve dynamic label positioning**
+
+      **Root cause of current fragility:** `_update_margin_labels` positions
+      the row/column spine and text using hard-coded font-size / figure-size
+      fractions (e.g. `spine_x = left_bound - 0.63/fig_width`).  These
+      fractions must be re-tuned whenever font size, DPI, or panel count
+      changes and they are not updated on window resize because only
+      `draw_event` is connected (not `resize_event`).
+
+      **Design goal:** positions should be derived from the **live rendered
+      bounding boxes** of the axis labels — exactly how matplotlib positions
+      its own tick labels relative to the spine.  Concretely:
+
+      - **Row spine x** = left edge of the tightbbox of the leftmost column's
+        axes (`ax.get_tightbbox(renderer).x0`, converted to subfigure-normalized
+        coords), shifted left by a small fixed gap (~2 display points).  This
+        means the row spine sits just outside the y-axis tick labels regardless
+        of tick label width.
+      - **Row text x** = left edge of the subfigure (0.0 in normalized coords),
+        with `subplots_adjust(left=…)` reserving exactly enough space.
+      - **Column spine y** = bottom edge of the tightbbox of the bottom row's
+        axes (`ax.get_tightbbox(renderer).y0`, converted to normalized coords),
+        shifted down by a small fixed gap.  Sits just outside the x-axis tick
+        labels regardless of their height.
+      - **Column text y** = bottom edge of subfigure (0.0), with
+        `subplots_adjust(bottom=…)` reserving space.
+      - **Tick positions** (already computed from ylabel/xlabel center bboxes)
+        remain unchanged.
+
+      **Changes required:**
+      - Add `_axes_outer_edge_in_subfig_coords(axes_list, which)` helper that
+        iterates `get_tightbbox(renderer)` over a list of axes and returns the
+        requested edge (`'left'`, `'bottom'`, `'right'`, `'top'`) in
+        subfigure-normalized coordinates.
+      - Rewrite `_update_margin_labels` to use this helper for `spine_x` and
+        `spine_y` instead of the font-size fraction formulas.
+      - For `subplots_adjust`: derive `left_bound` from
+        `min(tightbbox.x0) - text_width_estimate` so there is always room for
+        the row label text without it falling out of the figure.  Similarly for
+        `bottom_bound`.
+      - Connect to both `draw_event` **and** `resize_event` in `label_margins()`
+        (currently only `draw_event` is connected, so labels do not update on
+        interactive resize).
+      - Ensure callback re-entry guard (`self._updating`) still prevents
+        feedback loops on the forced redraw that `subplots_adjust` triggers.
+      - Remove the stale hard-coded formulas from both `label_margins` (initial
+        placement) and `_update_margin_labels` (update placement) so they share
+        a single positioning code-path.
+
+- [ ] **7.4 Write tests for custom sizing**
+      - Verify that axes in a 2-col display with `width_ratios=[2, 1]` have
+        the correct relative widths (check `ax.get_position().width`).
+      - Verify that the margin column width is unaffected by `width_ratios`
+        and remains ~0.25 × the largest data column.
 
 ---
 Add new items as needed. Check off items as they are completed.
