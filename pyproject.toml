@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "magno_tracker"
+version = "2.0.0"
+description = "Analysis library for plume-tracking experiments: saccade detection, xarray-backed data querying, and unified plotting."
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = [
+    "h5py",
+    "h5netcdf",
+    "matplotlib",
+    "numpy<2",
+    "pandas",
+    "scikit-image",
+    "scipy",
+    "seaborn",
+    "xarray",
+    "zarr",
+]
+
+[project.optional-dependencies]
+# Video tracking features (scikit-video and camera must be installed separately
+# if not available on PyPI in your environment).
+video = ["scikit-video"]
+dev = ["pytest"]
+
+# ---------------------------------------------------------------------------
+# Package discovery
+# ---------------------------------------------------------------------------
+# The repository root IS the package directory (contains __init__.py).
+# Tell setuptools to map the "magno_tracker" package to ".".
+[tool.setuptools]
+packages = ["magno_tracker"]
+
+[tool.setuptools.package-dir]
+"magno_tracker" = "."
+
+# Exclude generated/test artefacts from the installed package data.
+[tool.setuptools.package-data]
+"magno_tracker" = ["py.typed"]
+
+# ---------------------------------------------------------------------------
+# Pytest configuration (replaces the standalone pytest.ini files)
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+addopts = "-p no:napari"
+testpaths = ["tests"]

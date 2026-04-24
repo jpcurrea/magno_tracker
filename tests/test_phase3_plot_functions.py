@@ -208,7 +208,8 @@ class TestPlotTrajectory2d:
         fig, ax = make_ax()
         arts = plot_trajectory2d(ax, xs, None, color='g', circle=True)
         circles = [a for a in arts if isinstance(a, plt.Circle)]
-        assert len(circles) == 4
+        # 4 per-trace circles + 1 mean circle
+        assert len(circles) == 5
         plt.close(fig)
 
     def test_contour_adds_ellipse(self):

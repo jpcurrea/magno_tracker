@@ -1,2 +1,27 @@
-*.ini
+# Python bytecode
 *.pyc
+*.pyo
+__pycache__/
+*.pyd
+
+# Packaging / build artefacts
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# pytest config files and caches (config lives in pyproject.toml now)
+*.ini
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Editor / OS artefacts
+.DS_Store
+Thumbs.db
+
+# Test-generated plot outputs (visual inspection artefacts, not checked in)
+tests/plot_outputs/

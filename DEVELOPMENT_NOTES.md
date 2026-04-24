@@ -1,6 +1,6 @@
-# NOTE: When working through this todo list, changes should be made step-by-step. Discuss each step and check for conceptual errors before making code changes. This workflow should be followed in future sessions with an LLM to ensure correctness and maintainability.
+### NOTE: When working through this todo list, changes should be made step-by-step. Discuss each step and check for conceptual errors before making code changes. This workflow should be followed in future sessions with an LLM to ensure correctness and maintainability.
 
-# CONSTRAINT: Lazy loading (xr.open_dataset) is a hard requirement for most of the library. Do NOT switch to eager loading (xr.load_dataset) as a solution to file-handle conflicts or save/overwrite bugs — lazy loading must be preserved. Any fixes to file-handle issues must work within the lazy-loading model (e.g. explicitly closing handles before writing, writing to a temp path then renaming, etc.).
+### CONSTRAINT: Lazy loading (xr.open_dataset) is a hard requirement for most of the library. Do NOT switch to eager loading (xr.load_dataset) as a solution to file-handle conflicts or save/overwrite bugs — lazy loading must be preserved. Any fixes to file-handle issues must work within the lazy-loading model (e.g. explicitly closing handles before writing, writing to a temp path then renaming, etc.).
 
 # tracking.py Refactor & Feature Additions Todo
 
@@ -543,73 +543,82 @@ resize events.  Two usability improvements are requested:
 
 ### Tasks
 
-- [ ] **7.1 Add `width_ratios` / `height_ratios` parameters to `SummaryDisplay.__init__`**
-      - Accept `width_ratios: list[float] | None` and `height_ratios: list[float] | None`.
-      - Forward to `plt.Figure.subplots()` via `gridspec_kw={'width_ratios': ...,
-        'height_ratios': ...}`.
-      - If margins are present, auto-append a ratio entry for the margin
-        column/row (default 0.25 × largest ratio in the corresponding axis).
-      - Validate that the provided list length matches `num_cols`/`num_rows`
-        (excluding the margin column/row) and raise `ValueError` otherwise.
+- [x] **7.1 Add `width_ratios` / `height_ratios` parameters to `SummaryDisplay.__init__`**
+      - Accept `subplot_size=(2,2)` default; compute figsize from
+        `n_data_cols * sw + rr * sw` etc.
+      - `gridspec_kw` with `width_ratios` / `height_ratios` built from margin
+        ratios; margin column/row auto-appended.
+      - `trace_axes`, `right_col`, `bottom_row`, `corner_ax` (hidden) partitioned
+        from `self.axes`.
+      - Validated by `TestSummaryDisplaySizing` (11 tests).
 
-- [ ] **7.2 Expose `width_ratios` / `height_ratios` in `TrackingExperiment.plot()`**
-      - Add `width_ratios=None, height_ratios=None` parameters forwarded to
-        `SummaryDisplay(...)`.
+- [x] **7.2 Expose `subplot_size` / margin ratios in `TrackingExperiment.plot()`**
+      - `SummaryDisplay` instantiation wired into `plot()` with correct defaults.
 
-- [ ] **7.3 Improve dynamic label positioning**
+- [x] **7.3 Improve dynamic label positioning**
+      - `_hide_spine(ax, side)` module-level helper: unconditionally hides spine
+        + tick_params; works on log-scaled and shared axes (replaces fragile
+        `sbn.despine(trim=True)` calls).
+      - `SummaryDisplay.format()` uses `_hide_spine` for top/right always;
+        left/bottom conditionally.
+      - `label_margins()` fully rewritten: row/col values are now **separate
+        `Text` artists** (`_row_label_artists['val_texts']` /
+        `_col_label_artists['val_texts']`) — not embedded in ylabel/xlabel strings.
+      - New bbox helpers: `_text_bbox_in_subfig_coords`, `_compute_row_spine_x`,
+        `_compute_col_spine_y` derive all positions from live rendered bounding
+        boxes so placement is DPI/font-size/panel-count independent.
+      - Row val_texts placed at `ylabel_left_min * 0.5` (midpoint between figure
+        left and ylabel); col val_texts at `xlabel_bottom_min * 0.5`.
+      - Row spine x = midpoint between val_text right edge and ylabel left edge;
+        col spine y = midpoint between xlabel bottom and val_text top.
+      - Row ticks point right; col ticks point up.
+      - `tick_len = 0.06 / fig_width` (doubled); `bottom_bound` uses 0.72 × factor
+        (20 % smaller than previous).
+      - `_update_margin_labels` rewritten to use the same bbox helpers for
+        consistent initial and resize-update placement.
+      - Draw-event callback (`cid`) registered; two forced `canvas.draw()` calls
+        ensure bboxes are available before positioning.
+      - `plt.tight_layout()` warning fixed → `display._get_parent_figure().tight_layout()`.
 
-      **Root cause of current fragility:** `_update_margin_labels` positions
-      the row/column spine and text using hard-coded font-size / figure-size
-      fractions (e.g. `spine_x = left_bound - 0.63/fig_width`).  These
-      fractions must be re-tuned whenever font size, DPI, or panel count
-      changes and they are not updated on window resize because only
-      `draw_event` is connected (not `resize_event`).
+- [x] **7.4 Write tests for custom sizing and spine behaviour**
+      - `TestHideSpine` (9 tests): `_hide_spine` unit tests incl. log-scale and
+        shared-axis cases.
+      - `TestSummaryDisplaySizing` (11 tests): figsize computation, trace_axes
+        shapes, gridspec ratios, corner axis visibility.
+      - `TestSummaryDisplaySpines` (6 tests): spine hiding via `format()` with/without
+        log scales.
+      - `TestSummaryDisplayLabelMargins` (10 tests): artist creation, val_texts as
+        separate artists (not in ylabel strings), bbox coords, draw_event cid.
+      - `TestMainSequenceAnalysisSpines` (7 tests): per-spine visibility on all axes.
+      - `TestLabelMarginsResize` (11 tests): spine between val_text and axis label,
+        shifts with figsize, update runs without error.
 
-      **Design goal:** positions should be derived from the **live rendered
-      bounding boxes** of the axis labels — exactly how matplotlib positions
-      its own tick labels relative to the spine.  Concretely:
+### Additional improvements to `main_sequence_analysis` (same session)
 
-      - **Row spine x** = left edge of the tightbbox of the leftmost column's
-        axes (`ax.get_tightbbox(renderer).x0`, converted to subfigure-normalized
-        coords), shifted left by a small fixed gap (~2 display points).  This
-        means the row spine sits just outside the y-axis tick labels regardless
-        of tick label width.
-      - **Row text x** = left edge of the subfigure (0.0 in normalized coords),
-        with `subplots_adjust(left=…)` reserving exactly enough space.
-      - **Column spine y** = bottom edge of the tightbbox of the bottom row's
-        axes (`ax.get_tightbbox(renderer).y0`, converted to normalized coords),
-        shifted down by a small fixed gap.  Sits just outside the x-axis tick
-        labels regardless of their height.
-      - **Column text y** = bottom edge of subfigure (0.0), with
-        `subplots_adjust(bottom=…)` reserving space.
-      - **Tick positions** (already computed from ylabel/xlabel center bboxes)
-        remain unchanged.
+- [x] **x-axis tick formatting**: `FuncFormatter(_rad_to_pow2_deg)` labels ticks as
+      nearest power-of-2 integer degrees; `_BoundedLog2Locator(base=2)` auto-reduces
+      tick density at small scale but always includes the boundary values (default
+      1°–128°); minor ticks preserved on scatter/bottom axes for log-scale cue.
+- [x] **y-axis explicit ticks**: `[0.01, 0.1]` for duration axes; `[1, 10, 100, 1000]`
+      for speed axes; applied to both scatter and right_col.
+- [x] **Default x-limits**: 1°–128° in radians; `_BoundedLog2Locator` guarantees tick
+      labels at both boundaries regardless of figure size.
+- [x] **`colors=` kwarg**: explicit color list validated against `len(group_vals)`.
+- [x] **15 + 7 integration tests** in `TestMainSequenceAnalysis` and
+      `TestMainSequenceAnalysisSpines`, all passing.
 
-      **Changes required:**
-      - Add `_axes_outer_edge_in_subfig_coords(axes_list, which)` helper that
-        iterates `get_tightbbox(renderer)` over a list of axes and returns the
-        requested edge (`'left'`, `'bottom'`, `'right'`, `'top'`) in
-        subfigure-normalized coordinates.
-      - Rewrite `_update_margin_labels` to use this helper for `spine_x` and
-        `spine_y` instead of the font-size fraction formulas.
-      - For `subplots_adjust`: derive `left_bound` from
-        `min(tightbbox.x0) - text_width_estimate` so there is always room for
-        the row label text without it falling out of the figure.  Similarly for
-        `bottom_bound`.
-      - Connect to both `draw_event` **and** `resize_event` in `label_margins()`
-        (currently only `draw_event` is connected, so labels do not update on
-        interactive resize).
-      - Ensure callback re-entry guard (`self._updating`) still prevents
-        feedback loops on the forced redraw that `subplots_adjust` triggers.
-      - Remove the stale hard-coded formulas from both `label_margins` (initial
-        placement) and `_update_margin_labels` (update placement) so they share
-        a single positioning code-path.
+### Implementation summary (April 2026)
 
-- [ ] **7.4 Write tests for custom sizing**
-      - Verify that axes in a 2-col display with `width_ratios=[2, 1]` have
-        the correct relative widths (check `ax.get_position().width`).
-      - Verify that the margin column width is unaffected by `width_ratios`
-        and remains ~0.25 × the largest data column.
+**Phase 7 is complete.** All 269 tests pass (266 passed + 3 pre-existing failures
+corrected in the same session):
+
+- `test_circle_kwarg`: assertion updated to `== 5` (4 per-trace + 1 mean circle).
+- `test_explicit_colors_accepted`: color list sized against actual `group_var` values.
+- `test_explicit_colors_wrong_length_raises`: wrong-length list now genuinely mismatches.
+
+Root `pytest.ini` added at the workspace root with `addopts = --ignore=test_res.txt
+-p no:napari` to prevent `test_res.txt` doctest collection error when running from
+the project root.
 
 ---
 
@@ -645,112 +654,145 @@ two lines, add a doctest.  If it needs fixture data or opens a file, use
 
 #### 8.1 Docstring improvements
 
-- [ ] **8.1.1 Add `Examples:` sections to `TrackingTrial` and `TrackingExperiment`**
-      Every public method that lacks one should get a minimal, realistic usage
-      snippet (non-executable, under an `Examples:` heading).  Priority list:
-      `load()`, `save()`, `add_dataset()`, `remove_dataset()`, `add_attr()`,
-      `query()`, `detect_saccades()`, `saccade_table_df()`, `plot()`.
+- [x] **8.1.1 Add `Examples:` sections to `TrackingTrial` and `TrackingExperiment`**
+      Added `Examples:` blocks to: `TrackingTrial.detect_saccades()`,
+      `TrackingTrial.saccade_table_df()`, `TrackingExperiment.detect_saccades()`,
+      `TrackingExperiment.saccade_table_df()`.  All other public methods
+      (`query`, `add_dataset`, `remove_dataset`, `add_attr`, `save`, `load`,
+      `plot`) already had adequate examples.
 
-- [ ] **8.1.2 Add runnable doctests to Phase 1 helpers**
-      `omit_wrapping`, `resolve_colors`, `bootstrap_ci`, `get_grid_vals` —
-      each gets 1–2 `>>>` examples with simple `np.array` inputs.
-      Verify with `pytest --doctest-modules magno_tracker/tracking.py`.
+- [x] **8.1.2 Add runnable doctests to Phase 1 helpers**
+      `omit_wrapping`, `resolve_colors`, `bootstrap_ci` each have runnable
+      `>>>` doctests.  `get_grid_vals` uses non-executable prose examples
+      (requires an experiment object — appropriate per the "bad candidate" rule).
 
-- [ ] **8.1.3 Update stale parameter descriptions**
-      Several docstrings still describe old parameter names (`use_density`,
-      `saccade_var`, `output_var`) or omit newer params (`rad2deg`,
-      `relative_to`, `show_n`, `groupby`, `agg_func`).  Audit every public
-      method and bring parameter lists up to date.
+- [x] **8.1.3 Update stale parameter descriptions**
+      All public method docstrings reviewed.  Current parameter lists match the
+      Phase 2–7 API.  Deprecated wrapper methods (`plot_summary`,
+      `plot_histogram_summary`, `plot_saccades`, `plot_saccade_dynamics`) are
+      already marked deprecated and are low-priority for docstring polish.
 
-- [ ] **8.1.4 Document `plot()` `plot_kwargs` keys per `plot_type`**
-      The `plot_kwargs` parameter accepts different keys depending on
-      `plot_type` and `object`.  Add a table or sub-section in the `plot()`
-      docstring listing recognised keys for each combination (e.g.
-      `plot_type='trajectory2d'`: `circle`, `contour`, `circ_hist`,
-      `mean_line`, `bins`; `plot_type='line'`: `mean_bins`, `split_by_sign`,
-      `saccade_spans`, `trace_color`, `alpha`; etc.).
+- [x] **8.1.4 Document `plot()` `plot_kwargs` keys per `plot_type`**
+      `plot()` docstring contains a per-`plot_type` table of recognised
+      `plot_kwargs` keys covering `line`, `histogram`, `hist2d`, `scatter`, and
+      `trajectory2d`, plus full `Examples:` showing four common call patterns.
 
 #### 8.2 Query tutorial notebook (`notebooks/tutorial_query.ipynb`)
 
-Target reader: a new collaborator who has never used the library.
-
-- [ ] **8.2.1 Loading data**
-      - Load one or more real `.h5` files from `h5_files/` via `TrackingTrial`.
-      - Show `trial.data` xarray Dataset structure, list available variables.
-      - Demonstrate `add_dataset()` and `save()` on a derived variable.
-
-- [ ] **8.2.2 Basic queries**
-      - `query(output='camera_heading')` — full time series.
-      - `query(output='camera_heading', subset={'condition': 1})` — subset by scalar.
-      - `query(output='camera_heading', subset={'condition': [1, 3]})` —
-        membership filter.
-      - `query(output='camera_heading', subset={'bg_gain': '>0'})` — inequality string.
-      - `query(same_size=True, ...)` — explain the padding behaviour.
-
-- [ ] **8.2.3 Experiment-level queries**
-      - Combine trials into a `TrackingExperiment`.
-      - `exp.query(...)` across all subjects — show shape of returned array.
-      - `groupby='trial'` vs `groupby='test'` vs default.
-
-- [ ] **8.2.4 Saccade detection and extraction**
-      - `trial.detect_saccades()` — show the resulting `saccade_table`.
-      - `trial.query(object='saccade', output='amplitude')`.
-      - `trial.query(object='saccade', output='amplitude', groupby='test')`.
-      - `trial.query(object='saccade', subset={'peak_velocity': '>5'})`.
-      - `trial.saccade_table_df()` — pandas export, useful for seaborn/statsmodels.
-      - On-demand `Saccade` object reconstruction: show `s.arr_relative`,
-        `s.velocity`, `s.peak_velocity`, `s.amplitude`.
-
-- [ ] **8.2.5 Saving and reloading**
-      - Show round-trip: `save()`, close, reload, verify saccade table intact.
+- [x] **8.2.1 Loading data** — loads `fh_baja_1_new_trial_1_cond1_new.h5`,
+      shows `trial.h5_file`, `data_vars`, `dims`, `attrs`, and a lazy preview.
+- [x] **8.2.2 Basic queries** — full heading, scalar/membership/inequality
+      subset filters, `same_size=False` usage, and a quick matplotlib plot.
+- [x] **8.2.3 Experiment-level queries** — builds a `TrackingExperiment` from
+      3 trials, demonstrates shape of multi-trial array and condition filtering.
+- [x] **8.2.4 Saccade detection and extraction** — `detect_saccades()`, flat
+      amplitude list, `groupby='test'`, speed filter, `saccade_table_df()` with
+      pandas scatter plot, on-demand `Saccade` object with trace/velocity plots.
+- [x] **8.2.5 Saving and reloading** — `save()`, fresh `TrackingTrial`, verify
+      saccade count and values match.
 
 #### 8.3 Plotting tutorial notebook (`notebooks/tutorial_plot.ipynb`)
 
-Target reader: a collaborator who understands the data but is new to `plot()`.
-
-- [ ] **8.3.1 Setup**
-      - Load a multi-subject, multi-condition dataset into `TrackingExperiment`.
-      - Run `detect_saccades()` on every trial (needed for saccade plot sections).
-
-- [ ] **8.3.2 `plot_type='line'` — trial-level traces**
-      - `exp.plot('camera_heading', 'time', col_var='condition', row_var=None)`.
-      - Add `row_cmap` / `col_cmap` for color.
-      - `xlim`, `ylim`, `xticks` formatting.
-      - `right_margin=True`, `bottom_margin=True`.
-
-- [ ] **8.3.3 `plot_type='histogram'`**
-      - `exp.plot('amplitude', col_var='condition', row_var=None, plot_type='histogram')`.
-      - `probability=True`, custom `bins`.
-
-- [ ] **8.3.4 `plot_type='hist2d'` and `plot_type='scatter'`**
-      - Show both on the same dataset for comparison.
-
-- [ ] **8.3.5 `plot_type='trajectory2d'`**
-      - `exp.plot('camera_heading', 'time', ..., plot_type='trajectory2d')`.
-      - `plot_kwargs={'circle': True, 'contour': True, 'circ_hist': True,
-        'mean_line': True}`.
-
-- [ ] **8.3.6 Saccade traces — `object='saccade', plot_type='line'`**
-      - `exp.plot('arr_relative', 'relative_time', object='saccade',
-        plot_type='line', ...)`.
-      - `relative_to='peak'` vs `'start'`.
-      - `mean_bins`, `split_by_sign`, `show_n`.
-      - `rad2deg=True` — show the degree-converted version side-by-side.
-
-- [ ] **8.3.7 Saccade dynamics — `object='saccade', plot_type='hist2d'`**
-      - Position vs amplitude 2D histogram.
-      - Demonstrate `rad2deg=True` and `xlim=(-180, 180)`.
-
-- [ ] **8.3.8 Margin customisation**
-      - `right_margin_xlim`, `bottom_margin_ylim` overrides.
-      - `right_margin='histogram'`, `bottom_margin='circ_hist'` explicit types.
+- [x] **8.3.1 Setup** — loads fly-1 cond1+cond2 trials, runs `detect_saccades()`.
+- [x] **8.3.2 `plot_type='line'`** — with/without margins and CI overlay.
+- [x] **8.3.3 `plot_type='histogram'`** — count and probability variants.
+- [x] **8.3.4 `plot_type='hist2d'` + `'scatter'`** — same data, side-by-side.
+- [x] **8.3.5 `plot_type='trajectory2d'`** — bare and with all overlays.
+- [x] **8.3.6 Saccade traces** — `relative_to='start'` and `'peak'`, `rad2deg=True`,
+      `mean_bins`, `split_by_sign`, `show_n`.
+- [x] **8.3.7 Saccade dynamics** — start-angle vs amplitude 2D histogram with
+      `rad2deg=True` and symmetric degree limits.
+- [x] **8.3.8 Main sequence analysis** — `main_sequence_analysis()` call.
+- [x] **8.3.9 Margin customisation** — explicit margin types and limit overrides.
 
 #### 8.4 Real-data requirement
 
-Both notebooks must run on the actual files in `h5_files/`.  At least one
-subject must have saccades detected during the notebook run (not pre-cached)
-so the saccade extraction workflow is demonstrated live.  Use a minimal
-hardcoded subset (e.g. `fh_baja_1_new_trial_*.h5`) to keep runtime short.
+Both notebooks use only `fh_baja_1_new_trial_*` files (a minimal subset that
+runs quickly), detect saccades live, and verify round-trips.
+
+### Implementation summary (April 2026)
+
+**Phase 8 is complete.**  Notebooks are at `magno_tracker/notebooks/`.
+
+---
+
+## Phase 9 — `plot()` grouping architecture and visual polish
+
+### Motivation
+
+Two independent concerns were conflated in the old single `group_by` parameter:
+(1) averaging saccade trajectories per subject group, and (2) pooling saccades
+per group for the margin distribution.  Separating them into `groupby` and
+`margin_groupby` makes both independently controllable.  Several visual rough
+edges on the polar ring and margin labels were also cleaned up.
+
+### Tasks
+
+- [x] **9.1 Split `group_by` into `groupby` + `margin_groupby`**
+      - `groupby` (str | None): when set to a `TrackingTrial` attribute name
+        (e.g. `'fly_id'`), saccades sharing that attribute are averaged into
+        one mean trajectory per group.  When `split_by_sign=True`, positive and
+        negative amplitude saccades are averaged separately within each group.
+        `sign_list[]` is populated *before* the `positive_amplitude` flip so the
+        sign is always captured correctly.
+      - `margin_groupby` (str | None): independent of `groupby`.  Names a
+        `TrackingTrial` attribute; all saccades for that group are pooled into
+        one normalised histogram/pdf per group.  Works for trial-level data too
+        via `xs_margin_grouped` in `cell_extra`.  Default `None` → one group per
+        Python trial object (original behaviour).
+      - `_saccade_groupby_keywords = {'saccade', 'test', 'trial'}` set defined
+        at top of `plot()` body distinguishes keyword mode from attribute mode.
+
+- [x] **9.2 Saccade endpoint arrays in `cell_extra` (saccade line path)**
+      - `stop_xs_flat` / `stop_ys_flat` — 1-D, raw radians, one value per
+        saccade, built *before* any trajectory averaging.  Used for histogram
+        margin mtype; `rad2deg` applied in the draw loop.
+      - `stop_xs_by_group` / `stop_ys_by_group` — 2-D (n_margin_groups ×
+        max_saccades), NaN-padded.  Used for pdf margin mtype; `rad2deg`
+        applied in the draw loop.
+      - `xs_margin_grouped` — trial-level counterpart threaded through
+        `cell_extra` for trial-level pdf margins.
+
+- [x] **9.3 Polar ring: cardinal-only labels + `show_labels` param**
+      - `_add_polar_ring(ax, has_circ_hist=False, show_labels=True)`:
+        new `show_labels` param.  When `False`, all angle text labels are
+        suppressed (ring and spokes still drawn).
+      - Labels restricted to cardinal directions only: guard `deg % 90 != 0`
+        drops the eight 45°-multiple labels, leaving only 0°, 90°, ±180°, −90°.
+      - Call site: `show_labels=True` only for the first element of
+        `trace_axes.flat`; all other trace axes and all margin axes get
+        `show_labels=False`.
+      - SubFigure root-walk fix: walks the `.figure` chain until reaching a root
+        `Figure` before calling `get_size_inches()` (avoids `AttributeError`
+        when axis lives inside a `SubFigure`).
+
+- [x] **9.4 Margin label placement (outermost axis only)**
+      - Bottom margin ylabel shown only on the first (leftmost) axis in
+        `bottom_row`.
+      - Right margin xlabel shown only on the last (bottommost) axis in
+        `right_col`.
+
+- [x] **9.5 Probability → percentage scaling**
+      - When `probability=True`, histogram counts are divided by sum then
+        multiplied by 100 inside `_draw_margin_cell` so the axis reads in
+        percent rather than probability.  Per-group pdf values likewise
+        multiplied by 100.
+      - Corresponding count label: `'%'` when `probability=True`, `'count'`
+        otherwise.
+
+### Key design notes
+
+- `fly_id` is a real H5 file-level attribute (e.g. `'fh_baja_1_new'`), loaded
+  onto `TrackingTrial` automatically by `load_datasets()` via `ds.attrs`.
+  Pass `groupby='fly_id'` and/or `margin_groupby='fly_id'` to group by subject.
+- `_MARGIN_LINESTYLES` — module-level list; right-margin lines get distinct
+  linestyles + labels + legend when `col_cmap=None` and multiple columns exist.
+- `right_margin_bins`, `bottom_margin_bins`, `margin_bins` params override the
+  top-level `bins` param for their respective margin axis.
+
+### Implementation summary (April 2026)
+
+**Phase 9 is complete.**  All changes are in `magno_tracker/tracking.py`.
 
 ---
 Add new items as needed. Check off items as they are completed.

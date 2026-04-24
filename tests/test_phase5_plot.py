@@ -29,8 +29,10 @@ from pathlib import Path
 from magno_tracker.tracking import (
     TrackingTrial,
     TrackingExperiment,
+    SummaryDisplay,
     _resolve_margin,
     _MARGIN_DEFAULTS,
+    _hide_spine,
 )
 
 OUT_DIR = Path(__file__).parent / 'plot_outputs'
@@ -1158,22 +1160,23 @@ class TestMainSequenceAnalysis:
     # Smoke test: runs end-to-end without raising
     # ------------------------------------------------------------------
     def test_runs_without_error(self, exp):
-        exp.main_sequence_analysis(group_var='filename', n_boot=20)
+        exp.main_sequence_analysis(group_var='fly_id', n_boot=20)
 
     # ------------------------------------------------------------------
     # Figure structure
     # ------------------------------------------------------------------
     def test_creates_3x2_axes(self, exp):
-        exp.main_sequence_analysis(group_var='filename', n_boot=20)
-        fig = plt.gcf()
-        # 6 axes: 2 scatter + 2 right-col strip + 1 bottom strip + 1 hidden
-        assert len(fig.axes) == 6
+        exp.main_sequence_analysis(group_var='fly_id', n_boot=20)
+        d = exp.display
+        # 2 scatter axes, 2 right-col strip axes, 1 bottom strip, 1 hidden corner
+        assert d.trace_axes.shape == (2, 1), f"Expected (2,1) trace_axes, got {d.trace_axes.shape}"
+        assert len(d.right_col) == 2
+        assert len(d.bottom_row) == 1
+        assert hasattr(d, 'corner_ax')
 
     def test_bottom_right_axis_invisible(self, exp):
-        exp.main_sequence_analysis(group_var='filename', n_boot=20)
-        axes = plt.gcf().axes
-        # bottom-right corner: last axis in the 3x2 grid (index 5)
-        assert not axes[5].get_visible(), \
+        exp.main_sequence_analysis(group_var='fly_id', n_boot=20)
+        assert not exp.display.corner_ax.get_visible(), \
             "Bottom-right axis should be hidden via axis('off')"
 
     # ------------------------------------------------------------------
@@ -1181,9 +1184,8 @@ class TestMainSequenceAnalysis:
     # ------------------------------------------------------------------
     def test_scatter_panels_have_collections(self, exp):
         from matplotlib.collections import PathCollection
-        exp.main_sequence_analysis(group_var='filename', n_boot=20)
-        axes = plt.gcf().axes
-        scatter_axes = [axes[0], axes[2]]  # top-left, middle-left
+        exp.main_sequence_analysis(group_var='fly_id', n_boot=20)
+        scatter_axes = list(exp.display.trace_axes[:, 0])
         for ax in scatter_axes:
             scatters = [c for c in ax.get_children()
                         if isinstance(c, PathCollection)]
@@ -1195,10 +1197,8 @@ class TestMainSequenceAnalysis:
     # ------------------------------------------------------------------
     def test_margin_axes_have_collections(self, exp):
         from matplotlib.collections import PathCollection
-        exp.main_sequence_analysis(group_var='filename', n_boot=20)
-        axes = plt.gcf().axes
-        # axes[1], axes[3]: right-col strip plots; axes[4]: bottom strip
-        margin_axes = [axes[1], axes[3], axes[4]]
+        exp.main_sequence_analysis(group_var='fly_id', n_boot=20)
+        margin_axes = list(exp.display.right_col) + [exp.display.bottom_row[0]]
         for ax in margin_axes:
             scatters = [c for c in ax.get_children()
                         if isinstance(c, PathCollection)]
@@ -1209,9 +1209,8 @@ class TestMainSequenceAnalysis:
     # Bootstrap CI lines (error bars) drawn in margin axes
     # ------------------------------------------------------------------
     def test_margin_axes_have_ci_lines(self, exp):
-        exp.main_sequence_analysis(group_var='filename', n_boot=20)
-        axes = plt.gcf().axes
-        for ax in [axes[1], axes[3], axes[4]]:
+        exp.main_sequence_analysis(group_var='fly_id', n_boot=20)
+        for ax in list(exp.display.right_col) + [exp.display.bottom_row[0]]:
             assert len(ax.lines) > 0, \
                 "Bootstrap CI line missing from margin axis"
 
@@ -1221,16 +1220,16 @@ class TestMainSequenceAnalysis:
     def test_explicit_colors_accepted(self, exp):
         """Passing colors= list should not raise when length matches group count."""
         from magno_tracker.tracking import get_grid_vals
-        group_vals = get_grid_vals(exp, 'filename', {})
+        group_vals = get_grid_vals(exp, 'fly_id', {})
         explicit = ['steelblue'] * len(group_vals)
         exp.main_sequence_analysis(
-            group_var='filename', colors=explicit, n_boot=20)
+            group_var='fly_id', colors=explicit, n_boot=20, scale=3)
 
     def test_explicit_colors_wrong_length_raises(self, exp):
         """colors= list of wrong length should raise ValueError."""
         with pytest.raises(ValueError, match="colors has"):
             exp.main_sequence_analysis(
-                group_var='filename', colors=['r'], n_boot=5)
+                group_var='fly_id', colors=['r', 'b'], n_boot=5, scale=3)
 
     # ------------------------------------------------------------------
     # subset= isolation (regression for mutable-default bug)
@@ -1239,7 +1238,7 @@ class TestMainSequenceAnalysis:
         """The caller's subset dict must not be modified by main_sequence_analysis."""
         user_subset = {}
         exp.main_sequence_analysis(
-            group_var='filename', subset=user_subset, n_boot=20)
+            group_var='fly_id', subset=user_subset, n_boot=20, scale=3)
         assert user_subset == {}, \
             "main_sequence_analysis mutated the caller's subset dict"
 
@@ -1249,7 +1248,7 @@ class TestMainSequenceAnalysis:
         subset_a = {}
         subset_b = {}
         groups_a = get_grid_vals(exp, 'is_test', subset_a)
-        exp.main_sequence_analysis(group_var='filename', subset=subset_b, n_boot=5)
+        exp.main_sequence_analysis(group_var='fly_id', subset=subset_b, n_boot=5, scale=3)
         groups_b = get_grid_vals(exp, 'is_test', subset_b)
         np.testing.assert_array_equal(groups_a, groups_b)
 
@@ -1257,16 +1256,28 @@ class TestMainSequenceAnalysis:
     # Log-scale axes
     # ------------------------------------------------------------------
     def test_scatter_axes_x_log_scale(self, exp):
-        exp.main_sequence_analysis(group_var='filename', n_boot=20)
-        axes = plt.gcf().axes
-        for ax in [axes[0], axes[2], axes[4]]:
+        exp.main_sequence_analysis(group_var='filename', n_boot=20, scale=3)
+        d = exp.display
+        for ax in list(d.trace_axes[:, 0]) + [d.bottom_row[0]]:
             assert ax.get_xscale() == 'log', \
                 "Expected log x-scale on magnitude axis"
 
+    def test_x_tick_formatter_gives_pow2_degrees(self, exp):
+        """x-axis major formatter should produce integer power-of-2 degree labels."""
+        exp.main_sequence_analysis(group_var='filename', n_boot=20, scale=3)
+        ax = exp.display.trace_axes[0, 0]
+        fmt = ax.xaxis.get_major_formatter()
+        # 8 degrees in radians → nearest power-of-2 = 8
+        import matplotlib.ticker
+        assert isinstance(fmt, matplotlib.ticker.FuncFormatter)
+        label = fmt(8 * np.pi / 180., 0)
+        assert label == '8', f"Expected '8', got '{label}'"
+        label16 = fmt(16 * np.pi / 180., 0)
+        assert label16 == '16', f"Expected '16', got '{label16}'"
+
     def test_scatter_axes_y_log_scale(self, exp):
-        exp.main_sequence_analysis(group_var='filename', n_boot=20)
-        axes = plt.gcf().axes
-        for ax in [axes[0], axes[2]]:
+        exp.main_sequence_analysis(group_var='filename', n_boot=20, scale=3)
+        for ax in exp.display.trace_axes[:, 0]:
             assert ax.get_yscale() == 'log', \
                 "Expected log y-scale on scatter axis"
 
@@ -1311,4 +1322,524 @@ class TestMainSequenceAnalysis:
             f"Leftmost bin edge {min(left_edges):.2f} should be ≥ -180 deg"
         assert max(left_edges) <= 185, \
             f"Rightmost bin edge {max(left_edges):.2f} should be ≤ 180 deg"
+
+
+# ---------------------------------------------------------------------------
+# SummaryDisplay — subplot sizing, spine hiding, label_margins
+# ---------------------------------------------------------------------------
+
+class TestHideSpine:
+    """Unit tests for the _hide_spine helper."""
+
+    def _make_ax(self):
+        fig, ax = plt.subplots()
+        return ax
+
+    def test_bottom_spine_hidden(self):
+        ax = self._make_ax()
+        _hide_spine(ax, 'bottom')
+        assert not ax.spines['bottom'].get_visible()
+
+    def test_left_spine_hidden(self):
+        ax = self._make_ax()
+        _hide_spine(ax, 'left')
+        assert not ax.spines['left'].get_visible()
+
+    def test_right_spine_hidden(self):
+        ax = self._make_ax()
+        _hide_spine(ax, 'right')
+        assert not ax.spines['right'].get_visible()
+
+    def test_top_spine_hidden(self):
+        ax = self._make_ax()
+        _hide_spine(ax, 'top')
+        assert not ax.spines['top'].get_visible()
+
+    def test_bottom_spine_hidden_log_x(self):
+        """Spine hiding must work even when x is log-scaled."""
+        ax = self._make_ax()
+        ax.set_xscale('log')
+        ax.set_xlim(0.01, 100)
+        _hide_spine(ax, 'bottom')
+        assert not ax.spines['bottom'].get_visible()
+
+    def test_left_spine_hidden_log_y(self):
+        """Spine hiding must work even when y is log-scaled."""
+        ax = self._make_ax()
+        ax.set_yscale('log')
+        ax.set_ylim(1, 1000)
+        _hide_spine(ax, 'left')
+        assert not ax.spines['left'].get_visible()
+
+    def test_bottom_spine_hidden_shared_x(self):
+        """Spine hiding must work on an axis sharing x with a neighbour."""
+        fig, (ax1, ax2) = plt.subplots(2, 1, sharex=True)
+        ax1.set_xscale('log')
+        _hide_spine(ax1, 'bottom')
+        assert not ax1.spines['bottom'].get_visible()
+        # ax2 spine must not be affected
+        assert ax2.spines['bottom'].get_visible()
+
+    def test_tick_params_cleared_bottom(self):
+        """_hide_spine should disable bottom ticks and tick labels."""
+        ax = self._make_ax()
+        _hide_spine(ax, 'bottom')
+        # tick_params stores state; check via get_tick_params
+        tp = ax.xaxis.get_tick_params(which='major')
+        assert not tp.get('bottom', True), \
+            "Major bottom ticks should be off after _hide_spine"
+
+    def test_tick_params_cleared_left(self):
+        """_hide_spine should disable left ticks and tick labels."""
+        ax = self._make_ax()
+        _hide_spine(ax, 'left')
+        tp = ax.yaxis.get_tick_params(which='major')
+        assert not tp.get('left', True), \
+            "Major left ticks should be off after _hide_spine"
+
+
+class TestSummaryDisplaySizing:
+    """Test that SummaryDisplay computes figure sizes from subplot_size."""
+
+    def test_default_subplot_size_no_margin(self):
+        """No margins: figsize = n_cols*sw x n_rows*sh."""
+        d = SummaryDisplay(num_rows=2, num_cols=3,
+                           right_margin=False, bottom_margin=False,
+                           subplot_size=(3, 2))
+        w, h = d._get_fig_size_inches()
+        assert abs(w - 9) < 0.5, f"Expected width ~9, got {w:.2f}"
+        assert abs(h - 4) < 0.5, f"Expected height ~4, got {h:.2f}"
+
+    def test_subplot_size_with_right_margin(self):
+        """Right margin contributes right_margin_ratio * sw to total width."""
+        d = SummaryDisplay(num_rows=2, num_cols=3,
+                           right_margin=True, bottom_margin=False,
+                           subplot_size=(4, 4), right_margin_ratio=0.5)
+        # data cols = 2; total width = 2*4 + 0.5*4 = 10
+        w, h = d._get_fig_size_inches()
+        assert abs(w - 10) < 0.5, f"Expected width ~10, got {w:.2f}"
+        assert abs(h - 8) < 0.5,  f"Expected height ~8, got {h:.2f}"
+
+    def test_subplot_size_with_bottom_margin(self):
+        """Bottom margin contributes bottom_margin_ratio * sh to total height."""
+        d = SummaryDisplay(num_rows=3, num_cols=2,
+                           right_margin=False, bottom_margin=True,
+                           subplot_size=(2, 2), bottom_margin_ratio=0.5)
+        # data rows = 2; total height = 2*2 + 0.5*2 = 5
+        w, h = d._get_fig_size_inches()
+        assert abs(h - 5) < 0.5, f"Expected height ~5, got {h:.2f}"
+        assert abs(w - 4) < 0.5, f"Expected width ~4, got {w:.2f}"
+
+    def test_subplot_size_both_margins(self):
+        """Both margins: independently affect width and height."""
+        d = SummaryDisplay(num_rows=3, num_cols=2,
+                           right_margin=True, bottom_margin=True,
+                           subplot_size=(2, 2),
+                           right_margin_ratio=0.5, bottom_margin_ratio=0.5)
+        # data rows=2, data cols=1; width=1*2+0.5*2=3; height=2*2+0.5*2=5
+        w, h = d._get_fig_size_inches()
+        assert abs(w - 3) < 0.5, f"Expected width ~3, got {w:.2f}"
+        assert abs(h - 5) < 0.5, f"Expected height ~5, got {h:.2f}"
+
+    def test_explicit_figsize_overrides_subplot_size(self):
+        """Providing figsize= ignores subplot_size entirely."""
+        d = SummaryDisplay(num_rows=2, num_cols=2,
+                           right_margin=False, bottom_margin=False,
+                           figsize=(7, 5), subplot_size=(1, 1))
+        w, h = d._get_fig_size_inches()
+        assert abs(w - 7) < 0.5
+        assert abs(h - 5) < 0.5
+
+    def test_trace_axes_shape_no_margin(self):
+        d = SummaryDisplay(num_rows=2, num_cols=3,
+                           right_margin=False, bottom_margin=False)
+        assert d.trace_axes.shape == (2, 3)
+
+    def test_trace_axes_shape_right_margin(self):
+        d = SummaryDisplay(num_rows=2, num_cols=3,
+                           right_margin=True, bottom_margin=False)
+        # last col is margin → trace_axes has 2 data cols
+        assert d.trace_axes.shape == (2, 2)
+        assert len(d.right_col) == 2
+
+    def test_trace_axes_shape_both_margins(self):
+        d = SummaryDisplay(num_rows=3, num_cols=2,
+                           right_margin=True, bottom_margin=True)
+        # 2 data rows, 1 data col
+        assert d.trace_axes.shape == (2, 1)
+        assert len(d.right_col) == 2
+        assert len(d.bottom_row) == 1
+
+    def test_corner_ax_invisible(self):
+        d = SummaryDisplay(num_rows=3, num_cols=2,
+                           right_margin=True, bottom_margin=True)
+        assert hasattr(d, 'corner_ax')
+        assert not d.corner_ax.get_visible()
+
+    def test_gridspec_width_ratios(self):
+        """width_ratios should have n_data_cols ones followed by the margin ratio."""
+        d = SummaryDisplay(num_rows=2, num_cols=3,
+                           right_margin=True, bottom_margin=False,
+                           subplot_size=(2, 2), right_margin_ratio=0.4)
+        gs = d.axes[0, 0].get_gridspec()
+        wr = list(gs.get_width_ratios())
+        assert wr == pytest.approx([1, 1, 0.4], abs=1e-6), \
+            f"Unexpected width_ratios: {wr}"
+
+    def test_gridspec_height_ratios(self):
+        """height_ratios should have n_data_rows ones followed by the margin ratio."""
+        d = SummaryDisplay(num_rows=3, num_cols=2,
+                           right_margin=False, bottom_margin=True,
+                           subplot_size=(2, 2), bottom_margin_ratio=0.3)
+        gs = d.axes[0, 0].get_gridspec()
+        hr = list(gs.get_height_ratios())
+        assert hr == pytest.approx([1, 1, 0.3], abs=1e-6), \
+            f"Unexpected height_ratios: {hr}"
+
+
+class TestSummaryDisplaySpines:
+    """Test that SummaryDisplay.format() reliably hides spines on log axes."""
+
+    def _make_display(self, nrows=2, ncols=2, **kw):
+        return SummaryDisplay(num_rows=nrows, num_cols=ncols,
+                              right_margin=False, bottom_margin=False,
+                              subplot_size=(2, 2), **kw)
+
+    def test_internal_axes_have_no_bottom_spine(self):
+        """Non-bottom-row axes should have bottom spine hidden after format()."""
+        d = self._make_display(nrows=2, ncols=1)
+        d.format()
+        # top row (row 0) is not the bottom row
+        assert not d.trace_axes[0, 0].spines['bottom'].get_visible()
+
+    def test_bottom_row_keeps_bottom_spine(self):
+        """Bottom-row axes should keep their bottom spine."""
+        d = self._make_display(nrows=2, ncols=1)
+        d.format(xlabel='x')
+        assert d.trace_axes[1, 0].spines['bottom'].get_visible()
+
+    def test_internal_axes_no_bottom_spine_with_logy(self):
+        """Log y-scale must not prevent bottom spine hiding on internal axes."""
+        d = self._make_display(nrows=2, ncols=1)
+        d.format(logy=True)
+        assert not d.trace_axes[0, 0].spines['bottom'].get_visible(), \
+            "Bottom spine must be hidden even with logy=True"
+
+    def test_non_left_axes_no_left_spine_with_logx(self):
+        """Log x-scale must not prevent left spine hiding on non-left-col axes."""
+        d = self._make_display(nrows=1, ncols=2)
+        d.format(logx=True)
+        assert not d.trace_axes[0, 1].spines['left'].get_visible(), \
+            "Left spine must be hidden even with logx=True"
+
+    def test_top_and_right_always_hidden(self):
+        """Top and right spines should always be hidden by format()."""
+        d = self._make_display(nrows=2, ncols=2)
+        d.format()
+        for ax in d.trace_axes.flat:
+            assert not ax.spines['top'].get_visible()
+            assert not ax.spines['right'].get_visible()
+
+    def test_with_margins_right_col_spines(self):
+        """Right-margin axes also get top/right hidden by format()."""
+        d = SummaryDisplay(num_rows=2, num_cols=2,
+                           right_margin=True, bottom_margin=False,
+                           subplot_size=(2, 2))
+        d.format()
+        for ax in d.right_col:
+            assert not ax.spines['top'].get_visible()
+            assert not ax.spines['right'].get_visible()
+
+
+@pytest.mark.skipif(
+    not any(H5_FILES),
+    reason="No h5 files found — skipping label_margins tests",
+)
+class TestSummaryDisplayLabelMargins:
+    """Tests for SummaryDisplay.label_margins using real rendered bboxes."""
+
+    @pytest.fixture(scope='class')
+    def display_2x2(self):
+        """A 2×2 display (no margins) with labelled axes, rendered to canvas."""
+        d = SummaryDisplay(num_rows=2, num_cols=2,
+                           right_margin=False, bottom_margin=False,
+                           subplot_size=(2, 2))
+        for ax in d.trace_axes.flat:
+            ax.set_xlabel('x label')
+            ax.set_ylabel('y label')
+        d.label_margins(
+            row_vals=[0.1, 0.2], row_label='condition',
+            col_vals=['A', 'B'], col_label='group',
+        )
+        # force a render so bboxes are populated
+        d._get_parent_figure().canvas.draw()
+        return d
+
+    def test_row_text_artist_created(self, display_2x2):
+        assert display_2x2._row_label_artists is not None
+        assert 'text' in display_2x2._row_label_artists
+
+    def test_col_text_artist_created(self, display_2x2):
+        assert display_2x2._col_label_artists is not None
+        assert 'text' in display_2x2._col_label_artists
+
+    def test_row_text_contains_label(self, display_2x2):
+        txt = display_2x2._row_label_artists['text'].get_text()
+        assert 'condition' in txt
+
+    def test_col_text_contains_label(self, display_2x2):
+        txt = display_2x2._col_label_artists['text'].get_text()
+        assert 'group' in txt
+
+    def test_row_spine_artist_added(self, display_2x2):
+        assert display_2x2._row_label_artists['spine'] is not None
+
+    def test_col_spine_artist_added(self, display_2x2):
+        assert display_2x2._col_label_artists['spine'] is not None
+
+    def test_row_vals_are_separate_text_artists(self, display_2x2):
+        """Row values must be stored as separate Text artists, not in the ylabel string."""
+        artists = display_2x2._row_label_artists
+        assert 'val_texts' in artists, "'val_texts' key missing from _row_label_artists"
+        assert len(artists['val_texts']) == 2
+        # ylabel strings must NOT contain the row values
+        for ax, val in zip(display_2x2.trace_axes[:, 0], [0.1, 0.2]):
+            lbl = ax.get_ylabel()
+            assert str(round(val, 2)) not in lbl, \
+                f"Row value {val} should not be embedded in ylabel '{lbl}'"
+
+    def test_col_vals_are_separate_text_artists(self, display_2x2):
+        """Col values must be stored as separate Text artists, not in the xlabel string."""
+        artists = display_2x2._col_label_artists
+        assert 'val_texts' in artists, "'val_texts' key missing from _col_label_artists"
+        assert len(artists['val_texts']) == 2
+        for ax, val in zip(display_2x2.axes[-1, :], ['A', 'B']):
+            lbl = ax.get_xlabel()
+            assert str(val) not in lbl, \
+                f"Col value {val} should not be embedded in xlabel '{lbl}'"
+
+    def test_bbox_centers_have_nonzero_coords(self, display_2x2):
+        """ylabel bbox centers should have plausible normalized coordinates."""
+        left_col = display_2x2.trace_axes[:, 0]
+        centers = display_2x2._label_centers_in_subfig_coords(left_col, which='y')
+        assert centers.shape == (2, 2), f"Expected (2,2), got {centers.shape}"
+        # x-coordinates should be near the left edge (< 0.3)
+        assert np.all(centers[:, 0] < 0.3), \
+            f"ylabel centers x={centers[:, 0]} should be near left edge"
+        # y-coordinates should be in (0, 1)
+        assert np.all((centers[:, 1] > 0) & (centers[:, 1] < 1))
+
+    def test_draw_event_cid_registered(self, display_2x2):
+        """A draw_event callback should have been registered."""
+        assert len(display_2x2._margin_label_cids) > 0
+
+
+@pytest.mark.skipif(
+    not any(H5_FILES),
+    reason="No h5 files found — skipping spine tests",
+)
+class TestMainSequenceAnalysisSpines:
+    """Check that main_sequence_analysis hides spines correctly."""
+
+    @pytest.fixture(scope='class')
+    def exp(self):
+        files = sorted(H5_DIR.glob('fh_baja_1_new_trial_*_cond1_new.h5'))[:3]
+        e = TrackingExperiment.__new__(TrackingExperiment)
+        e.trials = [TrackingTrial(str(f)) for f in files]
+        for t in e.trials:
+            assert t.load_success
+        e.main_sequence_analysis(group_var='fly_id', n_boot=20)
+        return e
+
+    def test_scatter_bottom_spine_hidden(self, exp):
+        """Bottom spine of both scatter (left-col) axes must be hidden."""
+        for ax in exp.display.trace_axes[:, 0]:
+            assert not ax.spines['bottom'].get_visible(), \
+                "Scatter axis bottom spine should be hidden"
+
+    def test_scatter_top_right_hidden(self, exp):
+        """Top and right spines of scatter axes must be hidden."""
+        for ax in exp.display.trace_axes[:, 0]:
+            assert not ax.spines['top'].get_visible()
+            assert not ax.spines['right'].get_visible()
+
+    def test_right_col_left_spine_hidden(self, exp):
+        """Left spine of both right-margin strip axes must be hidden."""
+        for ax in exp.display.right_col:
+            assert not ax.spines['left'].get_visible(), \
+                "Right-col axis left spine should be hidden"
+
+    def test_right_col_top_bottom_hidden(self, exp):
+        """Top-right strip (right_col[0]) must also hide bottom spine."""
+        ax = exp.display.right_col[0]
+        assert not ax.spines['bottom'].get_visible(), \
+            "right_col[0] bottom spine should be hidden"
+
+    def test_bottom_ax_top_right_hidden(self, exp):
+        """Top and right spines of the magnitude strip plot must be hidden."""
+        ax = exp.display.bottom_row[0]
+        assert not ax.spines['top'].get_visible()
+        assert not ax.spines['right'].get_visible()
+
+    def test_bottom_ax_keeps_bottom_spine(self, exp):
+        """Bottom spine of the magnitude strip must remain visible."""
+        ax = exp.display.bottom_row[0]
+        assert ax.spines['bottom'].get_visible(), \
+            "Magnitude strip bottom spine should be visible"
+
+    def test_bottom_ax_keeps_left_spine(self, exp):
+        """Left spine of the magnitude strip must remain visible (y-ticks there)."""
+        ax = exp.display.bottom_row[0]
+        assert ax.spines['left'].get_visible(), \
+            "Magnitude strip left spine should be visible"
+
+
+# ---------------------------------------------------------------------------
+# SummaryDisplay.label_margins — spine position scales with figsize
+# ---------------------------------------------------------------------------
+
+def _make_labelled_display(figsize):
+    """Helper: 2×2 SummaryDisplay with labels and margins, drawn."""
+    d = SummaryDisplay(num_rows=2, num_cols=2,
+                       right_margin=False, bottom_margin=False,
+                       figsize=figsize)
+    for ax in d.trace_axes.flat:
+        ax.set_xlabel('x')
+        ax.set_ylabel('y')
+    d.label_margins(
+        row_vals=[1.0, 2.0], row_label='condition',
+        col_vals=['A', 'B'], col_label='group',
+    )
+    d._get_parent_figure().canvas.draw()
+    return d
+
+
+class TestLabelMarginsResize:
+    """Verify that spine positions are bbox-driven and scale with figsize."""
+
+    def test_row_spine_x_between_val_text_and_ylabel(self):
+        """Row spine x must lie strictly between row-value text right edge and ylabel left edge."""
+        d = _make_labelled_display((6, 4))
+        d._get_parent_figure().canvas.draw()
+        left_col = d.trace_axes[:, 0]
+        val_texts = d._row_label_artists['val_texts']
+        spine = d._row_label_artists['spine']
+
+        y_b = d._label_bboxes_in_subfig_coords(left_col, which='y')
+        ylabel_left = float(np.min(y_b[:, 0]))
+
+        val_rights = []
+        for t in val_texts:
+            x0, _, x1, _ = d._text_bbox_in_subfig_coords(t)
+            val_rights.append(x1)
+        val_right = float(np.max(val_rights))
+
+        spine_x = spine.get_xdata()[0]
+        assert val_right < spine_x < ylabel_left, (
+            f"Row spine x={spine_x:.4f} must be between val_right={val_right:.4f} "
+            f"and ylabel_left={ylabel_left:.4f}"
+        )
+
+    def test_col_spine_y_between_val_text_and_xlabel(self):
+        """Col spine y must lie between col-value text top edge and xlabel bottom edge."""
+        d = _make_labelled_display((6, 4))
+        d._get_parent_figure().canvas.draw()
+        bottom_row = d.axes[-1]
+        val_texts = d._col_label_artists['val_texts']
+        spine = d._col_label_artists['spine']
+
+        x_b = d._label_bboxes_in_subfig_coords(bottom_row, which='x')
+        xlabel_bottom = float(np.min(x_b[:, 1]))
+
+        val_tops = []
+        for t in val_texts:
+            _, y0, _, y1 = d._text_bbox_in_subfig_coords(t)
+            val_tops.append(y1)
+        val_top = float(np.min(val_tops))
+
+        spine_y = spine.get_ydata()[0]
+        assert val_top < spine_y < xlabel_bottom, (
+            f"Col spine y={spine_y:.4f} must be between val_top={val_top:.4f} "
+            f"and xlabel_bottom={xlabel_bottom:.4f}"
+        )
+
+    def test_row_spine_x_shifts_with_figsize(self):
+        """Row spine x (normalised) should move when figsize changes — proves bbox-driven."""
+        d_small = _make_labelled_display((4, 3))
+        d_small._get_parent_figure().canvas.draw()
+        sx_small = d_small._row_label_artists['spine'].get_xdata()[0]
+
+        d_large = _make_labelled_display((10, 7))
+        d_large._get_parent_figure().canvas.draw()
+        sx_large = d_large._row_label_artists['spine'].get_xdata()[0]
+
+        # Normalised spine_x is dominated by ylabel_left which moves as
+        # the figure gets wider because the axes take up a larger fraction.
+        # They should not be identical.
+        assert abs(sx_small - sx_large) > 1e-3, (
+            f"Row spine x did not change with figsize: {sx_small:.4f} vs {sx_large:.4f}"
+        )
+
+    def test_col_spine_y_shifts_with_figsize(self):
+        """Col spine y (normalised) should shift when figsize changes."""
+        d_small = _make_labelled_display((4, 3))
+        d_small._get_parent_figure().canvas.draw()
+        sy_small = d_small._col_label_artists['spine'].get_ydata()[0]
+
+        d_large = _make_labelled_display((10, 7))
+        d_large._get_parent_figure().canvas.draw()
+        sy_large = d_large._col_label_artists['spine'].get_ydata()[0]
+
+        assert abs(sy_small - sy_large) > 1e-3, (
+            f"Col spine y did not change with figsize: {sy_small:.4f} vs {sy_large:.4f}"
+        )
+
+    def test_row_val_text_count_matches_rows(self):
+        """Number of row-value Text artists must equal number of data rows."""
+        d = _make_labelled_display((6, 4))
+        val_texts = d._row_label_artists['val_texts']
+        assert len(val_texts) == d.trace_axes.shape[0]
+
+    def test_col_val_text_count_matches_cols(self):
+        """Number of col-value Text artists must equal number of data cols."""
+        d = _make_labelled_display((6, 4))
+        val_texts = d._col_label_artists['val_texts']
+        assert len(val_texts) == d.trace_axes.shape[1]
+
+    def test_row_val_text_strings(self):
+        """Row-value texts should contain the float values formatted to 2 d.p."""
+        d = _make_labelled_display((6, 4))
+        for t, val in zip(d._row_label_artists['val_texts'], [1.0, 2.0]):
+            assert f'{val:.2f}' in t.get_text(), \
+                f"Expected '{val:.2f}' in text '{t.get_text()}'"
+
+    def test_col_val_text_strings(self):
+        """Col-value texts should contain the string values."""
+        d = _make_labelled_display((6, 4))
+        for t, val in zip(d._col_label_artists['val_texts'], ['A', 'B']):
+            assert val in t.get_text(), \
+                f"Expected '{val}' in text '{t.get_text()}'"
+
+    def test_update_margin_labels_runs_without_error(self):
+        """Calling _update_margin_labels manually should not raise."""
+        d = _make_labelled_display((6, 4))
+        d._get_parent_figure().canvas.draw()
+        d._update_margin_labels()  # should not raise
+
+    def test_update_moves_row_spine_after_draw(self):
+        """After _update_margin_labels the row spine x must still be bbox-derived."""
+        d = _make_labelled_display((6, 4))
+        d._get_parent_figure().canvas.draw()
+        d._update_margin_labels()
+        left_col = d.trace_axes[:, 0]
+        val_texts = d._row_label_artists['val_texts']
+        y_b = d._label_bboxes_in_subfig_coords(left_col, which='y')
+        ylabel_left = float(np.min(y_b[:, 0]))
+        val_rights = [d._text_bbox_in_subfig_coords(t)[2] for t in val_texts]
+        val_right = float(np.max(val_rights))
+        spine_x = d._row_label_artists['spine'].get_xdata()[0]
+        assert val_right <= spine_x <= ylabel_left + 1e-4, (
+            f"Post-update spine_x={spine_x:.4f} outside "
+            f"({val_right:.4f}, {ylabel_left:.4f})"
+        )
 

@@ -334,6 +334,26 @@ def bootstrap_ci(data, stat_func, confidence=0.84, n_boot=1000, axis=0, return_b
         return low, high, boot_stats
     return low, high
 
+
+def _hide_spine(ax, side):
+    """Unconditionally hide a spine line, its ticks, and tick labels.
+
+    Unlike ``sbn.despine(trim=True)``, this sets visibility directly on the
+    spine ``Line2D`` object and updates only tick parameters.  It is therefore
+    reliable on log-scaled axes (where ``trim=True`` can position the clipped
+    spine incorrectly) and on axes that share a scale with a neighbour (where
+    seaborn's internal tick-position inspection can see the wrong state).
+
+    Parameters
+    ----------
+    ax : matplotlib.axes.Axes
+    side : {'top', 'bottom', 'left', 'right'}
+    """
+    ax.spines[side].set_visible(False)
+    axis = 'x' if side in ('top', 'bottom') else 'y'
+    ax.tick_params(axis=axis, which='both', **{side: False, f'label{side}': False})
+
+
 # ---------------------------------------------------------------------------
 # Phase 3 — Standalone stateless plot-type functions
 # Each function takes (ax, xs, ys, color, **kwargs) and returns artist(s).
@@ -539,6 +559,93 @@ def plot_hist2d(ax, xs, ys, color, bins=100, density=False, n_contours=0,
         }
         return mesh, sd
     return mesh
+
+
+def _add_polar_ring(ax, has_circ_hist=False, show_labels=True):
+    """Overlay a polar direction ring on a trajectory2d Cartesian axis.
+
+    Replaces the Cartesian spines with 8 radial spokes (every 45°) and a
+    thin circle at a radius that clears the data / circ_hist ring.
+
+    Parameters
+    ----------
+    ax : matplotlib Axes
+    has_circ_hist : bool
+        When True the ring is drawn at R=1.3 (beyond the circ_hist wedges
+        at ~1.27).  When False R=1.05 (just above the unit trajectory).
+    show_labels : bool, default True
+        When False, spoke angle labels are suppressed entirely (used for
+        all subplots except the top-left one).
+    """
+    R = 1.3 if has_circ_hist else 1.05
+
+    # Match visual weight to the surrounding figure aesthetics.
+    tick_fs = plt.rcParams.get('xtick.labelsize',
+                               plt.rcParams.get('font.size', 8))
+    # Spine line-width from rcParams; spokes are half that.
+    spine_lw = plt.rcParams.get('axes.linewidth', 0.8)
+    spoke_lw = spine_lw * 0.5
+
+    # ±180 label is wider than other labels, so give it more clearance.
+    label_r_default = R * 1.11
+    label_r_180 = R * 1.17
+    pad = label_r_180 * 1.12  # axis limit padding
+
+    # Hide all Cartesian spines and ticks.
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.set_xlabel('')
+    ax.set_ylabel('')
+
+    # Draw 8 radial spokes (half the spine line-width).
+    spoke_angles = np.linspace(0, 2 * np.pi, 9)[:-1]  # 0, 45, …, 315 °
+    for ang in spoke_angles:
+        ax.plot([0, R * np.cos(ang)], [0, R * np.sin(ang)],
+                color='lightgray', lw=spoke_lw, zorder=0)
+
+    # Draw the ring circle (spine line-width).
+    theta = np.linspace(0, 2 * np.pi, 200)
+    ax.plot(R * np.cos(theta), R * np.sin(theta),
+            color='lightgray', lw=spine_lw, zorder=0)
+
+    # Only draw labels when the axis is physically large enough that they
+    # won't collide with the ring.  Estimate axis width in inches; skip
+    # labels below ~0.8 in so that small-scale / margin axes stay clean.
+    try:
+        fig = ax.get_figure()
+        # ax.get_figure() may return a SubFigure; walk up to the root Figure
+        # so that get_size_inches() is available.
+        root_fig = fig
+        while hasattr(root_fig, 'figure') and root_fig.figure is not root_fig:
+            root_fig = root_fig.figure
+        pos = ax.get_position()          # fraction of (sub)figure
+        fig_w, fig_h = root_fig.get_size_inches()
+        ax_w_in = pos.width * fig_w
+    except Exception:
+        ax_w_in = 1.0
+
+    if show_labels and ax_w_in >= 2.0:
+        for ang in spoke_angles:
+            deg = int(round(np.degrees(ang))) % 360
+            if deg > 180:
+                deg -= 360
+            # Only label the four cardinal directions (0, 90, ±180, -90).
+            if deg % 90 != 0:
+                continue
+            is_180 = abs(deg) == 180
+            lbl = '±180°' if is_180 else f'{deg}°'
+            lr = label_r_180 if is_180 else label_r_default
+            ax.text(lr * np.cos(ang), lr * np.sin(ang),
+                    lbl, ha='center', va='center',
+                    fontsize=tick_fs, color='black', zorder=1,
+                    rotation=deg - 90 + (180 if deg < 0 else 0))
+
+    # Expand axis limits to show the ring + labels (or just ring if no labels).
+    ax.set_xlim(-pad, pad)
+    ax.set_ylim(-pad, pad)
+    ax.set_aspect('equal', adjustable='box')
 
 
 def plot_trajectory2d(ax, xs, ys, color, trace_color='k', **kw):
@@ -801,6 +908,102 @@ def plot_scatter(ax, xs, ys, color, jitter_std=0.0, correlation=False,
     return sc
 
 
+def plot_pdf(ax, xs, bins, color, ci=False, confidence=0.84, n_boot=1000,
+             show_traces=True, summary_func=None, **kw):
+    """Plot per-fly normalized histograms (PDFs) with a mean line and CI.
+
+    Parameters
+    ----------
+    ax : matplotlib Axes
+    xs : ndarray, shape (n_flies, n_frames)
+        Raw data; NaNs are silently dropped per fly.
+    bins : int or array-like
+        Bin edges or count.  When an int, edges are computed from the union
+        of all non-NaN values so that every fly uses the same bins.
+    color : color spec
+        Color for mean line, CI fill, and (optionally) individual traces.
+    ci : bool
+        If True, shade a bootstrap CI around the mean.
+    confidence : float
+        Confidence level for the CI (default 0.84).
+    n_boot : int
+        Bootstrap resamples (default 1000).
+    show_traces : bool
+        If True (default), draw a thin line for each fly's PDF.  Set to
+        False in margin contexts where only the mean + CI are needed.
+    summary_func : callable or None
+        Applied across flies to produce the mean line (default np.nanmean).
+    **kw
+        ``alpha`` (default 0.2) — opacity of individual fly traces.
+        ``lw``    (default 0.5) — line width of individual fly traces.
+
+    Returns
+    -------
+    artists : list
+    """
+    if summary_func is None:
+        summary_func = np.nanmean
+
+    alpha = kw.pop('alpha', 0.2)
+    lw = kw.pop('lw', 0.5)
+
+    # Compute global bin edges from all non-NaN data so every fly uses the
+    # same bins (required for per-fly PDFs to be meaningfully averaged).
+    all_valid = xs[~np.isnan(xs)] if xs.ndim > 1 else xs[~np.isnan(xs)]
+    if all_valid.size == 0:
+        return []
+    if isinstance(bins, int):
+        _, edges = np.histogram(all_valid, bins=bins)
+    else:
+        edges = np.asarray(bins)
+    bin_centers = (edges[:-1] + edges[1:]) / 2
+
+    # Per-fly normalized histograms.
+    hists = []
+    for row in (xs if xs.ndim == 2 else xs[np.newaxis]):
+        valid = row[~np.isnan(row)]
+        if valid.size == 0:
+            continue
+        h, _ = np.histogram(valid, bins=edges)
+        h = h.astype(float)
+        s = h.sum()
+        if s > 0:
+            h /= s
+        hists.append(h)
+
+    if not hists:
+        return []
+    hists = np.array(hists)
+
+    artists = []
+
+    # Thin trace per fly.
+    if show_traces and hists.shape[0] > 1:
+        for h in hists:
+            (line,) = ax.plot(bin_centers, h, color=color, lw=lw, alpha=alpha)
+            artists.append(line)
+
+    # Mean (thick line).
+    mean_h = summary_func(hists, axis=0)
+    (mean_line,) = ax.plot(bin_centers, mean_h, color=color, lw=2, zorder=4)
+    artists.append(mean_line)
+
+    # Bootstrap CI fill.
+    if ci and hists.shape[0] > 1:
+        rand_inds = np.random.randint(0, hists.shape[0], (n_boot, hists.shape[0]))
+        boot_means = np.nanmean(hists[rand_inds], axis=1)
+        lo, hi = np.percentile(boot_means,
+                               [100 * (1 - confidence) / 2,
+                                100 * (1 + confidence) / 2],
+                               axis=0)
+        fill = ax.fill_between(bin_centers, lo, hi,
+                               color=color, alpha=0.3,
+                               edgecolor='none', zorder=3)
+        artists.append(fill)
+
+    return artists
+
+
 # ---------------------------------------------------------------------------
 # Margin resolution helpers for TrackingExperiment.plot()
 # ---------------------------------------------------------------------------
@@ -809,10 +1012,11 @@ _MARGIN_DEFAULTS = {
     'line': ['line'],
     'hist2d': ['contour'],
     'histogram': ['histogram'],
+    'pdf': ['pdf'],
     'trajectory2d': ['trajectory2d'],
     'scatter': ['histogram'],
 }
-_1D_PLOT_TYPES = {'histogram'}
+_1D_PLOT_TYPES = {'histogram', 'pdf'}
 
 
 def _resolve_margin(margin, plot_type):
@@ -836,7 +1040,7 @@ def _resolve_margin(margin, plot_type):
         return list(_MARGIN_DEFAULTS.get(plot_type, ['line']))
     types = [margin] if isinstance(margin, str) else list(margin)
     if plot_type in _1D_PLOT_TYPES:
-        valid = [t for t in types if t in ('line', 'histogram')]
+        valid = [t for t in types if t in ('line', 'histogram', 'pdf')]
         dropped = [t for t in types if t not in valid]
         if dropped:
             import warnings as _w
@@ -849,11 +1053,20 @@ def _resolve_margin(margin, plot_type):
     return types
 
 
+_MARGIN_LINESTYLES = ['solid', 'dashed', 'dotted', 'dashdot',
+                      (0, (3, 1, 1, 1)),        # densely dash-dot
+                      (0, (5, 1)),               # densely dashed
+                      (0, (1, 1)),               # densely dotted
+                      (0, (3, 5, 1, 5, 1, 5))   # dash-dot-dot
+                      ]
+
+
 def _draw_margin_cell(margin_ax, mtype, xs, ys, color, dim,
                       summary_func, bins, probability,
                       confidence_interval, confidence, n_boot,
                       plot_type, summary_dict, n_overlays,
-                      overlay_index=0):
+                      overlay_index=0,
+                      linestyle='solid', label=None):
     """Draw one cell's contribution into a margin axis.
 
     Parameters
@@ -877,6 +1090,11 @@ def _draw_margin_cell(margin_ax, mtype, xs, ys, color, dim,
     overlay_index : int, default 0
         Zero-based index of this cell among all cells sharing the margin.
         Used by the 'trajectory2d' mtype to stack concentric CI arcs.
+    linestyle : str or tuple, default 'solid'
+        Line style passed to plot/step calls.
+    label : str or None
+        Label used for the legend entry.  Only applied to the primary
+        (mean / summary) line, not to individual traces.
     """
     if margin_ax is None or xs is None:
         return
@@ -899,7 +1117,8 @@ def _draw_margin_cell(margin_ax, mtype, xs, ys, color, dim,
         elif xs.ndim == 2 and ys is not None and ys.ndim == 2:
             mean_x = summary_func(xs, axis=0)
             y = ys[np.isnan(ys).sum(1).argmin()]
-            margin_ax.plot(mean_x, y, color=color, zorder=1)
+            margin_ax.plot(mean_x, y, color=color, zorder=1,
+                           linestyle=linestyle, label=label)
             if confidence_interval:
                 lows, highs = bootstrap_ci(xs, summary_func,
                                            confidence=confidence, n_boot=n_boot)
@@ -919,14 +1138,14 @@ def _draw_margin_cell(margin_ax, mtype, xs, ys, color, dim,
             return
         counts, edges = np.histogram(flat, bins=bins)
         if probability:
-            counts = counts / max(counts.sum(), 1)
+            counts = counts / max(counts.sum(), 1) * 100
         mid_points = (edges[:-1] + edges[1:]) / 2
         if dim == 'right':
             margin_ax.step(counts, mid_points, color=color, where='mid',
-                           alpha=alpha_overlay)
+                           alpha=alpha_overlay, linestyle=linestyle, label=label)
         else:
             margin_ax.step(mid_points, counts, color=color, where='mid',
-                           alpha=alpha_overlay)
+                           alpha=alpha_overlay, linestyle=linestyle, label=label)
 
     elif mtype == 'scatter':
         if summary_dict is None:
@@ -956,13 +1175,9 @@ def _draw_margin_cell(margin_ax, mtype, xs, ys, color, dim,
                            where='mid', alpha=alpha_overlay)
 
     elif mtype == 'trajectory2d':
-        # Mirror the main-panel trajectory2d summary objects onto the margin.
-        # Priority:
-        #   1. circ_hist — draw a confidence arc on a unit circle, with each
-        #      overlay stacked at a different radius (concentric).
-        #      The mean-angle dot is drawn at the same radius.
-        #   2. mean_line only — draw the mean 2-D trajectory on the margin.
-        #   3. Fallback — scatter of endpoint positions.
+        # Mirror ALL enabled main-panel overlays onto the margin axis.
+        # Each overlay type is drawn independently (not an if/elif chain)
+        # so that combinations like circ_hist + mean_line both appear.
         if summary_dict is None:
             return
         from matplotlib.patches import Arc as _Arc
@@ -977,11 +1192,14 @@ def _draw_margin_cell(margin_ax, mtype, xs, ys, color, dim,
         ellipse_a = summary_dict.get('ellipse_a')
         ellipse_b = summary_dict.get('ellipse_b')
         ellipse_angle = summary_dict.get('ellipse_angle')
+
+        margin_ax.set_aspect('equal', adjustable='box')
+        drew_something = False
+
         if mean_angle is not None and lb is not None and ub is not None:
-            # circ_hist path — concentric CI arcs.
+            # circ_hist — concentric CI arcs stacked by overlay_index.
             base_r = 1.0
             radius = base_r + overlay_index * arc_gap
-            margin_ax.set_aspect('equal', adjustable='box')
             for arc_color, lw, zo in [('w', 4, 4), (color, 2, 5)]:
                 arc = _Arc((0, 0),
                            width=2 * radius, height=2 * radius,
@@ -995,21 +1213,23 @@ def _draw_margin_cell(margin_ax, mtype, xs, ys, color, dim,
                     radius * np.cos(mean_angle),
                     radius * np.sin(mean_angle),
                     color=sc_color, marker='o', s=s, zorder=zo)
-            # Expand limits to show all concentric arcs.
             max_r = base_r + (n_overlays - 1) * arc_gap + 0.08
             margin_ax.set_xlim(-max_r, max_r)
             margin_ax.set_ylim(-max_r, max_r)
             # Flag this axis so the post-loop sync step skips it.
             margin_ax._traj2d_circ_hist = True
-        elif mean_radius is not None:
-            # circle path — draw mean circle on the margin (same x/y bounds as main).
-            margin_ax.set_aspect('equal', adjustable='box')
+            drew_something = True
+
+        if mean_radius is not None:
+            # circle overlay — mean radius circle.
             mc = plt.Circle((0, 0), radius=mean_radius,
                             color=color, fill=False, lw=2,
                             alpha=alpha_overlay, zorder=3)
             margin_ax.add_artist(mc)
-        elif ellipse_mean is not None:
-            # contour path — draw the confidence ellipse at 1/n_overlays opacity.
+            drew_something = True
+
+        if ellipse_mean is not None:
+            # contour overlay — confidence ellipse.
             ellipse_alpha = max(0.1, 1.0 / max(1, n_overlays))
             el = matplotlib.patches.Ellipse(
                 ellipse_mean,
@@ -1018,76 +1238,175 @@ def _draw_margin_cell(margin_ax, mtype, xs, ys, color, dim,
                 color=color, alpha=ellipse_alpha,
                 fill=True, lw=0.5, zorder=2)
             margin_ax.add_artist(el)
-            margin_ax.set_aspect('equal', adjustable='box')
-        elif trajectory is not None:
-            # mean_line path — draw mean 2-D trajectory.
+            drew_something = True
+
+        if trajectory is not None:
+            # mean_line overlay — mean 2-D trajectory.
             mean_traj = np.nanmean(trajectory, axis=0)
             margin_ax.plot(mean_traj[0], mean_traj[1],
                            color=color, lw=1.5, alpha=alpha_overlay, zorder=3)
             margin_ax.scatter(mean_traj[0, -1], mean_traj[1, -1],
                               color=color, marker='o', s=8, zorder=4)
-        elif last_pos is not None:
-            # Fallback: endpoint scatter.
+            drew_something = True
+
+        if not drew_something and last_pos is not None:
+            # Fallback: endpoint scatter when no specific overlay was available.
             margin_ax.scatter(last_pos[:, 0], last_pos[:, 1],
                               color=color, s=1, alpha=alpha_overlay,
                               edgecolors='none')
 
     elif mtype == 'contour':
-        # Draw a KDE-based HDR contour on the margin axis.
-        # Bandwidth is chosen by Scott's rule (scipy default: n^{-1/(d+4)},
-        # optimal for unimodal near-Gaussian data).
-        # The contour level is the 50th percentile of the density evaluated
-        # at the data points — this encloses the ~50% highest-density region.
-        # For n_contours > 1 multiple HDR levels are drawn (wide → narrow).
+        # Draw density contours on the margin axis.
+        #
+        # When the main plot is 'hist2d', the pre-computed histogram grid
+        # (already in summary_dict) is used directly — this is both correct
+        # (contours of the binned density) and fast (no KDE computation).
+        #
+        # For other main plot types there is no pre-computed 2D grid, so we
+        # fall back to a subsampled point-cloud gaussian_kde.
         if summary_dict is None:
             return
-        xs_raw = summary_dict.get('xs')
-        ys_raw = summary_dict.get('ys')
+        hist = summary_dict.get('hist')
         xedges = summary_dict.get('xedges')
         yedges = summary_dict.get('yedges')
-        if xs_raw is None or ys_raw is None or xedges is None or yedges is None:
-            return
-        valid = ~(np.isnan(xs_raw) | np.isnan(ys_raw))
-        xv, yv = xs_raw[valid], ys_raw[valid]
-        if xv.size < 5:
-            return
-        try:
-            from scipy.stats import gaussian_kde
-            kde = gaussian_kde(np.vstack([xv, yv]))  # Scott's rule by default
+        contour_alpha = summary_dict.get('contour_alpha', 0.3)
+        n_req = summary_dict.get('n_contours') or 1
+
+        if hist is not None and xedges is not None and yedges is not None:
+            # ---- fast path: contours from pre-computed histogram grid ----
             xcen = (xedges[:-1] + xedges[1:]) / 2
             ycen = (yedges[:-1] + yedges[1:]) / 2
-            XX, YY = np.meshgrid(xcen, ycen)
-            ZZ = kde(np.vstack([XX.ravel(), YY.ravel()])).reshape(XX.shape)
-            # HDR levels: evaluate kde at data points, use percentiles so that
-            # each level encloses a known fraction of the data mass.
-            kde_at_data = kde(np.vstack([xv, yv]))
-            n_req = summary_dict.get('n_contours') or 1
+            # hist is shape (nx, ny); contourf expects (ny, nx) → transpose
+            ZZ = hist.T.astype(float)
+            nz = ZZ[ZZ > 0]
+            if nz.size < 2:
+                return
             if n_req == 1:
                 pcts = [50]
             else:
-                # e.g. n_req=3 → [10, 30, 50] → 90%, 70%, 50% HDR
                 pcts = np.linspace(100 / (n_req + 1), 50, n_req)
-            levels = np.unique(np.percentile(kde_at_data, pcts))
+            levels = np.unique(np.percentile(nz, pcts))
             if levels.size == 0:
                 return
-            contour_alpha = summary_dict.get('contour_alpha', 0.3)
             cmap = matplotlib.colors.LinearSegmentedColormap.from_list(
                 '', [(1, 1, 1), color])
-            norm = matplotlib.colors.Normalize(
-                vmin=levels[0], vmax=ZZ.max())
-            if contour_alpha and contour_alpha > 0:
-                fill_levels = np.concatenate([levels, [ZZ.max() * 1.001]])
-                margin_ax.contourf(xcen, ycen, ZZ,
-                                   levels=fill_levels,
-                                   cmap=cmap,
-                                   norm=norm,
-                                   alpha=contour_alpha)
-            margin_ax.contour(xcen, ycen, ZZ,
-                              levels=levels,
-                              colors=[color],
-                              linewidths=0.8)
-        except Exception:
-            pass
+            norm = matplotlib.colors.Normalize(vmin=levels[0], vmax=ZZ.max())
+            try:
+                if contour_alpha and contour_alpha > 0:
+                    fill_levels = np.concatenate([levels, [ZZ.max() * 1.001]])
+                    margin_ax.contourf(xcen, ycen, ZZ,
+                                       levels=fill_levels,
+                                       cmap=cmap, norm=norm,
+                                       alpha=contour_alpha)
+                margin_ax.contour(xcen, ycen, ZZ,
+                                  levels=levels,
+                                  colors=[color], linewidths=0.8)
+            except Exception:
+                pass
+        else:
+            # ---- fallback: subsampled point-cloud KDE ----
+            xs_raw = summary_dict.get('xs')
+            ys_raw = summary_dict.get('ys')
+            if xs_raw is None or ys_raw is None:
+                return
+            valid = ~(np.isnan(xs_raw) | np.isnan(ys_raw))
+            xv, yv = xs_raw[valid], ys_raw[valid]
+            if xv.size < 5:
+                return
+            _KDE_MAX_PTS = 20_000
+            if xv.size > _KDE_MAX_PTS:
+                rng = np.random.default_rng(0)
+                idx = rng.choice(xv.size, _KDE_MAX_PTS, replace=False)
+                xv, yv = xv[idx], yv[idx]
+            try:
+                from scipy.stats import gaussian_kde
+                kde = gaussian_kde(np.vstack([xv, yv]))
+                _bins = 60
+                xcen = np.linspace(xv.min(), xv.max(), _bins)
+                ycen = np.linspace(yv.min(), yv.max(), _bins)
+                XX, YY = np.meshgrid(xcen, ycen)
+                ZZ = kde(np.vstack([XX.ravel(), YY.ravel()])).reshape(XX.shape)
+                kde_at_data = kde(np.vstack([xv, yv]))
+                if n_req == 1:
+                    pcts = [50]
+                else:
+                    pcts = np.linspace(100 / (n_req + 1), 50, n_req)
+                levels = np.unique(np.percentile(kde_at_data, pcts))
+                if levels.size == 0:
+                    return
+                cmap = matplotlib.colors.LinearSegmentedColormap.from_list(
+                    '', [(1, 1, 1), color])
+                norm = matplotlib.colors.Normalize(
+                    vmin=levels[0], vmax=ZZ.max())
+                if contour_alpha and contour_alpha > 0:
+                    fill_levels = np.concatenate([levels, [ZZ.max() * 1.001]])
+                    margin_ax.contourf(xcen, ycen, ZZ,
+                                       levels=fill_levels,
+                                       cmap=cmap, norm=norm,
+                                       alpha=contour_alpha)
+                margin_ax.contour(xcen, ycen, ZZ,
+                                  levels=levels,
+                                  colors=[color], linewidths=0.8)
+            except Exception:
+                pass
+
+    elif mtype == 'pdf':
+        # Per-fly normalized histogram mean + CI on the margin axis.
+        data = (ys if dim == 'right' else xs)
+        if data is None:
+            return
+        # Guarantee 2-D so per-fly iteration works.
+        if data.ndim == 1:
+            data = data[np.newaxis]
+        all_valid = data[~np.isnan(data)]
+        if all_valid.size == 0:
+            return
+        if isinstance(bins, int):
+            _, _edges = np.histogram(all_valid, bins=bins)
+        else:
+            _edges = np.asarray(bins)
+        _centers = (_edges[:-1] + _edges[1:]) / 2
+        _hists = []
+        for _row in data:
+            _v = _row[~np.isnan(_row)]
+            if _v.size == 0:
+                continue
+            _h, _ = np.histogram(_v, bins=_edges)
+            _h = _h.astype(float)
+            _s = _h.sum()
+            if _s > 0:
+                _h /= _s
+            if probability:
+                _h *= 100
+            _hists.append(_h)
+        if not _hists:
+            return
+        _hists = np.array(_hists)
+        _mean_h = np.nanmean(_hists, axis=0)
+        if _hists.shape[0] > 1:
+            _rand = np.random.randint(0, _hists.shape[0],
+                                      (n_boot, _hists.shape[0]))
+            _boot = np.nanmean(_hists[_rand], axis=1)
+            _lo, _hi = np.percentile(
+                _boot,
+                [100 * (1 - confidence) / 2, 100 * (1 + confidence) / 2],
+                axis=0)
+        else:
+            _lo = _hi = _mean_h
+        if dim == 'right':
+            margin_ax.plot(_mean_h, _centers,
+                           color=color, lw=2, zorder=4, alpha=alpha_overlay,
+                           linestyle=linestyle, label=label)
+            margin_ax.fill_betweenx(_centers, _lo, _hi,
+                                    color=color, alpha=0.3,
+                                    edgecolor='none', zorder=3)
+        else:
+            margin_ax.plot(_centers, _mean_h,
+                           color=color, lw=2, zorder=4, alpha=alpha_overlay,
+                           linestyle=linestyle, label=label)
+            margin_ax.fill_between(_centers, _lo, _hi,
+                                   color=color, alpha=0.3,
+                                   edgecolor='none', zorder=3)
 
 
 # ---------------------------------------------------------------------------
@@ -2355,7 +2674,7 @@ class TrackingExperiment():
         #     ret += [trial.query_saccades(**kwargs)]
         # return ret
 
-    def detect_saccades(self, key='camera_heading', threshold_speed=350, **find_peaks_kwargs):
+    def detect_saccades(self, key='camera_heading', threshold_speed=200, **find_peaks_kwargs):
         """Detect saccades for every trial in the experiment.
 
         Calls :meth:`TrackingTrial.detect_saccades` on each trial with the
@@ -2369,6 +2688,16 @@ class TrackingExperiment():
             Minimum peak speed (degrees/s) required to keep a saccade.
         **find_peaks_kwargs
             Forwarded to :func:`_detect_saccades` (distance, width, prominence, wlen).
+
+        Examples
+        --------
+        ::
+
+            exp.detect_saccades()          # run on every trial
+            exp.save()                     # persist all saccade tables
+
+            # Retrieve all amplitudes across the experiment
+            amps = exp.query(object='saccade', output='amplitude')
         """
         for trial in self.trials:
             trial.detect_saccades(key=key, threshold_speed=threshold_speed, **find_peaks_kwargs)
@@ -2393,6 +2722,15 @@ class TrackingExperiment():
         pandas.DataFrame
             One row per saccade across all trials, with a leading
             ``trial_filename`` column.
+
+        Examples
+        --------
+        ::
+
+            exp.detect_saccades()
+            df = exp.saccade_table_df(extra_cols=['condition', 'fly_id'])
+            print(df.head())
+            # trial_filename  test_ind  amplitude  peak_velocity  ...  condition  fly_id
         """
         import pandas as pd
         frames = []
@@ -2608,14 +2946,15 @@ class TrackingExperiment():
              xlim=None, ylim=None, xticks=None, yticks=None,
              logx=False, logy=False, display=None,
              summary_func=np.nanmean, xlabel=None, ylabel=None,
-             scale=1.5, bins=100, density=False, probability=False,
+             scale=1.5, bins=100, margin_bins=None, right_margin_bins=None, bottom_margin_bins=None, density=False, probability=False,
              omit_wrap=True, confidence_interval=False, confidence=0.84,
-             n_boot=1000, groupby=None, agg_func=None,
+             n_boot=1000, groupby=None, agg_func=None, margin_groupby=None,
              positive_amplitude=False, min_speed=None, max_speed=None,
              show_n=False, relative_to='start',
              rad2deg=False,
              right_margin_xlim=None, right_margin_ylim=None,
              bottom_margin_xlim=None, bottom_margin_ylim=None,
+             subplot_size=None, right_margin_ratio=1.0, bottom_margin_ratio=1.0,
              plot_kwargs=None, **query_kwargs):
         """Unified grid-plot entry point for TrackingExperiment.
 
@@ -2636,7 +2975,7 @@ class TrackingExperiment():
         col_var, row_var : str or None
             Variables that parameterise the grid columns and rows.  Pass
             ``None`` for a single column or row.
-        plot_type : {'line', 'hist2d', 'trajectory2d', 'histogram', 'scatter'}
+        plot_type : {'line', 'hist2d', 'trajectory2d', 'histogram', 'scatter', 'pdf'}
             Drawing style per panel.
         object : {'trial', 'saccade'}
             Data source.  ``'saccade'`` requires :meth:`detect_saccades` to
@@ -2682,12 +3021,44 @@ class TrackingExperiment():
             Confidence level for bootstrap CI and ``trajectory2d`` overlays.
         n_boot : int, default 1000
             Number of bootstrap resamples for CI estimation.
-        groupby : {'saccade', 'test', 'trial'} or None
-            Grouping granularity for ``object='saccade'`` scalar queries.
-            ``None`` is treated as ``'saccade'`` (flat, one value per saccade).
+        groupby : {'saccade', 'test', 'trial'} or str or None
+            Controls grouping at **two levels**:
+
+            *Scalar saccade queries* (``object='saccade'``, non-line plot
+            types) — accepts the keyword values ``'saccade'`` (default),
+            ``'test'``, or ``'trial'`` with the same semantics as
+            :meth:`TrackingTrial.query`.
+
+            *Saccade trajectory plots* (``object='saccade', plot_type='line'``)
+            — additionally accepts any :class:`TrackingTrial` attribute name
+            (e.g. ``'fly_id'``):
+
+            - ``None`` / ``'saccade'`` — one thin line per individual saccade;
+              ``plot_line`` handles mean/CI and optional ``split_by_sign``
+              internally across all saccades.
+            - Attribute name — saccades sharing the same attribute value are
+              averaged into one trace per group.  The thin lines are therefore
+              group means and the CI reflects across-group variance.  When
+              ``split_by_sign=True`` is passed in ``plot_kwargs``, positive and
+              negative-amplitude saccades are averaged **separately** within
+              each group (up to 2 × n_groups traces).
         agg_func : callable or None
-            Aggregation function applied per group when ``groupby`` is
-            ``'test'`` or ``'trial'``.  Default ``np.nanmean``.
+            Aggregation function applied per group for scalar saccade queries
+            when ``groupby`` is ``'test'`` or ``'trial'``.  Default
+            ``np.nanmean``.
+        margin_groupby : str or None, default None
+            :class:`TrackingTrial` attribute used to group data into per-group
+            distributions for marginal ``'pdf'`` (and ``'histogram'``) plots.
+            Independent of ``groupby``: you can display one thin line per
+            saccade (``groupby=None``) while still computing per-fly marginal
+            distributions (``margin_groupby='fly_id'``).
+
+            - ``None`` — saccade data: one group per trial object (preserves
+              original behaviour).  Trial data: pdf rows = individual trial rows.
+            - Attribute name — all saccades (or trial rows) sharing the same
+              value are pooled before normalising.  Each group yields one
+              normalised histogram; the marginal mean ± CI is then computed
+              across groups — statistically correct across biological subjects.
         positive_amplitude : bool, default False
             Only for ``object='saccade', plot_type='line'``.  Flip negative
             saccade traces so all traces end with positive displacement.
@@ -2805,7 +3176,11 @@ class TrackingExperiment():
             query_kwargs['sort_by'] = 'test_ind'
         subset = copy.copy(query_kwargs['subset'])
         sort_by = query_kwargs['sort_by']
-        _groupby = 'saccade' if groupby is None else groupby
+        # For scalar saccade queries, only the keyword values are valid;
+        # an attribute name (e.g. 'fly_id') means "no grouping" there.
+        _saccade_groupby_keywords = {'saccade', 'test', 'trial'}
+        _groupby = (groupby if groupby in _saccade_groupby_keywords
+                    else 'saccade')
         if agg_func is not None:
             _agg_func = agg_func
         elif object == 'saccade' and plot_type == 'line':
@@ -2838,13 +3213,15 @@ class TrackingExperiment():
 
         num_rows = n_data_rows + (1 if _has_bottom else 0)
         num_cols = n_data_cols + (1 if _has_right else 0)
-        figsize = (scale * (num_cols + 1), scale * (num_rows + 1))
 
         if display is None:
-            fig = plt.figure(figsize=figsize)
+            _subplot_size = subplot_size if subplot_size is not None else (scale * 2, scale * 2)
             self.display = SummaryDisplay(
                 num_rows=num_rows, num_cols=num_cols,
-                right_margin=_has_right, bottom_margin=_has_bottom, fig=fig)
+                right_margin=_has_right, bottom_margin=_has_bottom,
+                subplot_size=_subplot_size,
+                right_margin_ratio=right_margin_ratio,
+                bottom_margin_ratio=bottom_margin_ratio)
         else:
             self.display = display
         trace_axes = self.display.trace_axes
@@ -2879,7 +3256,7 @@ class TrackingExperiment():
                         return None, None, {}
                     if not saccades:
                         return None, None, {}
-                    xs_list, ys_list, span_list, ref_indices = [], [], [], []
+                    xs_list, ys_list, span_list, ref_indices, sign_list = [], [], [], [], []
                     for s in saccades:
                         xv = np.array(getattr(s, xvar))
                         yv = np.array(getattr(s, yvar))
@@ -2899,8 +3276,16 @@ class TrackingExperiment():
                         else:
                             ref_y = 0.0
                         if positive_amplitude and np.any(~np.isnan(xv)):
+                            # Track amplitude sign before positive_amplitude flip
+                            # (used later when split_by_sign=True with groupby).
+                            _ep = xv[~np.isnan(xv)][-1]
+                            sign_list.append(1 if _ep >= 0 else -1)
                             if xv[~np.isnan(xv)][-1] < 0:
                                 xv = -xv
+                        else:
+                            _non_nan = xv[~np.isnan(xv)]
+                            sign_list.append(
+                                1 if (len(_non_nan) == 0 or _non_nan[-1] >= 0) else -1)
                         xs_list.append(xv)
                         ys_list.append(yv)
                         ref_indices.append(ref_idx)
@@ -2921,11 +3306,105 @@ class TrackingExperiment():
                         return None, None, {}
                     xs_pad = np.full((len(xs_list), total_len), np.nan)
                     ys_pad = np.full((len(ys_list), total_len), np.nan)
+                    # stop_cols[i]  = padded column index of s.stop for saccade i.
+                    # margin_gids[i] = margin_groupby key (for per-group pdf margin).
+                    # traj_gids[i]   = groupby key (for trajectory averaging).
+                    _groupby_is_attr = (groupby is not None
+                                        and groupby not in _saccade_groupby_keywords)
+                    _split_by_sign = plot_kwargs.get('split_by_sign', False)
+                    stop_cols = []
+                    margin_gids = []
+                    traj_gids = []
                     for i, (xv, yv) in enumerate(zip(xs_list, ys_list)):
                         offset = max_before - ref_indices[i]
                         xs_pad[i, offset:offset + len(xv)] = xv
                         ys_pad[i, offset:offset + len(yv)] = yv
-                    return xs_pad, ys_pad, {'spans': span_list}
+                        sc = offset + saccades[i].stop
+                        stop_cols.append(min(sc, total_len - 1))
+                        # Margin grouping key (independent of trajectory grouping).
+                        if margin_groupby is not None:
+                            key = getattr(saccades[i].trial, margin_groupby, None)
+                            margin_gids.append(key if key is not None
+                                               else id(saccades[i].trial))
+                        else:
+                            margin_gids.append(id(saccades[i].trial))
+                        # Trajectory grouping key (only when groupby is an attr name).
+                        if _groupby_is_attr:
+                            key = getattr(saccades[i].trial, groupby, None)
+                            traj_gids.append(key if key is not None
+                                             else id(saccades[i].trial))
+
+                    # 1D flat endpoints (raw, one value per saccade) for the
+                    # histogram margin mtype.  Built from xs_pad before any
+                    # per-group averaging so they always represent individual
+                    # saccade stopping points.
+                    stop_xs_flat = np.array([
+                        xs_pad[i, sc] if 0 <= sc < xs_pad.shape[1] else np.nan
+                        for i, sc in enumerate(stop_cols)])
+                    stop_ys_flat = np.array([
+                        ys_pad[i, sc] if 0 <= sc < ys_pad.shape[1] else np.nan
+                        for i, sc in enumerate(stop_cols)])
+
+                    # Build per-margin-group endpoint arrays for the pdf margin.
+                    # Each row = one margin group (e.g. one fly), values =
+                    # that group's saccade stopping points (NaN-padded).
+                    unique_margin_gids = list(dict.fromkeys(margin_gids))
+                    _stop_xs_by_group, _stop_ys_by_group = [], []
+                    for gid in unique_margin_gids:
+                        idxs = [i for i, g in enumerate(margin_gids) if g == gid]
+                        _stop_xs_by_group.append(
+                            [xs_pad[i, stop_cols[i]] for i in idxs])
+                        _stop_ys_by_group.append(
+                            [ys_pad[i, stop_cols[i]] for i in idxs])
+                    _max_s = max(len(r) for r in _stop_xs_by_group)
+                    def _pad_rows(rows, width):
+                        out = np.full((len(rows), width), np.nan)
+                        for ri, r in enumerate(rows):
+                            out[ri, :len(r)] = r
+                        return out
+                    stop_xs_by_group = _pad_rows(_stop_xs_by_group, _max_s)
+                    stop_ys_by_group = _pad_rows(_stop_ys_by_group, _max_s)
+
+                    # Trajectory averaging: when groupby names a trial attribute,
+                    # average saccade traces within each group so the thin lines
+                    # are group means and the CI reflects across-group variance.
+                    # When split_by_sign=True, positive and negative-amplitude
+                    # saccades are averaged separately within each group.
+                    if _groupby_is_attr:
+                        unique_traj_gids = list(dict.fromkeys(traj_gids))
+                        avg_rows_xs, avg_rows_ys = [], []
+                        for gid in unique_traj_gids:
+                            idxs = [i for i, g in enumerate(traj_gids) if g == gid]
+                            if _split_by_sign:
+                                pos_idxs = [i for i in idxs if sign_list[i] >= 0]
+                                neg_idxs = [i for i in idxs if sign_list[i] < 0]
+                                if pos_idxs:
+                                    avg_rows_xs.append(
+                                        np.nanmean(xs_pad[pos_idxs], axis=0))
+                                    avg_rows_ys.append(
+                                        np.nanmean(ys_pad[pos_idxs], axis=0))
+                                if neg_idxs:
+                                    avg_rows_xs.append(
+                                        np.nanmean(xs_pad[neg_idxs], axis=0))
+                                    avg_rows_ys.append(
+                                        np.nanmean(ys_pad[neg_idxs], axis=0))
+                            else:
+                                avg_rows_xs.append(
+                                    np.nanmean(xs_pad[idxs], axis=0))
+                                avg_rows_ys.append(
+                                    np.nanmean(ys_pad[idxs], axis=0))
+                        if avg_rows_xs:
+                            xs_pad = np.array(avg_rows_xs)
+                            ys_pad = np.array(avg_rows_ys)
+                        span_list = []  # not meaningful for averaged traces
+
+                    return xs_pad, ys_pad, {
+                        'spans': span_list,
+                        'stop_xs_flat': stop_xs_flat,
+                        'stop_ys_flat': stop_ys_flat,
+                        'stop_xs_by_group': stop_xs_by_group,
+                        'stop_ys_by_group': stop_ys_by_group,
+                    }
                 else:
                     # Scalar saccade-table column queries.
                     try:
@@ -3002,6 +3481,41 @@ class TrackingExperiment():
             if plot_type == 'trajectory2d':
                 return xs, ys, {}
 
+            # For line and pdf plot types, build a per-group xs array when
+            # margin_groupby is set.  Each unique attribute value on the trial
+            # objects contributes one row (nanmean of its trials' data) so that
+            # the pdf margin computes one normalised histogram per group.
+            _xs_margin_grouped = None
+            if margin_groupby is not None:
+                _mg_groups = {}
+                for t in self.trials:
+                    gv = getattr(t, margin_groupby, None)
+                    if gv is None:
+                        continue
+                    try:
+                        _td = np.array(t.query(output=xvar, subset=cell_subset,
+                                               sort_by=sort_by))
+                    except Exception:
+                        continue
+                    if _td.size == 0:
+                        continue
+                    if _td.ndim > 1:
+                        _td = _td.reshape(-1, _td.shape[-1])
+                    if gv not in _mg_groups:
+                        _mg_groups[gv] = []
+                    _mg_groups[gv].append(_td)
+                if _mg_groups:
+                    _mg_rows = [np.nanmean(np.vstack(arrs), axis=0)
+                                for arrs in _mg_groups.values()]
+                    _xs_margin_grouped = np.array(_mg_rows)
+
+            _trial_extras = ({} if _xs_margin_grouped is None
+                             else {'xs_margin_grouped': _xs_margin_grouped})
+
+            if plot_type == 'pdf':
+                # Keep 2-D so plot_pdf can compute per-row histograms.
+                return xs, None, _trial_extras
+
             # plot_type == 'line': optionally insert NaN at wrapping discontinuities.
             if omit_wrap and ys is not None and ys.ndim == 2:
                 xs_w, mask = omit_wrapping(xs, return_mask=True)
@@ -3010,8 +3524,8 @@ class TrackingExperiment():
                     vl = min(ys.shape[1], ys_w.shape[1])
                     ys_w[i, :vl] = ys[i, :vl]
                 ys_w[~mask] = np.nan
-                return xs_w, ys_w, {}
-            return xs, ys, {}
+                return xs_w, ys_w, _trial_extras
+            return xs, ys, _trial_extras
 
         # ---------------------------------------------------------------- #
         # Pre-query pass: collect data + compute cross-panel normalisers   #
@@ -3165,6 +3679,11 @@ class TrackingExperiment():
                         kw['vmax'] = global_hist2d_vmax
                     _n_contours = kw.pop('n_contours', 0)
                     _contour_alpha = kw.pop('contour_alpha', 0.3)
+                    # Suppress per-panel colorbars by default: the colour
+                    # scale is already unified via global_hist2d_vmax, and
+                    # plt.colorbar() rewrites the SubFigure GridSpec on each
+                    # call which hangs indefinitely for multi-panel grids.
+                    kw.setdefault('cbar', False)
                     result = plot_hist2d(ax, xs, ys, cell_color,
                                         bins=bins, density=density,
                                         n_contours=_n_contours,
@@ -3198,6 +3717,17 @@ class TrackingExperiment():
                         continue
                     plot_scatter(ax, xs, ys, cell_color, **kw)
 
+                elif plot_type == 'pdf':
+                    plot_pdf(ax, xs, bins, cell_color,
+                             ci=confidence_interval,
+                             confidence=confidence,
+                             n_boot=n_boot,
+                             show_traces=True,
+                             summary_func=(summary_func
+                                           if callable(summary_func)
+                                           else None),
+                             **kw)
+
                 # Per-cell N / n annotation.
                 if show_n and (row_i, col_i) in cell_counts:
                     _N_val, _n_val = cell_counts[(row_i, col_i)]
@@ -3205,23 +3735,101 @@ class TrackingExperiment():
                             transform=ax.transAxes,
                             fontsize=plt.rcParams.get('xtick.labelsize',
                                                       plt.rcParams.get('font.size', 10)),
-                            ha='right', va='bottom', color='gray', zorder=10)
+                            ha='right', va='bottom', color='black', zorder=10)
 
                 # Margin drawing for this cell.
+                # For saccade line plots, histogram margins show the endpoint
+                # (stopping value) of each saccade trace, not all time points.
+                _margin_xs, _margin_ys = xs, ys
+                _pdf_margin_xs, _pdf_margin_ys = xs, ys  # per-fly grouped, for pdf mtype
+                if object == 'saccade' and plot_type == 'line':
+                    # Histogram mtype uses the raw 1-D saccade stopping-point
+                    # values (precomputed in _get_xs_ys before any averaging).
+                    if 'stop_xs_flat' in cell_extra:
+                        _margin_xs = cell_extra['stop_xs_flat']
+                        _margin_ys = cell_extra['stop_ys_flat']
+                        # stop_xs_flat is built in radians; convert if needed.
+                        if rad2deg and _margin_xs is not None:
+                            _margin_xs = np.degrees(_margin_xs)
+                    elif xs is not None and xs.ndim == 2:
+                        # Fallback: last non-NaN value per row.
+                        _margin_xs = np.array([
+                            row[~np.isnan(row)][-1] if np.any(~np.isnan(row))
+                            else np.nan for row in xs])
+                        if ys is not None and ys.ndim == 2:
+                            _margin_ys = np.array([
+                                row[~np.isnan(row)][-1] if np.any(~np.isnan(row))
+                                else np.nan for row in ys])
+                    # Per-margin-group endpoints for pdf mtype (2D: n_groups × n_saccades).
+                    # stop_xs_by_group is built in radians; apply rad2deg if needed.
+                    _pdf_margin_xs = cell_extra.get('stop_xs_by_group', _margin_xs)
+                    if rad2deg and 'stop_xs_by_group' in cell_extra and _pdf_margin_xs is not None:
+                        _pdf_margin_xs = np.degrees(_pdf_margin_xs)
+                    _pdf_margin_ys = cell_extra.get('stop_ys_by_group', _margin_ys)
+                elif 'xs_margin_grouped' in cell_extra:
+                    # For trial-level plots, margin_groupby provides a
+                    # per-group 2D array for the pdf margin.
+                    _pdf_margin_xs = cell_extra['xs_margin_grouped']
+
+                _fallback_bins = margin_bins if margin_bins is not None else bins
+                _right_bins = right_margin_bins if right_margin_bins is not None else _fallback_bins
+                _bottom_bins = bottom_margin_bins if bottom_margin_bins is not None else _fallback_bins
+
+                # When one cmap is None, cells sharing a margin axis all get
+                # the same color.  Use distinct linestyles + labels so they
+                # can be told apart.
+                _right_ls = _MARGIN_LINESTYLES[col_i % len(_MARGIN_LINESTYLES)] \
+                    if col_cmap is None and n_data_cols > 1 else 'solid'
+                _right_lbl = (str(col_val) if col_cmap is None and n_data_cols > 1
+                              else None)
+                _bottom_ls = _MARGIN_LINESTYLES[row_i % len(_MARGIN_LINESTYLES)] \
+                    if row_cmap is None and n_data_rows > 1 else 'solid'
+                _bottom_lbl = (str(row_val) if row_cmap is None and n_data_rows > 1
+                               else None)
+
                 for mtype in right_margin_types:
+                    _rx = _pdf_margin_xs if mtype == 'pdf' else _margin_xs
+                    _ry = _pdf_margin_ys if mtype == 'pdf' else _margin_ys
                     _draw_margin_cell(
-                        row_summ_ax, mtype, xs, ys, cell_color, 'right',
-                        summary_func, bins, probability,
+                        row_summ_ax, mtype, _rx, _ry, cell_color, 'right',
+                        summary_func, _right_bins, probability,
                         confidence_interval, confidence, n_boot,
                         plot_type, summary_dict, n_data_cols,
-                        overlay_index=col_i)
+                        overlay_index=col_i,
+                        linestyle=_right_ls, label=_right_lbl)
                 for mtype in bottom_margin_types:
+                    _bx = _pdf_margin_xs if mtype == 'pdf' else _margin_xs
+                    _by = _pdf_margin_ys if mtype == 'pdf' else _margin_ys
                     _draw_margin_cell(
-                        col_summ_ax, mtype, xs, ys, cell_color, 'bottom',
-                        summary_func, bins, probability,
+                        col_summ_ax, mtype, _bx, _by, cell_color, 'bottom',
+                        summary_func, _bottom_bins, probability,
                         confidence_interval, confidence, n_boot,
                         plot_type, summary_dict, n_data_rows,
-                        overlay_index=row_i)
+                        overlay_index=row_i,
+                        linestyle=_bottom_ls, label=_bottom_lbl)
+
+        # Add legends to margin axes where linestyles were used to distinguish
+        # overlapping same-color lines (i.e. the corresponding cmap was None).
+        _leg_fs = plt.rcParams.get('xtick.labelsize',
+                                   plt.rcParams.get('font.size', 8))
+        if col_cmap is None and n_data_cols > 1 and _has_right:
+            _leg_title = col_var if col_var else None
+            for _rax in self.display.right_col:
+                if _rax is not None:
+                    _handles, _labels = _rax.get_legend_handles_labels()
+                    if _handles:
+                        _rax.legend(_handles, _labels, title=_leg_title,
+                                    fontsize=_leg_fs, title_fontsize=_leg_fs,
+                                    loc='best', framealpha=0.7)
+        if row_cmap is None and n_data_rows > 1 and _has_bottom:
+            _leg_title = row_var if row_var else None
+            for _bax in self.display.bottom_row:
+                if _bax is not None:
+                    _handles, _labels = _bax.get_legend_handles_labels()
+                    if _handles:
+                        _bax.legend(_handles, _labels, title=_leg_title,
+                                    fontsize=_leg_fs, title_fontsize=_leg_fs,
+                                    loc='best', framealpha=0.7)
 
         # ---------------------------------------------------------------- #
         # Format and label                                                  #
@@ -3298,6 +3906,7 @@ class TrackingExperiment():
                     elif _same_type_right:
                         _rax.set_xlim(_main_xlim)
                     else:
+                        _rax.autoscale(enable=True, axis='x')
                         _rax.relim()
                         _rax.autoscale_view(scalex=True, scaley=False)
 
@@ -3315,22 +3924,68 @@ class TrackingExperiment():
                     elif _same_type_bottom:
                         _bax.set_ylim(_main_ylim)
                     else:
+                        _bax.autoscale(enable=True, axis='y')
                         _bax.relim()
                         _bax.autoscale_view(scalex=False, scaley=True)
+                        # relim() ignores PolyCollection (fill_between CI bands),
+                        # so expand the ylim manually to cover them.
+                        _y0, _y1 = _bax.get_ylim()
+                        for _coll in _bax.collections:
+                            try:
+                                _verts = _coll.get_paths()
+                                for _p in _verts:
+                                    _ys = _p.vertices[:, 1]
+                                    _y0 = min(_y0, float(_ys.min()))
+                                    _y1 = max(_y1, float(_ys.max()))
+                            except Exception:
+                                pass
+                        # Normalise: if format() applied an inverted ylim the
+                        # autoscaled values may still be ordered (high, low).
+                        if _y0 > _y1:
+                            _y0, _y1 = _y1, _y0
+                        _bax.set_ylim(_y0, _y1)
 
-        # Override the auto-assigned ylabel/xlabel on histogram margin axes:
+        # Override the auto-assigned ylabel/xlabel on histogram/pdf margin axes:
         # format() propagates the main plot's y/x label to margin axes, but
-        # histogram margins show counts, not the original variable.
-        _count_label = 'probability' if probability else 'count'
-        if _has_bottom and 'histogram' in bottom_margin_types:
-            for _bax in self.display.bottom_row:
-                if _bax is not None:
-                    _bax.set_ylabel(_count_label)
-        if _has_right and 'histogram' in right_margin_types:
-            for _rax in self.display.right_col:
-                if _rax is not None:
-                    _rax.set_xlabel(_count_label)
+        # histogram/pdf margins show counts, not the original variable.
+        _count_label = '%' if probability else 'count'
+        _count_bottom_types = {'histogram', 'pdf'}
+        _count_right_types = {'histogram', 'pdf'}
+        if _has_bottom and _count_bottom_types & set(bottom_margin_types):
+            # Only label the leftmost bottom-margin axis (the one that has ticks).
+            _baxes = [a for a in self.display.bottom_row if a is not None]
+            if _baxes:
+                _baxes[0].set_ylabel(_count_label)
+        if _has_right and _count_right_types & set(right_margin_types):
+            # Only label the bottommost right-margin axis (the one that has ticks).
+            _raxes = [a for a in self.display.right_col if a is not None]
+            if _raxes:
+                _raxes[-1].set_xlabel(_count_label)
         self.display.label_margins(row_vals, row_var, col_vals, col_var)
+
+        # For trajectory2d, replace the Cartesian spines with a polar ring
+        # on every trace axis and every margin axis.
+        if plot_type == 'trajectory2d':
+            _circ_hist = plot_kwargs.get('circ_hist', False)
+            # Labels appear only on the first (top-left) trace subplot.
+            _first_polar = True
+            for _tax in self.display.trace_axes.flat:
+                while isinstance(_tax, np.ndarray):
+                    _tax = _tax[0]
+                _add_polar_ring(_tax, has_circ_hist=bool(_circ_hist),
+                                show_labels=_first_polar)
+                _first_polar = False
+            # Margin axes never show labels.
+            if _has_right:
+                for _rax in self.display.right_col:
+                    if _rax is not None:
+                        _add_polar_ring(_rax, has_circ_hist=bool(_circ_hist),
+                                        show_labels=False)
+            if _has_bottom:
+                for _bax in self.display.bottom_row:
+                    if _bax is not None:
+                        _add_polar_ring(_bax, has_circ_hist=bool(_circ_hist),
+                                        show_labels=False)
 
     def plot_saccades(self, col_var, row_var, output_var='camera_heading', time_var='time', start=0, 
                       stop=.5, row_cmap=None, col_cmap=None, 
@@ -3584,15 +4239,19 @@ class TrackingExperiment():
         # ---------------------------------------------------------------- #
         # Figure layout                                                     #
         # ---------------------------------------------------------------- #
-        fig, axes = plt.subplots(
-            nrows=3, ncols=2,
-            width_ratios=[1, 1], height_ratios=[1, 1, 1],
-            figsize=(4 * scale, 6 * scale),
+        # Use SummaryDisplay: 2 data rows × 1 data col, with right and
+        # bottom margins.  Total gridspec = 3 rows × 2 cols.
+        display = SummaryDisplay(
+            num_rows=3, num_cols=2,
+            right_margin=True, bottom_margin=True,
+            subplot_size=(2 * scale, 2 * scale),
+            right_margin_ratio=0.5,
+            bottom_margin_ratio=0.5,
         )
-        axes[-1, -1].set_visible(False)
-        bottom_ax = axes[-1, 0]
-        right_col = axes[:-1, -1]
-        scatter_axes = axes[:-1, 0]
+        self.display = display
+        scatter_axes = display.trace_axes[:, 0]   # shape (2,): duration row, speed row
+        right_col = display.right_col             # shape (2,): CI strip plots
+        bottom_ax = display.bottom_row[0]         # magnitude strip plot
 
         # ---------------------------------------------------------------- #
         # Data-extraction and scatter draw pass                             #
@@ -3690,32 +4349,58 @@ class TrackingExperiment():
         # ---------------------------------------------------------------- #
         # Formatting                                                        #
         # ---------------------------------------------------------------- #
-        deg_ticks = np.array([1, 2, 4, 8, 16, 32, 64, 128])
-        deg_ticks_rad = deg_ticks * np.pi / 180.
+        # x-axis: log scale, auto-located ticks, labelled as integer degrees
+        # rounded to the nearest power of 2.  Auto-location lets matplotlib
+        # reduce density when the figure is small.
+        def _rad_to_pow2_deg(x, _pos):
+            deg = x * 180. / np.pi
+            if deg <= 0:
+                return ''
+            p = round(np.log2(deg))
+            return str(int(2 ** p))
+
+        _pow2_fmt = matplotlib.ticker.FuncFormatter(_rad_to_pow2_deg)
 
         for ax in [scatter_axes[0], scatter_axes[1], bottom_ax]:
             ax.set_xscale('log')
-            ax.set_xticks(deg_ticks_rad, deg_ticks.astype(str))
+            ax.xaxis.set_major_formatter(_pow2_fmt)
 
-        for ax, ylim in zip(
+        for ax, ylim, yticks, ylabels in zip(
                 [scatter_axes[0], scatter_axes[1], right_col[0], right_col[1]],
-                [(.01, .5), (1, 2000), (.01, .5), (1, 2000)]):
+                [(.01, .5), (1, 2000), (.01, .5), (1, 2000)],
+                [[.01, .1], [1, 10, 100, 1000], [.01, .1], [1, 10, 100, 1000]],
+                [['0.01', '0.1'], ['1', '10', '100', '1000'],
+                 ['0.01', '0.1'], ['1', '10', '100', '1000']]):
             ax.set_yscale('log')
             ax.set_ylim(ylim)
+            ax.set_yticks(yticks, ylabels)
 
-        for ax in [right_col[0], right_col[1], bottom_ax]:
+        for ax in [right_col[0], right_col[1]]:
             ax.minorticks_off()
-        for ax in scatter_axes:
-            ax.tick_params(axis='x', which='minor', bottom=False)
+        bottom_ax.yaxis.set_minor_locator(matplotlib.ticker.NullLocator())
 
-        xmin = np.pi / 180.
-        xmax = 2 * np.pi
+        xmin = 1. * np.pi / 180.
+        xmax = 128. * np.pi / 180.
         bottom_ax.set_xlim(xmin, xmax)
+
+        class _BoundedLog2Locator(matplotlib.ticker.LogLocator):
+            """LogLocator(base=2) that always includes the axis boundary ticks."""
+            def __init__(self, forced):
+                super().__init__(base=2)
+                self._forced = list(forced)
+
+            def tick_values(self, vmin, vmax):
+                ticks = set(super().tick_values(vmin, vmax))
+                ticks.update(v for v in self._forced if vmin <= v <= vmax)
+                return sorted(ticks)
+
+        for ax in [scatter_axes[0], scatter_axes[1], bottom_ax]:
+            ax.xaxis.set_major_locator(_BoundedLog2Locator([xmin, xmax]))
 
         for ax, lbl in zip(scatter_axes,
                            ["duration (s)", r"peak speed ($\degree$/s)"]):
-            ax.set_xticklabels([])
-            sbn.despine(ax=ax, bottom=True, trim=False)
+            for _side in ('top', 'right', 'bottom'):
+                _hide_spine(ax, _side)
             ax.set_ylabel(lbl)
 
         right_col[0].sharey(scatter_axes[0])
@@ -3735,21 +4420,24 @@ class TrackingExperiment():
             return s
         group_labels = [_shorten(v) for v in group_vals]
 
-        sbn.despine(ax=right_col[0], bottom=True, left=True, trim=True)
+        for _side in ('top', 'right', 'left', 'bottom'):
+            _hide_spine(right_col[0], _side)
         right_col[0].set_xlim(-_strip_pad, _n_grp - 1 + _strip_pad)
 
         right_col[1].set_xticks(range(len(group_vals)), group_labels)
         right_col[1].set_xlabel(group_var.replace("_", " "))
-        sbn.despine(ax=right_col[1], bottom=False, left=True, trim=True)
+        for _side in ('top', 'right', 'left'):
+            _hide_spine(right_col[1], _side)
         right_col[1].set_xlim(-_strip_pad, _n_grp - 1 + _strip_pad)
 
         bottom_ax.set_yticks(range(len(group_vals)), group_labels)
         bottom_ax.set_ylim(-_strip_pad, _n_grp - 1 + _strip_pad)
         bottom_ax.set_xlabel(r"magnitude ($\degree$)")
         bottom_ax.set_ylabel(group_var.replace("_", " "))
-        sbn.despine(ax=bottom_ax, trim=True)
+        for _side in ('top', 'right'):
+            _hide_spine(bottom_ax, _side)
 
-        plt.tight_layout()
+        display._get_parent_figure().tight_layout()
 
     def plot_summary(self, xvar, yvar, col_var, row_var, 
                      row_cmap=None, col_cmap=None, fig=None,
@@ -3981,39 +4669,82 @@ class TrackingExperiment():
 
 
 class SummaryDisplay():
-    def __init__(self, num_rows=1, num_cols=1, right_margin=True, bottom_margin=True, figsize=None,
+    def __init__(self, num_rows=1, num_cols=1, right_margin=True, bottom_margin=True,
+                 figsize=None, subplot_size=None,
+                 right_margin_ratio=0.3, bottom_margin_ratio=0.3,
                  **fig_kwargs):
         """Setup a figure with a grid of subplots to iteratively populate.
-        
+
         Parameters
         ----------
         num_rows, num_cols : int, default=1
-            The number of rows and columns to include.
+            Total rows and columns including any margin row/column.
         right_margin, bottom_margin : bool, default=True
-            Whether to plot axes in the right or bottom margins.
+            Whether to reserve the last column/row as a margin summary axis.
+        figsize : tuple or None
+            Explicit ``(width, height)`` in inches.  Overrides ``subplot_size``
+            when both are given.  Pass a pre-created ``fig=`` kwarg to skip
+            figure creation entirely.
+        subplot_size : tuple or None, default=(2, 2)
+            ``(width_inches, height_inches)`` for each *data* subplot cell.
+            The total figure size is computed automatically from the number of
+            data rows/cols and the margin ratios.  Ignored when ``figsize`` or
+            ``fig=`` is supplied.  Defaults to ``(2, 2)`` when neither
+            ``subplot_size`` nor ``figsize`` is given.
+        right_margin_ratio : float, default=0.3
+            Width of the right-margin column as a fraction of one data
+            subplot's width.  Only used when ``right_margin=True``.
+        bottom_margin_ratio : float, default=0.3
+            Height of the bottom-margin row as a fraction of one data
+            subplot's height.  Only used when ``bottom_margin=True``.
         **fig_kwargs
-            Formatting options for the matplotlib figure.
+            Extra keyword arguments forwarded to ``plt.figure()`` (e.g.
+            ``dpi``).  Pass ``fig=<Figure>`` to supply an existing figure
+            instead of creating one.
         """
         # make the figure and axes
         if num_rows == 0:
             num_rows = 1
         if num_cols == 0:
             num_cols = 1
-        if 'fig' in fig_kwargs:
+
+        # Number of pure-data rows/cols (excluding margin row/col).
+        n_data_rows = num_rows - (1 if bottom_margin else 0)
+        n_data_cols = num_cols - (1 if right_margin else 0)
+
+        _has_external_fig = 'fig' in fig_kwargs
+        if _has_external_fig:
             self.fig = fig_kwargs.pop('fig')
         else:
+            # Determine figsize from subplot_size when not given explicitly.
+            if figsize is None:
+                if subplot_size is None:
+                    subplot_size = (2, 2)
+                sw, sh = subplot_size
+                fig_w = n_data_cols * sw + (right_margin_ratio * sw if right_margin else 0)
+                fig_h = n_data_rows * sh + (bottom_margin_ratio * sh if bottom_margin else 0)
+                figsize = (fig_w, fig_h)
             self.fig = plt.figure(figsize=figsize, **fig_kwargs)
-        # else:
-        #     self.fig, self.axes = plt.subplots(num_rows, num_cols, layout='constrained',
-        #                                     **fig_kwargs)
+
         if isinstance(self.fig, plt.Figure):
             # make it a subfigure
             self.fig = self.fig.subfigures(1, 1)
+
         subplot_kwargs = fig_kwargs.copy()
-        if 'figsize' in subplot_kwargs.keys():
+        if 'figsize' in subplot_kwargs:
             subplot_kwargs.pop('figsize')
+
+        # Build gridspec ratios so all data cells are equal and margin
+        # cells are proportionally sized.
+        wr = [1] * n_data_cols + ([right_margin_ratio] if right_margin else [])
+        hr = [1] * n_data_rows + ([bottom_margin_ratio] if bottom_margin else [])
+        gskw = subplot_kwargs.pop('gridspec_kw', {})
+        gskw.setdefault('width_ratios', wr)
+        gskw.setdefault('height_ratios', hr)
+        subplot_kwargs['gridspec_kw'] = gskw
+
         self.axes = self.fig.subplots(num_rows, num_cols,
-                                        **subplot_kwargs)
+                                      **subplot_kwargs)
         if num_rows == 1 and num_cols == 1:
             self.axes = np.array([self.axes])[:, np.newaxis]
         elif num_rows == 1:
@@ -4138,121 +4869,216 @@ class SummaryDisplay():
         centers = np.column_stack(((b[:, 0] + b[:, 2]) * 0.5, (b[:, 1] + b[:, 3]) * 0.5))
         return centers
 
+    def _text_bbox_in_subfig_coords(self, text_artist):
+        """Return (x0, y0, x1, y1) of a Text artist in subfigure-normalised coords."""
+        renderer = self._get_renderer()
+        inv_sub = self._get_coord_transform().inverted()
+        try:
+            bb = text_artist.get_window_extent(renderer=renderer)
+        except Exception:
+            renderer = self._get_renderer()
+            bb = text_artist.get_window_extent(renderer=renderer)
+        p0 = inv_sub.transform((bb.x0, bb.y0))
+        p1 = inv_sub.transform((bb.x1, bb.y1))
+        return min(p0[0], p1[0]), min(p0[1], p1[1]), max(p0[0], p1[0]), max(p0[1], p1[1])
+
+    def _compute_row_spine_x(self, left_col, row_val_texts):
+        """Return spine_x as the midpoint between row-value text right edges and ylabel left edges.
+
+        Falls back to a fixed offset from left_bound if bboxes are not yet available.
+        """
+        y_b = self._label_bboxes_in_subfig_coords(left_col, which='y')
+        ylabel_left = float(np.min(y_b[:, 0])) if len(y_b) else self.left_bound
+        val_right_list = []
+        for t in row_val_texts:
+            try:
+                x0, _, x1, _ = self._text_bbox_in_subfig_coords(t)
+                val_right_list.append(x1)
+            except Exception:
+                pass
+        val_right = float(np.max(val_right_list)) if val_right_list else 0.0
+        return (val_right + ylabel_left) * 0.5
+
+    def _compute_col_spine_y(self, bottom_row, col_val_texts):
+        """Return spine_y as the midpoint between xlabel bottom edges and col-value text tops.
+
+        Falls back to a fixed offset from bottom_bound if bboxes are not available.
+        """
+        x_b = self._label_bboxes_in_subfig_coords(bottom_row, which='x')
+        xlabel_bottom = float(np.min(x_b[:, 1])) if len(x_b) else self.bottom_bound
+        val_top_list = []
+        for t in col_val_texts:
+            try:
+                _, y0, _, y1 = self._text_bbox_in_subfig_coords(t)
+                val_top_list.append(y1)
+            except Exception:
+                pass
+        val_top = float(np.min(val_top_list)) if val_top_list else 0.0
+        return (val_top + xlabel_bottom) * 0.5
+
     def label_margins(self, row_vals=None, row_label=None, col_vals=None, col_label=None):
         """Add values and a label to indicate differences across rows/cols using actual label bboxes."""
-        # add the row values to the ylabels of the left column
         left_col = self.trace_axes[:, 0]
-        # Fix: avoid ambiguous truth value for numpy arrays
-        row_iter = row_vals if row_vals is not None else []
-        for ax, val in zip(left_col, row_iter):
-            if isinstance(val, bytes):
-                val = val.decode('utf-8')
-            lbl = ax.get_ylabel()
-            if isinstance(val, (float, int)):
-                ax.set_ylabel(f"{val:.2f}\n\n{lbl}")
-            else:
-                ax.set_ylabel(f"{val}\n\n{lbl}")
-        # add the column values below the xlabels of the bottom row
         bottom_row = self.axes[-1]
         if self.right_margin:
             bottom_row = bottom_row[:-1]
-        # Fix: avoid ambiguous truth value for numpy arrays
-        col_iter = col_vals if col_vals is not None else []
-        for ax, val in zip(bottom_row, col_iter):
-            while isinstance(ax, np.ndarray):
-                ax = ax[0]
-            if isinstance(val, bytes):
-                val = val.decode('utf-8')
-            lbl = ax.get_xlabel()
-            if isinstance(val, float):
-                ax.set_xlabel(f"{lbl}\n\n{val:.2f}")
-            else:
-                ax.set_xlabel(f"{lbl}\n\n{val}")
 
         coord_trans = self._get_coord_transform()
         self._row_label_artists = None
         self._col_label_artists = None
         self.adjusted_left = False
         self.adjusted_bottom = False
-        # adjust the subplots to fit the row or column label
+
         fig_width, fig_height = self._get_fig_size_inches()
-        # we want to keep a fixed amount of space on the left and bottom for labels
-        # let's make it 1 inch for both bottom and left
         self.left_bound = 0
         self.bottom_bound = 0
-        # normalize by rcParams['axes.labelsize'] to account for different font sizes
         labelsize = plt.rcParams.get('axes.labelsize', 10)
         labelsize_conv = {'xx-small': 6, 'x-small': 7, 'small': 8, 'medium': 10,
                           'large': 12, 'x-large': 14, 'xx-large': 16}
         if labelsize in labelsize_conv:
             labelsize = labelsize_conv[labelsize]
         if row_label is not None:
-            # self.left_bound = 1.0 / fig_width
-            self.left_bound =  labelsize / (8. * fig_width)
+            self.left_bound = labelsize / (8. * fig_width)
             self.adjusted_left = True
         if col_label is not None:
-            self.bottom_bound = .9 * labelsize / (8. * fig_height)
+            self.bottom_bound = .72 * labelsize / (8. * fig_height)
             self.adjusted_bottom = True
         if self.adjusted_left or self.adjusted_bottom:
             self.fig.subplots_adjust(left=self.left_bound, bottom=self.bottom_bound)
 
-        # Row label and spine using ylabel bboxes
+        # ------------------------------------------------------------------ #
+        # Row labels: separate Text artists, one per row, placed at x=0       #
+        # ------------------------------------------------------------------ #
         if row_label is not None:
+            # Force a draw so ylabel bboxes are available before we place anything.
+            try:
+                self._get_parent_figure().canvas.draw()
+            except Exception:
+                pass
+
             y_b = self._label_bboxes_in_subfig_coords(left_col, which='y')
             y_c = self._label_centers_in_subfig_coords(left_col, which='y')
             y_center = float(np.mean(y_c[:, 1])) if len(y_c) else 0.5
-            # place to the left of the left-most ylabel bbox
-            x_ref = float(np.min(y_b[:, 0])) if len(y_b) else 0.05
-            # spine_x = .4 / fig_width
-            spine_x = self.left_bound - ((.55 * 8.) / (labelsize * fig_width))
-            sub_trans = self._get_coord_transform()
-            inv_sub = sub_trans.inverted()
-
-            tick_len = 0.05 / fig_width
-            label = row_label.replace("_", " ")
-            txt_x = 0
-            row_text = self.fig.text(txt_x, y_center, label, va='center', ha='left', rotation='vertical', transform=coord_trans, fontsize=labelsize)
             ymins = float(np.min(y_c[:, 1])) if len(y_c) else 0.2
             ymaxs = float(np.max(y_c[:, 1])) if len(y_c) else 0.8
-            row_spine = matplotlib.lines.Line2D([spine_x, spine_x], [ymins, ymaxs], lw=1, color='k')
+
+            # Row variable label (vertical, at far left)
+            label = row_label.replace("_", " ")
+            row_text = self.fig.text(0.0, y_center, label,
+                                     va='center', ha='left', rotation='vertical',
+                                     transform=coord_trans, fontsize=labelsize)
+
+            # Per-row value texts: centered in the space between 0 and ylabel_left,
+            # leaving room for the spine between val_text right edge and ylabel.
+            row_val_texts = []
+            row_iter = row_vals if row_vals is not None else []
+            ylabel_left_min = float(np.min(y_b[:, 0])) if len(y_b) else self.left_bound
+            val_x = ylabel_left_min * 0.5  # midpoint between figure left and ylabel
+            for ax, val, yc in zip(left_col, row_iter,
+                                   y_c[:, 1] if len(y_c) else [y_center]):
+                if isinstance(val, bytes):
+                    val = val.decode('utf-8')
+                val_str = f"{val:.2f}" if isinstance(val, (float, int)) else str(val)
+                t = self.fig.text(val_x, float(yc), val_str,
+                                  va='center', ha='center', rotation='vertical',
+                                  transform=coord_trans, fontsize=labelsize)
+                row_val_texts.append(t)
+
+            # Force another draw so row_val_texts have real bboxes
+            try:
+                self._get_parent_figure().canvas.draw()
+            except Exception:
+                pass
+
+            spine_x = self._compute_row_spine_x(left_col, row_val_texts)
+            tick_len = 0.06 / fig_width
+
+            row_spine = matplotlib.lines.Line2D(
+                [spine_x, spine_x], [ymins, ymaxs], lw=1, color='k')
             row_spine.set_transform(coord_trans)
             self.fig.add_artist(row_spine)
+
             row_ticks = []
             for yv in (y_c[:, 1] if len(y_c) else [y_center]):
-                t = matplotlib.lines.Line2D([spine_x, spine_x + tick_len], [float(yv), float(yv)], lw=1, color='k')
+                t = matplotlib.lines.Line2D(
+                    [spine_x, spine_x + tick_len], [float(yv), float(yv)],
+                    lw=1, color='k')
                 t.set_transform(coord_trans)
                 self.fig.add_artist(t)
                 row_ticks.append(t)
-            self._row_label_artists = {'text': row_text, 'spine': row_spine, 'ticks': row_ticks}
 
-        # Column label and spine using xlabel bboxes
+            self._row_label_artists = {
+                'text': row_text,
+                'val_texts': row_val_texts,
+                'spine': row_spine,
+                'ticks': row_ticks,
+            }
+
+        # ------------------------------------------------------------------ #
+        # Column labels: separate Text artists, one per col, placed at y=0    #
+        # ------------------------------------------------------------------ #
         if col_label is not None:
+            try:
+                self._get_parent_figure().canvas.draw()
+            except Exception:
+                pass
+
             x_b = self._label_bboxes_in_subfig_coords(bottom_row, which='x')
             x_c = self._label_centers_in_subfig_coords(bottom_row, which='x')
             x_center = float(np.mean(x_c[:, 0])) if len(x_c) else 0.5
-            # baseline slightly below the lowest xlabel bbox
-            y_ref = float(np.min(x_b[:, 1])) if len(x_b) else 0.07
-            # txt_y = y_ref - 0.035
-            txt_y = .1 / fig_height
-            # spine_y = y_ref - 0.018
-            # spine_y = .5 / fig_height
-            # spine_y = self.bottom_bound - (.33 / fig_height)
-            spine_y = self.bottom_bound - ((.21 * 8.) / (labelsize * fig_width))
-            tick_len_y = 0.05 / fig_height
-            label = col_label.replace("_", " ")
-            col_text = self.fig.text(x_center, txt_y, label, va='bottom', ha='center', rotation='horizontal', transform=coord_trans, fontsize=labelsize)
             xmins = float(np.min(x_c[:, 0])) if len(x_c) else 0.2
             xmaxs = float(np.max(x_c[:, 0])) if len(x_c) else 0.8
-            col_spine = matplotlib.lines.Line2D([xmins, xmaxs], [spine_y, spine_y], lw=1, color='k')
+
+            label = col_label.replace("_", " ")
+            txt_y = .1 / fig_height
+            col_text = self.fig.text(x_center, txt_y, label,
+                                     va='bottom', ha='center',
+                                     transform=coord_trans, fontsize=labelsize)
+
+            col_val_texts = []
+            col_iter = col_vals if col_vals is not None else []
+            xlabel_bottom_min = float(np.min(x_b[:, 1])) if len(x_b) else self.bottom_bound
+            val_y = xlabel_bottom_min * 0.5  # midpoint between figure bottom and xlabel
+            for ax, val, xc in zip(bottom_row, col_iter,
+                                   x_c[:, 0] if len(x_c) else [x_center]):
+                while isinstance(ax, np.ndarray):
+                    ax = ax[0]
+                if isinstance(val, bytes):
+                    val = val.decode('utf-8')
+                val_str = f"{val:.2f}" if isinstance(val, float) else str(val)
+                t = self.fig.text(float(xc), val_y, val_str,
+                                  va='center', ha='center',
+                                  transform=coord_trans, fontsize=labelsize)
+                col_val_texts.append(t)
+
+            try:
+                self._get_parent_figure().canvas.draw()
+            except Exception:
+                pass
+
+            spine_y = self._compute_col_spine_y(bottom_row, col_val_texts)
+            tick_len_y = 0.06 / fig_height
+
+            col_spine = matplotlib.lines.Line2D(
+                [xmins, xmaxs], [spine_y, spine_y], lw=1, color='k')
             col_spine.set_transform(coord_trans)
             self.fig.add_artist(col_spine)
+
             col_ticks = []
             for xv in (x_c[:, 0] if len(x_c) else [x_center]):
-                t = matplotlib.lines.Line2D([float(xv), float(xv)], [spine_y, spine_y + tick_len_y], lw=1, color='k')
+                t = matplotlib.lines.Line2D(
+                    [float(xv), float(xv)], [spine_y, spine_y + tick_len_y],
+                    lw=1, color='k')
                 t.set_transform(coord_trans)
                 self.fig.add_artist(t)
                 col_ticks.append(t)
-            self._col_label_artists = {'text': col_text, 'spine': col_spine, 'ticks': col_ticks}
+
+            self._col_label_artists = {
+                'text': col_text,
+                'val_texts': col_val_texts,
+                'spine': col_spine,
+                'ticks': col_ticks,
+            }
 
         # connect dynamic updater to draw events (resize/redraw)
         if len(self._margin_label_cids) == 0:
@@ -4272,67 +5098,76 @@ class SummaryDisplay():
             if self.right_margin:
                 bottom_row = bottom_row[:-1]
             left_col = self.trace_axes[:, 0]
-            # adjust the subplots to fit the row or column label
             fig_width, fig_height = self._get_fig_size_inches()
-            # we want to keep a fixed amount of space on the left and bottom for labels
-            # let's make it 1 inch for both bottom and left
             labelsize = plt.rcParams.get('axes.labelsize', 10)
             labelsize_conv = {'xx-small': 6, 'x-small': 7, 'small': 8, 'medium': 10,
                             'large': 12, 'x-large': 14, 'xx-large': 16}
             if labelsize in labelsize_conv:
                 labelsize = labelsize_conv[labelsize]
             if self.adjusted_left:
-                # self.left_bound = 1.0 / fig_width
                 self.left_bound = float(labelsize) / (8. * fig_width)
             if self.adjusted_bottom:
-                # self.bottom_bound = 1.0 / fig_height
-                self.bottom_bound = float(labelsize) / (8. * fig_height)
+                self.bottom_bound = 0.72 * float(labelsize) / (8. * fig_height)
             if self.adjusted_left or self.adjusted_bottom:
                 self.fig.subplots_adjust(left=self.left_bound, bottom=self.bottom_bound)
             coord_trans = self._get_coord_transform()
-            # row updates
+
+            # Row updates
             if self._row_label_artists is not None:
-                y_b = self._label_bboxes_in_subfig_coords(left_col, which='y')
                 y_c = self._label_centers_in_subfig_coords(left_col, which='y')
                 y_center = float(np.mean(y_c[:, 1])) if len(y_c) else 0.5
-                x_ref = float(np.min(y_b[:, 0])) if len(y_b) else 0.05
-                # txt_x = x_ref - 0.03
-                txt_x = 0
-                # spine_x = .4 / fig_width
-                spine_x = self.left_bound - (.63 / fig_width)
-                tick_len = 0.05 / fig_width
-                self._row_label_artists['text'].set_position((txt_x, y_center))
-                self._row_label_artists['text'].set_transform(coord_trans)
                 ymins = float(np.min(y_c[:, 1])) if len(y_c) else 0.2
                 ymaxs = float(np.max(y_c[:, 1])) if len(y_c) else 0.8
+                self._row_label_artists['text'].set_position((0.0, y_center))
+                self._row_label_artists['text'].set_transform(coord_trans)
+
+                # Reposition row-value texts to match current ylabel centres
+                val_texts = self._row_label_artists.get('val_texts', [])
+                y_b = self._label_bboxes_in_subfig_coords(left_col, which='y')
+                ylabel_left_min = float(np.min(y_b[:, 0])) if len(y_b) else self.left_bound
+                val_x = ylabel_left_min * 0.5
+                for i, (t, yc) in enumerate(zip(val_texts,
+                                                 y_c[:, 1] if len(y_c) else [y_center])):
+                    t.set_position((val_x, float(yc)))
+                    t.set_transform(coord_trans)
+
+                spine_x = self._compute_row_spine_x(left_col, val_texts)
+                tick_len = 0.06 / fig_width
                 self._row_label_artists['spine'].set_data([spine_x, spine_x], [ymins, ymaxs])
                 self._row_label_artists['spine'].set_transform(coord_trans)
                 ticks = self._row_label_artists['ticks']
                 if len(ticks) == (len(y_c) if len(y_c) else 1):
-                    vals = (y_c[:, 1] if len(y_c) else [y_center])
+                    vals = y_c[:, 1] if len(y_c) else [y_center]
                     for t, yv in zip(ticks, vals):
                         t.set_data([spine_x, spine_x + tick_len], [float(yv), float(yv)])
                         t.set_transform(coord_trans)
-            # column updates
+
+            # Column updates
             if self._col_label_artists is not None:
                 x_b = self._label_bboxes_in_subfig_coords(bottom_row, which='x')
                 x_c = self._label_centers_in_subfig_coords(bottom_row, which='x')
                 x_center = float(np.mean(x_c[:, 0])) if len(x_c) else 0.5
-                y_ref = float(np.min(x_b[:, 1])) if len(x_b) else 0.07
-                # txt_y = y_ref - 0.035
-                txt_y = .1 / fig_height
-                spine_y = .5 / fig_height
-                spine_y = self.bottom_bound - (.43 / fig_height)
-                tick_len_y = 0.05 / fig_height
-                self._col_label_artists['text'].set_position((x_center, txt_y))
-                self._col_label_artists['text'].set_transform(coord_trans)
                 xmins = float(np.min(x_c[:, 0])) if len(x_c) else 0.2
                 xmaxs = float(np.max(x_c[:, 0])) if len(x_c) else 0.8
+                txt_y = .1 / fig_height
+                self._col_label_artists['text'].set_position((x_center, txt_y))
+                self._col_label_artists['text'].set_transform(coord_trans)
+
+                val_texts = self._col_label_artists.get('val_texts', [])
+                xlabel_bottom_min = float(np.min(x_b[:, 1])) if len(x_b) else self.bottom_bound
+                val_y = xlabel_bottom_min * 0.5
+                for i, (t, xc) in enumerate(zip(val_texts,
+                                                  x_c[:, 0] if len(x_c) else [x_center])):
+                    t.set_position((float(xc), val_y))
+                    t.set_transform(coord_trans)
+
+                spine_y = self._compute_col_spine_y(bottom_row, val_texts)
+                tick_len_y = 0.06 / fig_height
                 self._col_label_artists['spine'].set_data([xmins, xmaxs], [spine_y, spine_y])
                 self._col_label_artists['spine'].set_transform(coord_trans)
                 ticks = self._col_label_artists['ticks']
                 if len(ticks) == (len(x_c) if len(x_c) else 1):
-                    vals = (x_c[:, 0] if len(x_c) else [x_center])
+                    vals = x_c[:, 0] if len(x_c) else [x_center]
                     for t, xv in zip(ticks, vals):
                         t.set_data([float(xv), float(xv)], [spine_y, spine_y + tick_len_y])
                         t.set_transform(coord_trans)
@@ -4388,7 +5223,15 @@ class SummaryDisplay():
                             ax.set_yticks(yticks[0], yticks[1])
                 else:
                     ax.set_yticks([])
-                sbn.despine(ax=ax, left=is_left==False, bottom=is_bottom==False, trim=True)
+                # Always hide top and right; hide left/bottom on non-data edges.
+                # Use _hide_spine instead of sbn.despine(trim=True) so that this
+                # works reliably on log-scaled axes and axes sharing a scale.
+                for _side in ('top', 'right'):
+                    _hide_spine(ax, _side)
+                if not is_left:
+                    _hide_spine(ax, 'left')
+                if not is_bottom:
+                    _hide_spine(ax, 'bottom')
 
 class TrackingTrial():
     def __init__(self, filename, holocube_framerate=120):
@@ -4461,7 +5304,18 @@ class TrackingTrial():
             dims = ('test',)
         elif arr.ndim == 2:
             if arr.shape[1] == self.num_frames:
+                # Use the same dimension names as camera_heading so the new
+                # variable aligns with it in xarray. When the zarr was first
+                # created from h5 via phony_dims='sort', camera_heading may
+                # carry phony dim names (e.g. 'phony_dim_1') while a stale
+                # 'frame' dimension of a different size exists from previously
+                # saved variables. Using camera_heading's dims avoids the
+                # xarray AlignmentError that would otherwise occur.
                 dims = ('test', 'frame')
+                if 'camera_heading' in self.h5_file.data_vars:
+                    ch_dims = self.h5_file['camera_heading'].dims
+                    if len(ch_dims) == 2:
+                        dims = ch_dims
             else:
                 raise ValueError(
                     f"add_dataset('{name}'): array has {arr.shape[1]} frames but "
@@ -4585,6 +5439,20 @@ class TrackingTrial():
             self.num_tests = 1
             self.num_frames = ds.sizes['frame']
 
+        # Reconcile num_frames against the actual shape of camera_heading.
+        # When the zarr was first created from h5 via phony_dims='sort', the
+        # original variables use phony dimension names (e.g. phony_dim_1) whose
+        # sizes may differ by 1 from the 'frame' dimension added by later saves.
+        if 'camera_heading' in ds.data_vars:
+            ch_shape = ds['camera_heading'].shape
+            actual_frames = ch_shape[-1]
+            if hasattr(self, 'num_frames') and actual_frames != self.num_frames:
+                self.num_frames = actual_frames
+            elif not hasattr(self, 'num_frames'):
+                self.num_frames = actual_frames
+            if len(ch_shape) >= 2 and not hasattr(self, 'num_tests'):
+                self.num_tests = ch_shape[0]
+
         # Handle camera_heading_offline (may have a different frame length)
         if 'camera_heading_offline' in ds.data_vars:
             vals = ds['camera_heading_offline'].values
@@ -4624,7 +5492,7 @@ class TrackingTrial():
                 print("Could not determine the duration of the trial. Please add a 'duration' or 'framerate' attribute.")
 
         # Check for pickled bouts
-        bouts_fn = self.filename.replace(".h5", "_bouts.pkl")
+        bouts_fn = str(self.filename).replace(".h5", "_bouts.pkl")
         if os.path.exists(bouts_fn):
             self.bouts = pickle.load(open(bouts_fn, 'rb'))
             for bout in self.bouts:
@@ -4703,7 +5571,7 @@ class TrackingTrial():
             #     breakpoint()
             self.bouts = np.array(self.bouts)
             # use pickle to save the list of bouts for next time 
-            bout_fn = self.filename.replace(".h5", "_bouts.pkl")
+            bout_fn = str(self.filename).replace(".h5", "_bouts.pkl")
             if os.path.exists(bout_fn):
                 os.remove(bout_fn)
             # we need to ditch the parent trial data before saving the bout
@@ -5007,6 +5875,17 @@ class TrackingTrial():
             ``test_start_frame``, ``start_frame``, ``stop_frame``,
             ``amplitude``, ``peak_velocity``, ``duration``,
             ``start_angle``, ``stop_angle``.
+
+        Examples
+        --------
+        ::
+
+            trial.detect_saccades()                # run with defaults
+            print(len(trial.saccade_table))        # number of accepted saccades
+            trial.save()                           # persist to .zarr
+
+            # Query amplitudes after detection
+            amps = trial.query(output='amplitude', object='saccade')
         """
         headings = self.query(key)          # shape (num_tests, num_frames)
         framerate = self.framerate
@@ -5071,6 +5950,20 @@ class TrackingTrial():
         -------
         pandas.DataFrame
             One row per saccade.
+
+        Examples
+        --------
+        ::
+
+            trial.detect_saccades()
+            df = trial.saccade_table_df()
+            print(df.columns.tolist())
+            # ['test_ind', 'start_frame', 'stop_frame', 'peak_frame',
+            #  'amplitude', 'peak_velocity', 'duration',
+            #  'start_angle', 'stop_angle', 'test_start_frame']
+
+            # Include a trial-level attribute and a test-level condition variable
+            df2 = trial.saccade_table_df(extra_cols=['condition', 'fly_id'])
         """
         import pandas as pd
         if not hasattr(self, 'saccade_table') or not self.saccade_table:
@@ -5402,7 +6295,7 @@ class TrackingTrial():
                                    fs=sample_rate,
                                    btype='lowpass',
                                    output='sos')
-        vals_smoothed = scipy.signal.sosfilt(filter, vals, axis=1)
+        vals_smoothed = scipy.signal.sosfiltfilt(filter, vals, axis=1)
         # persist via add_dataset so the smoothed array survives across sessions
         self.add_dataset(key + "_smoothed", vals_smoothed)
 
