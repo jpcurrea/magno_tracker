@@ -22,8 +22,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Video tracking features (scikit-video and camera must be installed separately
-# if not available on PyPI in your environment).
+# scikit-video is needed for offline video reading (TrackingVideo).
+# camera.py is a single-file module from the magnocube/holocube sub-package:
+#   https://github.com/jpcurrea/magnocube/blob/main/holocube/camera.py
+# It is only required for live-rig use (TrackingVideo.ring_gui()) and is
+# loaded at runtime via sys.path, so it cannot be installed through pip.
+# To use ring_gui(), clone the magnocube repo alongside your working directory
+# so that ../holocube/camera.py resolves correctly.
 video = ["scikit-video"]
 dev = ["pytest"]
 

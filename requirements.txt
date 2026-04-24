@@ -1,4 +1,5 @@
-camera
+# camera.py — NOT on PyPI; loaded at runtime from ../holocube/camera.py
+# See: https://github.com/jpcurrea/magnocube/blob/main/holocube/camera.py
 h5py
 h5netcdf
 matplotlib
