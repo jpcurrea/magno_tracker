@@ -355,6 +355,15 @@ def _hide_spine(ax, side):
 
 
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# compare_means shared layout constants (used by plot_compare_means and
+# the post-format spine restoration pass in TrackingExperiment.plot()).
+# ---------------------------------------------------------------------------
+_CM_SPINE_PTS = 18   # points the bottom spine is offset outward (downward)
+_CM_TEXT_PTS  = 15   # reference offset (pts) used for annotation anchor (decoupled from spine)
+_CM_ANN_PTS   = 3    # gap (pts) between spine and top of mean annotation
+_CM_TICK_PAD  = 6    # x tick-label pad from spine (points)
+
 # Phase 3 — Standalone stateless plot-type functions
 # Each function takes (ax, xs, ys, color, **kwargs) and returns artist(s).
 # They contain no experiment-level logic and are fully testable with synthetic
@@ -812,6 +821,44 @@ def plot_trajectory2d(ax, xs, ys, color, trace_color='k', **kw):
         artists.extend([white, mean_l, sc_w, sc_c])
 
     if return_summary:
+        # Compute circular mean heading and vector strength from endpoint
+        # positions, plus bootstrap CIs.
+        _angles_ep = np.arctan2(last_pos[..., 1], last_pos[..., 0])
+        _sin_m = float(np.nanmean(np.sin(_angles_ep)))
+        _cos_m = float(np.nanmean(np.cos(_angles_ep)))
+        _circ_mean = float(np.arctan2(_sin_m, _cos_m))
+        _vector_strength = float(np.sqrt(_sin_m ** 2 + _cos_m ** 2))
+        _n_ep = len(last_pos)
+        if _n_ep > 1:
+            _bi = np.random.randint(0, _n_ep, (10000, _n_ep))
+            _boot_lp = last_pos[_bi]
+            _boot_sin = np.nanmean(
+                np.sin(np.arctan2(_boot_lp[..., 1], _boot_lp[..., 0])),
+                axis=1)
+            _boot_cos = np.nanmean(
+                np.cos(np.arctan2(_boot_lp[..., 1], _boot_lp[..., 0])),
+                axis=1)
+            _boot_cm = np.arctan2(_boot_sin, _boot_cos)
+            _boot_vs = np.sqrt(_boot_sin ** 2 + _boot_cos ** 2)
+            _conf = kw.get('confidence', confidence if 'confidence' in dir()
+                           else 0.84)
+            _cm_lo, _cm_hi = np.percentile(
+                _boot_cm,
+                [100 * (1 - _conf) / 2, 100 * (1 + _conf) / 2])
+            _vs_lo, _vs_hi = np.percentile(
+                _boot_vs,
+                [100 * (1 - _conf) / 2, 100 * (1 + _conf) / 2])
+        else:
+            _cm_lo = _cm_hi = _circ_mean
+            _vs_lo = _vs_hi = _vector_strength
+        summary_dict.update({
+            'circ_mean': _circ_mean,
+            'circ_mean_ci_low': float(_cm_lo),
+            'circ_mean_ci_high': float(_cm_hi),
+            'vector_strength': _vector_strength,
+            'vector_strength_ci_low': float(_vs_lo),
+            'vector_strength_ci_high': float(_vs_hi),
+        })
         return artists, summary_dict
     return artists
 
@@ -1005,6 +1052,412 @@ def plot_pdf(ax, xs, bins, color, ci=False, confidence=0.84, n_boot=1000,
 
 
 # ---------------------------------------------------------------------------
+# compare_means helpers
+# ---------------------------------------------------------------------------
+
+def plot_diff_brackets(label, x1, x2, y1, y2, y_label, col='k',
+                       vert=False, ax=None, lw=None, size='medium', **plot_kwargs):
+    """Draw a significance bracket connecting two x-positions.
+
+    Parameters
+    ----------
+    label : str
+        Text drawn above (or beside) the bracket.
+    x1, x2 : float
+        x-positions of the two groups.
+    y1, y2 : float
+        y-positions of the vertical ticks at each end of the bracket.
+    y_label : float
+        y-position of the horizontal connecting bar.
+    col : color spec, default 'k'
+    vert : bool, default False
+        If True, draw a vertical bracket.
+    ax : matplotlib Axes or None
+        Defaults to ``plt.gca()``.
+    lw : float, default 1
+    size : str or float, default 'medium'
+        Font size for the label.
+    **plot_kwargs
+        Forwarded to ``ax.plot``.
+    """
+    if ax is None:
+        ax = plt.gca()
+    if lw is None:
+        lw = ax.spines['bottom'].get_linewidth()
+    if vert:
+        ax.plot([y_label, y_label], [x1, x2],
+                color=col, clip_on=False, lw=lw, **plot_kwargs)
+        ax.text(y_label, (x1 + x2) * 0.5, label,
+                ha='left', va='center', color=col,
+                rotation='vertical', size=size)
+    else:
+        ax.plot([x1, x2], [y_label, y_label],
+                color=col, clip_on=False, lw=lw, **plot_kwargs)
+        ax.text((x1 + x2) * 0.5, y_label, label,
+                ha='center', va='bottom', color=col,
+                rotation='horizontal', size=size)
+
+
+def plot_compare_means(ax, vals1, vals2, color,
+                       labels=('Group 1', 'Group 2'),
+                       paired_ids1=None, paired_ids2=None,
+                       marker_color=None, marker_colors=None,
+                       jitter_std=0.05, confidence=0.95, n_boot=10000,
+                       show_ns=False, ylim=None, **kw):
+    """Compare means of two groups with a partially-paired bootstrap test.
+
+    Individual data points are drawn as jitter plots.  Mean ± bootstrap CI
+    is overlaid per group.  A significance bracket is drawn above the data.
+    Within-subject pairs are connected by lines when subject IDs overlap.
+
+    The **partially-paired bootstrap** is used unconditionally: shared
+    subjects (IDs in both groups) are resampled with the same index on each
+    iteration (preserving within-subject covariance), while subjects unique
+    to one group are resampled independently.  This converges to a standard
+    paired-differences bootstrap when all subjects are shared and to a
+    two-sample bootstrap when no subjects are shared.
+
+    Parameters
+    ----------
+    ax : matplotlib Axes
+    vals1, vals2 : array-like, shape (n,)
+        One value per subject in each group.  NaNs are silently ignored.
+    color : color spec
+        Controls mean markers, CI bars, and significance bracket.
+    labels : sequence of two str, default ('Group 1', 'Group 2')
+        x-tick labels for the two groups.
+    paired_ids1, paired_ids2 : list or None
+        Subject IDs parallel to ``vals1`` / ``vals2``.  Subjects whose ID
+        appears in both lists receive connecting lines and are resampled
+        together in the bootstrap.  Pass ``None`` to treat all subjects as
+        independent.
+    marker_color : color spec or None
+        Color for individual jitter points and connecting lines.  If
+        ``None``, defaults to ``'gray'``.
+    jitter_std : float, default 0.05
+        Std of Gaussian jitter added to x-positions.
+    confidence : float, default 0.95
+        Confidence level for the bootstrap CI on each group mean and the
+        bracket CI on the difference.
+    n_boot : int, default 10000
+        Bootstrap resamples.
+    show_ns : bool, default True
+        If True, draw the bracket even when the test is not significant.
+    **kw
+        ``s``       — marker size (default 10).
+        ``alpha``   — marker and line opacity (default 0.4).
+        ``bracket_y`` — y-position of the bracket bar; auto-detected when
+                        absent.
+
+    Returns
+    -------
+    summary_dict : dict
+        Keys: ``mean1``, ``mean2``, ``diff``, ``ci_low``, ``ci_high``,
+        ``pval``, ``symbol``, ``n_paired``, ``n_group1_only``,
+        ``n_group2_only``, ``vals1``, ``vals2``, ``ids1``, ``ids2``.
+    """
+    vals1 = np.asarray(vals1, dtype=float)
+    vals2 = np.asarray(vals2, dtype=float)
+    _scatter_color = marker_color if marker_color is not None else color
+    s = kw.pop('s', 10)
+    alpha = kw.pop('alpha', 0.4)
+    clip_on = kw.pop('clip_on', True)
+    bracket_y_override = kw.pop('bracket_y', None)
+
+    # ------------------------------------------------------------------ #
+    # Partition subjects into shared / group-only                         #
+    # ------------------------------------------------------------------ #
+    if paired_ids1 is not None and paired_ids2 is not None:
+        ids1 = list(paired_ids1)
+        ids2 = list(paired_ids2)
+    else:
+        ids1 = list(range(len(vals1)))
+        ids2 = list(range(len(vals2)))
+
+    set2 = set(ids2)
+    shared_ids = list(dict.fromkeys(sid for sid in ids1 if sid in set2))
+    id1_to_idx = {sid: i for i, sid in enumerate(ids1)}
+    id2_to_idx = {sid: i for i, sid in enumerate(ids2)}
+
+    shared_idx1 = np.array([id1_to_idx[sid] for sid in shared_ids], dtype=int)
+    shared_idx2 = np.array([id2_to_idx[sid] for sid in shared_ids], dtype=int)
+    g1_only_idx = np.array(
+        [id1_to_idx[sid] for sid in ids1 if sid not in set2], dtype=int)
+    g2_only_idx = np.array(
+        [id2_to_idx[sid] for sid in ids2 if sid not in set(ids1)], dtype=int)
+
+    shared_v1 = vals1[shared_idx1] if len(shared_idx1) else np.array([])
+    shared_v2 = vals2[shared_idx2] if len(shared_idx2) else np.array([])
+    g1_v = vals1[g1_only_idx] if len(g1_only_idx) else np.array([])
+    g2_v = vals2[g2_only_idx] if len(g2_only_idx) else np.array([])
+
+    # Drop NaN-pairs for shared subjects (need both values to be finite).
+    if len(shared_v1):
+        shared_valid = np.isfinite(shared_v1) & np.isfinite(shared_v2)
+        shared_v1 = shared_v1[shared_valid]
+        shared_v2 = shared_v2[shared_valid]
+        # Also update shared_ids list to match filtered arrays.
+        shared_ids = [sid for sid, ok in zip(shared_ids, shared_valid) if ok]
+    else:
+        shared_valid = np.array([], dtype=bool)
+    g1_finite = np.isfinite(g1_v)
+    g2_finite = np.isfinite(g2_v)
+    g1_v = g1_v[g1_finite]
+    g2_v = g2_v[g2_finite]
+
+    # Per-point marker colours (used when margin mixes data from different cmaps).
+    _per_point = False
+    _all_mc1 = _all_mc2 = _shared_mc1 = None
+    if marker_colors is not None:
+        _mc1_raw = np.asarray(marker_colors[0], dtype=float)  # (N1, 3)
+        _mc2_raw = np.asarray(marker_colors[1], dtype=float)  # (N2, 3)
+        _nc = _mc1_raw.shape[1] if _mc1_raw.ndim == 2 else 3
+        _empty_mc = np.zeros((0, _nc))
+        _sh_mc1 = (_mc1_raw[shared_idx1][shared_valid]
+                   if len(shared_idx1) else _empty_mc)
+        _sh_mc2 = (_mc2_raw[shared_idx2][shared_valid]
+                   if len(shared_idx2) else _empty_mc)
+        _g1_mc = (_mc1_raw[g1_only_idx][g1_finite]
+                  if len(g1_only_idx) else _empty_mc)
+        _g2_mc = (_mc2_raw[g2_only_idx][g2_finite]
+                  if len(g2_only_idx) else _empty_mc)
+        _all_mc1 = (np.concatenate([_sh_mc1, _g1_mc])
+                    if (len(_sh_mc1) + len(_g1_mc)) else _empty_mc)
+        _all_mc2 = (np.concatenate([_sh_mc2, _g2_mc])
+                    if (len(_sh_mc2) + len(_g2_mc)) else _empty_mc)
+        _shared_mc1 = _sh_mc1
+        _per_point = True
+
+    n_shared = len(shared_v1)
+    n_g1_only = len(g1_v)
+    n_g2_only = len(g2_v)
+
+    # ------------------------------------------------------------------ #
+    # Build per-subject jitter                                            #
+    # Shared subjects get the same x-jitter at x=0 and x=1 so that       #
+    # connecting lines are exactly vertical (modulo jitter).              #
+    # ------------------------------------------------------------------ #
+    shared_jitter = (np.random.normal(0, jitter_std, n_shared)
+                     if n_shared else np.array([]))
+    g1_jitter = (np.random.normal(0, jitter_std, n_g1_only)
+                 if n_g1_only else np.array([]))
+    g2_jitter = (np.random.normal(0, jitter_std, n_g2_only)
+                 if n_g2_only else np.array([]))
+
+    # All x=0 values (shared + group1-only) and their jitter.
+    all_v1 = (np.concatenate([shared_v1, g1_v])
+              if (n_shared + n_g1_only) else np.array([]))
+    all_jitter1 = (np.concatenate([shared_jitter, g1_jitter])
+                   if (n_shared + n_g1_only) else np.array([]))
+    # All x=1 values (shared + group2-only) and their jitter.
+    all_v2 = (np.concatenate([shared_v2, g2_v])
+              if (n_shared + n_g2_only) else np.array([]))
+    all_jitter2 = (np.concatenate([shared_jitter, g2_jitter])
+                   if (n_shared + n_g2_only) else np.array([]))
+
+    # ------------------------------------------------------------------ #
+    # Draw scatter                                                        #
+    # ------------------------------------------------------------------ #
+    if len(all_v1):
+        ax.scatter(np.zeros(len(all_v1)) + all_jitter1, all_v1,
+                   color='w', s=s, zorder=3, alpha=1, edgecolors='none',
+                   clip_on=clip_on)
+        if _per_point:
+            ax.scatter(np.zeros(len(all_v1)) + all_jitter1, all_v1,
+                       c=_all_mc1, s=s, zorder=4, alpha=alpha,
+                       edgecolors='none', clip_on=clip_on)
+        else:
+            ax.scatter(np.zeros(len(all_v1)) + all_jitter1, all_v1,
+                       color=_scatter_color, s=s, zorder=4, alpha=alpha,
+                       edgecolors='none', clip_on=clip_on)
+    if len(all_v2):
+        ax.scatter(np.ones(len(all_v2)) + all_jitter2, all_v2,
+                   color='w', s=s, zorder=3, alpha=1, edgecolors='none',
+                   clip_on=clip_on)
+        if _per_point:
+            ax.scatter(np.ones(len(all_v2)) + all_jitter2, all_v2,
+                       c=_all_mc2, s=s, zorder=4, alpha=alpha,
+                       edgecolors='none', clip_on=clip_on)
+        else:
+            ax.scatter(np.ones(len(all_v2)) + all_jitter2, all_v2,
+                       color=_scatter_color, s=s, zorder=4, alpha=alpha,
+                       edgecolors='none', clip_on=clip_on)
+
+    # Connecting lines for shared subjects.
+    for i in range(n_shared):
+        ax.plot([0 + shared_jitter[i], 1 + shared_jitter[i]],
+                [shared_v1[i], shared_v2[i]],
+                color='w', alpha=1, zorder=2, lw=0.5)
+        _lc = _shared_mc1[i] if _per_point else _scatter_color
+        ax.plot([0 + shared_jitter[i], 1 + shared_jitter[i]],
+                [shared_v1[i], shared_v2[i]],
+                color=_lc, alpha=alpha, zorder=2, lw=0.5)
+
+    # ------------------------------------------------------------------ #
+    # Per-group marginal CI bars + mean markers                           #
+    # ------------------------------------------------------------------ #
+    ci_highs = []
+    for x_pos, all_vals in [(0, all_v1), (1, all_v2)]:
+        valid = all_vals[np.isfinite(all_vals)] if len(all_vals) else np.array([])
+        if len(valid) == 0:
+            ci_highs.append(np.nan)
+            continue
+        mean_val = float(np.nanmean(valid))
+        if len(valid) > 1:
+            _bi = np.random.randint(0, len(valid), (n_boot, len(valid)))
+            _bm = np.nanmean(valid[_bi], axis=1)
+            lo, hi = np.percentile(
+                _bm, [100 * (1 - confidence) / 2, 100 * (1 + confidence) / 2])
+        else:
+            lo = hi = mean_val
+        ci_highs.append(float(hi))
+        ax.plot([x_pos, x_pos], [lo, hi], color='w', lw=4, zorder=5)
+        ax.plot([x_pos, x_pos], [lo, hi], color='k', lw=2, zorder=6)
+        ax.scatter([x_pos], [mean_val], color='w', s=30, zorder=7,
+                   edgecolors='none')
+        ax.scatter([x_pos], [mean_val], color='k', s=15, zorder=8,
+                   edgecolors='none')
+
+    # Mean annotation: anchored at _ymin_now (original data bottom) in data
+    # coordinates, offset _CM_ANN_PTS upward so text sits just above the spine
+    # (which is also positioned at _ymin_now).
+    _ann_fs = plt.rcParams.get('xtick.labelsize',
+                               plt.rcParams.get('font.size', 10))
+    _ylim_ref = ylim if ylim is not None else ax.get_ylim()
+    _ymin_now = min(_ylim_ref)
+    # Mirror the xticklabel distance: tick_mark_length + tick_pad.
+    _tick_size = plt.rcParams.get('xtick.major.size', 3.5)
+    _ann_offset = _tick_size + _CM_TICK_PAD
+    _ann_trans = matplotlib.transforms.offset_copy(
+        ax.transData, fig=ax.get_figure(), x=0,
+        y=_ann_offset, units='points')
+    for x_pos, all_vals in [(0, all_v1), (1, all_v2)]:
+        valid = all_vals[np.isfinite(all_vals)] if len(all_vals) else np.array([])
+        if len(valid) == 0:
+            continue
+        ax.text(x_pos, _ymin_now,
+                f'{float(np.nanmean(valid)):.0f}',
+                ha='center', va='bottom', clip_on=False, fontsize=_ann_fs,
+                transform=_ann_trans)
+
+    # ------------------------------------------------------------------ #
+    # Partially-paired bootstrap for the group difference                 #
+    # ------------------------------------------------------------------ #
+    # Pre-generate all bootstrap indices (vectorised).
+    if n_shared:
+        _idx_s = np.random.randint(0, n_shared, (n_boot, n_shared))
+        _bs_v1 = shared_v1[_idx_s]   # (n_boot, n_shared)
+        _bs_v2 = shared_v2[_idx_s]
+    else:
+        _bs_v1 = np.zeros((n_boot, 0))
+        _bs_v2 = np.zeros((n_boot, 0))
+
+    if n_g1_only:
+        _idx_g1 = np.random.randint(0, n_g1_only, (n_boot, n_g1_only))
+        _bg1 = g1_v[_idx_g1]         # (n_boot, n_g1_only)
+    else:
+        _bg1 = np.zeros((n_boot, 0))
+
+    if n_g2_only:
+        _idx_g2 = np.random.randint(0, n_g2_only, (n_boot, n_g2_only))
+        _bg2 = g2_v[_idx_g2]         # (n_boot, n_g2_only)
+    else:
+        _bg2 = np.zeros((n_boot, 0))
+
+    _boot_v1 = np.concatenate([_bs_v1, _bg1], axis=1)   # (n_boot, n1_total)
+    _boot_v2 = np.concatenate([_bs_v2, _bg2], axis=1)   # (n_boot, n2_total)
+
+    if _boot_v1.shape[1] > 0 and _boot_v2.shape[1] > 0:
+        boot_diffs = np.nanmean(_boot_v2, axis=1) - np.nanmean(_boot_v1, axis=1)
+    elif _boot_v2.shape[1] > 0:
+        boot_diffs = np.nanmean(_boot_v2, axis=1)
+    elif _boot_v1.shape[1] > 0:
+        boot_diffs = -np.nanmean(_boot_v1, axis=1)
+    else:
+        boot_diffs = np.full(n_boot, np.nan)
+
+    boot_diffs = boot_diffs[np.isfinite(boot_diffs)]
+
+    if len(boot_diffs):
+        mean1 = float(np.nanmean(all_v1)) if len(all_v1) else np.nan
+        mean2 = float(np.nanmean(all_v2)) if len(all_v2) else np.nan
+        mean_diff = (mean2 - mean1
+                     if (np.isfinite(mean1) and np.isfinite(mean2))
+                     else np.nan)
+        ci_low_d, ci_high_d = np.percentile(
+            boot_diffs,
+            [100 * (1 - confidence) / 2, 100 * (1 + confidence) / 2])
+        if np.isfinite(mean_diff) and mean_diff > 0:
+            pval = (np.sum(boot_diffs <= 0) + 1) / (len(boot_diffs) + 1)
+        else:
+            pval = (np.sum(boot_diffs >= 0) + 1) / (len(boot_diffs) + 1)
+    else:
+        mean1 = mean2 = mean_diff = ci_low_d = ci_high_d = np.nan
+        pval = 1.0
+
+    symbol = sigAsterisk(pval)
+
+    # ------------------------------------------------------------------ #
+    # Significance bracket (drawn within axis bounds)                     #
+    # ------------------------------------------------------------------ #
+    # Expand both ends by 20% of the data range so the bracket fits inside
+    # the subplot without leaking, and the empty bottom zone separates the
+    # axis from adjacent rows below.
+    _ylim_now = ylim if ylim is not None else ax.get_ylim()
+    _yrange_now = abs(_ylim_now[1] - _ylim_now[0]) or 1.0
+    _ymin_now = min(_ylim_now)
+    _ymax_now = max(_ylim_now)
+    _headroom = _yrange_now * 0.20
+    _new_top = _ymax_now + _headroom
+    _new_bot = _ymin_now - _headroom
+    if _ylim_now[0] <= _ylim_now[1]:   # normal orientation
+        ax.set_ylim(_new_bot, _new_top)
+    else:                               # inverted y-axis
+        ax.set_ylim(_new_top, _new_bot)
+    if show_ns or symbol != 'ns':
+        # Place bracket at 40% into the headroom zone (well above data max,
+        # well below the new axis top so the text clears).
+        _auto_bracket_y = _ymax_now + _headroom * 0.40
+        _bracket_y = (bracket_y_override
+                      if bracket_y_override is not None else _auto_bracket_y)
+        _tick_y = _bracket_y - _yrange_now * 0.02
+        plot_diff_brackets(
+            symbol, x1=0, x2=1, y1=_tick_y, y2=_tick_y, y_label=_bracket_y,
+            col='k', ax=ax, size=_ann_fs)
+
+    # ------------------------------------------------------------------ #
+    # Axes formatting                                                     #
+    # ------------------------------------------------------------------ #
+    ax.set_xticks([0, 1])
+    ax.set_xticklabels(list(labels))
+    ax.set_xlim(-0.5, 1.5)
+    # Spine at original data bottom (inside the expanded ylim buffer zone).
+    ax.spines['bottom'].set_position(('data', _ymin_now))
+    ax.tick_params(axis='x', pad=_CM_TICK_PAD, bottom=True)
+    # Despine is deferred to after format() applies yticks so that
+    # trim=True clips to the correct tick range.
+
+    return {
+        'vals1': all_v1,
+        'vals2': all_v2,
+        'ids1': ids1,
+        'ids2': ids2,
+        'mean1': float(mean1) if np.isfinite(mean1) else np.nan,
+        'mean2': float(mean2) if np.isfinite(mean2) else np.nan,
+        'diff': float(mean_diff) if np.isfinite(mean_diff) else np.nan,
+        'ci_low': float(ci_low_d) if np.isfinite(ci_low_d) else np.nan,
+        'ci_high': float(ci_high_d) if np.isfinite(ci_high_d) else np.nan,
+        'pval': float(pval),
+        'symbol': symbol,
+        'n_paired': n_shared,
+        'n_group1_only': n_g1_only,
+        'n_group2_only': n_g2_only,
+        'needed_ymax': float(_new_top),
+        'needed_ymin': float(_new_bot),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Margin resolution helpers for TrackingExperiment.plot()
 # ---------------------------------------------------------------------------
 
@@ -1015,6 +1468,7 @@ _MARGIN_DEFAULTS = {
     'pdf': ['pdf'],
     'trajectory2d': ['trajectory2d'],
     'scatter': ['histogram'],
+    'compare_means': ['compare_means'],
 }
 _1D_PLOT_TYPES = {'histogram', 'pdf'}
 
@@ -2954,7 +3408,12 @@ class TrackingExperiment():
              rad2deg=False,
              right_margin_xlim=None, right_margin_ylim=None,
              bottom_margin_xlim=None, bottom_margin_ylim=None,
+             right_margin_yticks=None, bottom_margin_yticks=None,
              subplot_size=None, right_margin_ratio=1.0, bottom_margin_ratio=1.0,
+             compare_subsets=None, compare_labels=None,
+             compare_xlabel=None, right_margin_xlabel=None, bottom_margin_xlabel=None,
+             pair_by='fly_id', margin_mode='diff_of_diffs',
+             return_stats=False,
              plot_kwargs=None, **query_kwargs):
         """Unified grid-plot entry point for TrackingExperiment.
 
@@ -3174,6 +3633,26 @@ class TrackingExperiment():
             query_kwargs['subset'] = {}
         if 'sort_by' not in query_kwargs:
             query_kwargs['sort_by'] = 'test_ind'
+
+        # ---------------------------------------------------------------- #
+        # compare_means validation                                          #
+        # ---------------------------------------------------------------- #
+        if plot_type == 'compare_means':
+            if compare_subsets is None or len(compare_subsets) != 2:
+                raise ValueError(
+                    "plot_type='compare_means' requires "
+                    "compare_subsets=[dict1, dict2]")
+            compare_subsets = [dict(compare_subsets[0]),
+                               dict(compare_subsets[1])]
+            if compare_labels is None:
+                compare_labels = [str(compare_subsets[0]),
+                                  str(compare_subsets[1])]
+            # Auto-enable margins (they will be drawn by the post-loop).
+            if right_margin is True:
+                right_margin = 'compare_means'
+            if bottom_margin is True:
+                bottom_margin = 'compare_means'
+
         subset = copy.copy(query_kwargs['subset'])
         sort_by = query_kwargs['sort_by']
         # For scalar saccade queries, only the keyword values are valid;
@@ -3236,6 +3715,79 @@ class TrackingExperiment():
               'durations' : ndarray, shape (n_saccades,) — saccade durations
                             for trace highlighting in plot_line.
             """
+            # ---------------------------------------------------------- #
+            # compare_means: query yvar for both compare_subsets, build   #
+            # per-subject value arrays aligned by pair_by attribute.      #
+            # ---------------------------------------------------------- #
+            if plot_type == 'compare_means':
+                per_subject = [{}, {}]  # {subject_id: [values]} per group
+                for group_i, cs in enumerate(compare_subsets):
+                    merged = {**cell_subset, **cs}
+                    if object == 'saccade':
+                        for trial in self.trials:
+                            sid = (getattr(trial, pair_by, None)
+                                   if pair_by else None)
+                            if sid is None:
+                                sid = id(trial)
+                            try:
+                                raw = trial.query(
+                                    object='saccade', output=yvar,
+                                    subset=merged,
+                                    groupby='trial',
+                                    agg_func=np.nanmean)
+                                if hasattr(raw, '__len__'):
+                                    val = float(np.nanmean(raw))
+                                else:
+                                    val = float(raw)
+                                if np.isfinite(val):
+                                    per_subject[group_i].setdefault(
+                                        sid, []).append(val)
+                            except Exception:
+                                continue
+                    else:
+                        for trial in self.trials:
+                            sid = (getattr(trial, pair_by, None)
+                                   if pair_by else None)
+                            if sid is None:
+                                sid = id(trial)
+                            try:
+                                raw = trial.query(
+                                    output=yvar, subset=merged,
+                                    sort_by=sort_by)
+                                if raw is None:
+                                    continue
+                                arr = np.asarray(raw, dtype=float)
+                                val = float(np.nanmean(arr))
+                                if np.isfinite(val):
+                                    per_subject[group_i].setdefault(
+                                        sid, []).append(val)
+                            except Exception:
+                                continue
+
+                # Collapse multiple trials per subject to a single mean.
+                ids1 = list(per_subject[0].keys())
+                vals1 = np.array([np.nanmean(per_subject[0][s])
+                                  for s in ids1], dtype=float)
+                ids2 = list(per_subject[1].keys())
+                vals2 = np.array([np.nanmean(per_subject[1][s])
+                                  for s in ids2], dtype=float)
+
+                # Apply rad2deg here so both groups are converted together.
+                if rad2deg:
+                    vals1 = np.degrees(vals1)
+                    vals2 = np.degrees(vals2)
+
+                _lbl = (compare_labels if compare_labels is not None
+                        else [str(compare_subsets[0]),
+                              str(compare_subsets[1])])
+                return vals1, vals2, {
+                    'ids1': ids1,
+                    'ids2': ids2,
+                    'labels': _lbl,
+                    'vals1': vals1,
+                    'vals2': vals2,
+                }
+
             if object == 'saccade':
                 # Inject speed conditions into a working copy of the subset.
                 eff_subset = dict(cell_subset)
@@ -3544,14 +4096,14 @@ class TrackingExperiment():
                 xs, ys, cell_extra = _get_xs_ys(cell_subset)
                 # Convert x data from radians to degrees when requested.
                 # trajectory2d is exempt — it feeds xs into cos/sin directly.
-                if rad2deg and xs is not None and plot_type != 'trajectory2d':
+                if rad2deg and xs is not None and plot_type not in ('trajectory2d', 'compare_means'):
                     xs = np.degrees(xs)
                 cell_cache[(row_i, col_i)] = (xs, ys, cell_extra)
                 if xs is None or xs.size == 0:
                     continue
 
                 if plot_type == 'hist2d' and ys is not None and ys.size > 0:
-                    h, _, _ = np.histogram2d(xs, ys, bins=bins)
+                    h, _, _ = np.histogram2d(xs, ys, bins=bins, density=density)
                     hist2d_maxes.append(float(h.max()))
 
                 elif plot_type == 'trajectory2d' and plot_kwargs.get('circ_hist'):
@@ -3637,6 +4189,11 @@ class TrackingExperiment():
         _effective_bin_ylim = ylim
         if _effective_bin_ylim is None and object == 'saccade' and plot_type == 'line':
             _effective_bin_ylim = (0.5, -0.25)
+
+        # Per-cell summary cache and stats rows (used by compare_means post-
+        # loop and return_stats).
+        cell_summary_cache = {}
+        _stats_rows = [] if return_stats else None
 
         for row_i, (row_ax_row, row_val, row_colors) in enumerate(zip(
                 trace_axes, row_vals, color_arr)):
@@ -3728,6 +4285,46 @@ class TrackingExperiment():
                                            else None),
                              **kw)
 
+                elif plot_type == 'compare_means':
+                    # xs = vals1, ys = vals2 from _get_xs_ys compare_means
+                    # branch.  Skip silently when either group is empty.
+                    if xs is None or ys is None or (len(xs) == 0 and len(ys) == 0):
+                        cell_summary_cache[(row_i, col_i)] = {
+                            'summary_dict': None,
+                            'cell_extra': cell_extra,
+                            'cell_color': cell_color,
+                        }
+                        continue
+                    kw_cm = dict(kw)
+                    summary_dict = plot_compare_means(
+                        ax, xs, ys, cell_color,
+                        labels=cell_extra.get('labels', compare_labels),
+                        paired_ids1=cell_extra.get('ids1'),
+                        paired_ids2=cell_extra.get('ids2'),
+                        marker_color=kw_cm.pop('marker_color', None),
+                        jitter_std=kw_cm.pop('jitter_std', 0.05),
+                        confidence=confidence,
+                        n_boot=n_boot,
+                        show_ns=kw_cm.pop('show_ns', True),
+                        ylim=ylim,
+                        **kw_cm)
+
+                # -------------------------------------------------------- #
+                # Cache summary_dict for margin post-loop and return_stats. #
+                # -------------------------------------------------------- #
+                cell_summary_cache[(row_i, col_i)] = {
+                    'summary_dict': summary_dict,
+                    'cell_extra': cell_extra,
+                    'cell_color': cell_color,
+                }
+                if return_stats and summary_dict is not None:
+                    _stats_rows.append({
+                        'row_val': row_val,
+                        'col_val': col_val,
+                        **{k: v for k, v in summary_dict.items()
+                           if not isinstance(v, np.ndarray)},
+                    })
+
                 # Per-cell N / n annotation.
                 if show_n and (row_i, col_i) in cell_counts:
                     _N_val, _n_val = cell_counts[(row_i, col_i)]
@@ -3738,6 +4335,10 @@ class TrackingExperiment():
                             ha='right', va='bottom', color='black', zorder=10)
 
                 # Margin drawing for this cell.
+                # compare_means margins are handled by the post-loop below.
+                if plot_type == 'compare_means':
+                    continue
+
                 # For saccade line plots, histogram margins show the endpoint
                 # (stopping value) of each saccade trace, not all time points.
                 _margin_xs, _margin_ys = xs, ys
@@ -3808,6 +4409,195 @@ class TrackingExperiment():
                         overlay_index=row_i,
                         linestyle=_bottom_ls, label=_bottom_lbl)
 
+        # ---------------------------------------------------------------- #
+        # compare_means margin post-loop                                    #
+        # ---------------------------------------------------------------- #
+        # Margin axes for compare_means are populated after all cells have  #
+        # been drawn, so we can aggregate per-subject values across cells.  #
+        if plot_type == 'compare_means' and (_has_right or _has_bottom):
+
+            def _subject_diffs(sd):
+                """Per-subject (vals2 - vals1) for subjects in both groups."""
+                if sd is None:
+                    return np.array([]), []
+                v1 = np.asarray(sd.get('vals1', []), dtype=float)
+                v2 = np.asarray(sd.get('vals2', []), dtype=float)
+                g1 = list(sd.get('ids1', []))
+                g2 = list(sd.get('ids2', []))
+                id2_map = {s: i for i, s in enumerate(g2)}
+                id1_idx = {s: i for i, s in enumerate(g1)}
+                diffs, diff_ids = [], []
+                for sid in g1:
+                    if sid in id2_map:
+                        i = id1_idx[sid]
+                        j = id2_map[sid]
+                        if (i < len(v1) and j < len(v2)
+                                and np.isfinite(v1[i])
+                                and np.isfinite(v2[j])):
+                            diffs.append(v2[j] - v1[i])
+                            diff_ids.append(sid)
+                return np.array(diffs), diff_ids
+
+            def _subject_means(sd):
+                """Per-subject grand mean across both groups."""
+                if sd is None:
+                    return np.array([]), []
+                v1 = np.asarray(sd.get('vals1', []), dtype=float)
+                v2 = np.asarray(sd.get('vals2', []), dtype=float)
+                g1 = list(sd.get('ids1', []))
+                g2 = list(sd.get('ids2', []))
+                id2_map = {s: i for i, s in enumerate(g2)}
+                g1_set = set(g1)
+                means, mean_ids = [], []
+                for i, sid in enumerate(g1):
+                    vals = []
+                    if i < len(v1) and np.isfinite(v1[i]):
+                        vals.append(v1[i])
+                    if sid in id2_map:
+                        j = id2_map[sid]
+                        if j < len(v2) and np.isfinite(v2[j]):
+                            vals.append(v2[j])
+                    if vals:
+                        means.append(np.nanmean(vals))
+                        mean_ids.append(sid)
+                for j, sid in enumerate(g2):
+                    if sid not in g1_set and j < len(v2) and np.isfinite(v2[j]):
+                        means.append(v2[j])
+                        mean_ids.append(sid)
+                return np.array(means), mean_ids
+
+            _margin_labels = (compare_labels if compare_labels is not None
+                              else [str(compare_subsets[0]),
+                                    str(compare_subsets[1])])
+            _cm_kw = {k: v for k, v in plot_kwargs.items()
+                      if k in ('marker_color', 'jitter_std', 'show_ns', 's', 'alpha',
+                               'clip_on')}
+            _cm_kw.setdefault('jitter_std', 0.05)
+            _cm_kw.setdefault('show_ns', False)
+
+            if _has_right:
+                for row_i, (row_val, row_colors) in enumerate(
+                        zip(row_vals, color_arr)):
+                    row_summ_ax = self.display.right_col[row_i]
+                    if row_summ_ax is None:
+                        continue
+                    row_color = row_colors[0]
+                    m_mc = None
+                    if (n_data_cols == 2
+                            and margin_mode in ('diff_of_diffs',
+                                                'diff_of_means')):
+                        _sd0 = ((cell_summary_cache.get((row_i, 0)) or {})
+                                .get('summary_dict'))
+                        _sd1 = ((cell_summary_cache.get((row_i, 1)) or {})
+                                .get('summary_dict'))
+                        if margin_mode == 'diff_of_diffs':
+                            m_v1, m_i1 = _subject_diffs(_sd0)
+                            m_v2, m_i2 = _subject_diffs(_sd1)
+                        else:
+                            m_v1, m_i1 = _subject_means(_sd0)
+                            m_v2, m_i2 = _subject_means(_sd1)
+                        # Color x=0 dots with col-0 color, x=1 dots with col-1 color.
+                        _cc0 = np.asarray(row_colors[0], dtype=float)
+                        _cc1 = np.asarray(row_colors[1], dtype=float)
+                        m_mc = (
+                            np.tile(_cc0, (len(m_v1), 1)) if len(m_v1) else np.zeros((0, 3)),
+                            np.tile(_cc1, (len(m_v2), 1)) if len(m_v2) else np.zeros((0, 3)))
+                    else:
+                        _parts1, _parts2 = [], []
+                        _col_mc1, _col_mc2 = [], []
+                        for c in range(n_data_cols):
+                            _sd = ((cell_summary_cache.get((row_i, c)) or {})
+                                   .get('summary_dict'))
+                            _p1 = np.asarray((_sd or {}).get('vals1', []),
+                                             dtype=float)
+                            _p2 = np.asarray((_sd or {}).get('vals2', []),
+                                             dtype=float)
+                            _parts1.append(_p1)
+                            _parts2.append(_p2)
+                            _cc = np.asarray(row_colors[c], dtype=float)
+                            _col_mc1.append(np.tile(_cc, (len(_p1), 1)))
+                            _col_mc2.append(np.tile(_cc, (len(_p2), 1)))
+                        m_v1 = np.concatenate(_parts1)
+                        m_v2 = np.concatenate(_parts2)
+                        m_mc = (
+                            np.concatenate(_col_mc1) if _col_mc1 else np.zeros((0, 3)),
+                            np.concatenate(_col_mc2) if _col_mc2 else np.zeros((0, 3)))
+                        m_i1 = m_i2 = None
+                    if len(m_v1) == 0 and len(m_v2) == 0:
+                        continue
+                    _right_ylim_ref = (right_margin_ylim if right_margin_ylim is not None
+                                       else ylim)
+                    plot_compare_means(
+                        row_summ_ax, m_v1, m_v2, row_color,
+                        labels=_margin_labels,
+                        paired_ids1=m_i1 if m_i1 else None,
+                        paired_ids2=m_i2 if m_i2 else None,
+                        marker_colors=m_mc,
+                        confidence=confidence, n_boot=n_boot,
+                        ylim=_right_ylim_ref,
+                        **_cm_kw)
+
+            if _has_bottom:
+                for col_i, col_val in enumerate(col_vals):
+                    col_summ_ax = self.display.bottom_row[col_i]
+                    if col_summ_ax is None:
+                        continue
+                    col_color = color_arr[0][col_i]
+                    m_mc = None
+                    if (n_data_rows == 2
+                            and margin_mode in ('diff_of_diffs',
+                                                'diff_of_means')):
+                        _sd0 = ((cell_summary_cache.get((0, col_i)) or {})
+                                .get('summary_dict'))
+                        _sd1 = ((cell_summary_cache.get((1, col_i)) or {})
+                                .get('summary_dict'))
+                        if margin_mode == 'diff_of_diffs':
+                            m_v1, m_i1 = _subject_diffs(_sd0)
+                            m_v2, m_i2 = _subject_diffs(_sd1)
+                        else:
+                            m_v1, m_i1 = _subject_means(_sd0)
+                            m_v2, m_i2 = _subject_means(_sd1)
+                        # Color x=0 dots with row-0 color, x=1 dots with row-1 color.
+                        _rc0 = np.asarray(color_arr[0][col_i], dtype=float)
+                        _rc1 = np.asarray(color_arr[1][col_i], dtype=float)
+                        m_mc = (
+                            np.tile(_rc0, (len(m_v1), 1)) if len(m_v1) else np.zeros((0, 3)),
+                            np.tile(_rc1, (len(m_v2), 1)) if len(m_v2) else np.zeros((0, 3)))
+                    else:
+                        _parts1, _parts2 = [], []
+                        _row_mc1, _row_mc2 = [], []
+                        for r in range(n_data_rows):
+                            _sd = ((cell_summary_cache.get((r, col_i)) or {})
+                                   .get('summary_dict'))
+                            _p1 = np.asarray((_sd or {}).get('vals1', []),
+                                             dtype=float)
+                            _p2 = np.asarray((_sd or {}).get('vals2', []),
+                                             dtype=float)
+                            _parts1.append(_p1)
+                            _parts2.append(_p2)
+                            _rc = np.asarray(color_arr[r][col_i], dtype=float)
+                            _row_mc1.append(np.tile(_rc, (len(_p1), 1)))
+                            _row_mc2.append(np.tile(_rc, (len(_p2), 1)))
+                        m_v1 = np.concatenate(_parts1)
+                        m_v2 = np.concatenate(_parts2)
+                        m_mc = (
+                            np.concatenate(_row_mc1) if _row_mc1 else np.zeros((0, 3)),
+                            np.concatenate(_row_mc2) if _row_mc2 else np.zeros((0, 3)))
+                        m_i1 = m_i2 = None
+                    if len(m_v1) == 0 and len(m_v2) == 0:
+                        continue
+                    _bottom_ylim_ref = (bottom_margin_ylim if bottom_margin_ylim is not None
+                                        else ylim)
+                    plot_compare_means(
+                        col_summ_ax, m_v1, m_v2, col_color,
+                        labels=_margin_labels,
+                        paired_ids1=m_i1 if m_i1 else None,
+                        paired_ids2=m_i2 if m_i2 else None,
+                        marker_colors=m_mc,
+                        confidence=confidence, n_boot=n_boot,
+                        ylim=_bottom_ylim_ref,
+                        **_cm_kw)
+
         # Add legends to margin axes where linestyles were used to distinguish
         # overlapping same-color lines (i.e. the corresponding cmap was None).
         _leg_fs = plt.rcParams.get('xtick.labelsize',
@@ -3845,6 +4635,32 @@ class TrackingExperiment():
                 xlim = (-180, 180) if rad2deg else (-np.pi, np.pi)
             if ylim is None:
                 ylim = (0.5, -0.25)
+
+        # For compare_means: expand ylim to match the in-axis bracket headroom
+        # that plot_compare_means added on each cell.  All main axes must share
+        # the same expanded top so format() sets them consistently.
+        # Save the original (unexpanded) ylim so the post-format block can
+        # position spines at the original data bottom.
+        _cm_original_ylim = ylim
+        if plot_type == 'compare_means':
+            _needed_tops = [
+                v['summary_dict']['needed_ymax']
+                for v in cell_summary_cache.values()
+                if (v.get('summary_dict') or {}).get('needed_ymax') is not None
+            ]
+            _needed_bots = [
+                v['summary_dict']['needed_ymin']
+                for v in cell_summary_cache.values()
+                if (v.get('summary_dict') or {}).get('needed_ymin') is not None
+            ]
+            if (_needed_tops or _needed_bots) and ylim is not None:
+                _yl_lo, _yl_hi = min(ylim), max(ylim)
+                _global_top = max(_needed_tops) if _needed_tops else _yl_hi
+                _global_bot = min(_needed_bots) if _needed_bots else _yl_lo
+                _yl_lo = min(_yl_lo, _global_bot)
+                _yl_hi = max(_yl_hi, _global_top)
+                ylim = (_yl_lo, _yl_hi) if ylim[0] <= ylim[1] \
+                       else (_yl_hi, _yl_lo)
 
         self.display.format(
             xlim=xlim, ylim=ylim, xlabel=_xlabel, ylabel=_ylabel,
@@ -3896,10 +4712,18 @@ class TrackingExperiment():
                 for _rax in self.display.right_col:
                     if _rax is None:
                         continue
-                    # Shared y-axis.
-                    _rax.set_ylim(
-                        right_margin_ylim if right_margin_ylim is not None
-                        else _main_ylim)
+                    # Shared y-axis.  For compare_means, expand the margin
+                    # ylim by 20% (same headroom added per-cell inside
+                    # plot_compare_means) so the in-axis bracket is visible.
+                    _rm_ylim = right_margin_ylim if right_margin_ylim is not None else _main_ylim
+                    if (plot_type == 'compare_means'
+                            and 'compare_means' in right_margin_types
+                            and right_margin_ylim is not None):
+                        _rm_r = abs(_rm_ylim[1] - _rm_ylim[0])
+                        _rm_lo, _rm_hi = min(_rm_ylim), max(_rm_ylim)
+                        _rm_ylim = (_rm_lo - _rm_r * 0.20, _rm_hi + _rm_r * 0.20) if _rm_ylim[0] <= _rm_ylim[1] \
+                                   else (_rm_hi + _rm_r * 0.20, _rm_lo - _rm_r * 0.20)
+                    _rax.set_ylim(_rm_ylim)
                     # Independent x-axis.
                     if right_margin_xlim is not None:
                         _rax.set_xlim(right_margin_xlim)
@@ -3918,9 +4742,17 @@ class TrackingExperiment():
                     _bax.set_xlim(
                         bottom_margin_xlim if bottom_margin_xlim is not None
                         else _main_xlim)
-                    # Independent y-axis.
+                    # Independent y-axis.  For compare_means, expand the
+                    # margin ylim by 20% to accommodate the in-axis bracket.
                     if bottom_margin_ylim is not None:
-                        _bax.set_ylim(bottom_margin_ylim)
+                        _bm_lim = bottom_margin_ylim
+                        if (plot_type == 'compare_means'
+                                and 'compare_means' in bottom_margin_types):
+                            _bm_r = abs(_bm_lim[1] - _bm_lim[0])
+                            _bm_lo, _bm_hi = min(_bm_lim), max(_bm_lim)
+                            _bm_lim = (_bm_lo - _bm_r * 0.20, _bm_hi + _bm_r * 0.20) if _bm_lim[0] <= _bm_lim[1] \
+                                      else (_bm_hi + _bm_r * 0.20, _bm_lo - _bm_r * 0.20)
+                        _bax.set_ylim(_bm_lim)
                     elif _same_type_bottom:
                         _bax.set_ylim(_main_ylim)
                     else:
@@ -3961,7 +4793,153 @@ class TrackingExperiment():
             _raxes = [a for a in self.display.right_col if a is not None]
             if _raxes:
                 _raxes[-1].set_xlabel(_count_label)
-        self.display.label_margins(row_vals, row_var, col_vals, col_var)
+        self.display.label_margins(row_vals, row_var, col_vals, col_var,
+                                   bottom_scale=1.0)
+
+        # Post-format despine for compare_means: trim now that yticks are set.
+        # Bottom spines are shown on ALL rows (not just the bottom row) so that
+        # the axis line is visible below the mean annotations.
+        # Right-margin axes keep their left spine when right_margin_ylim differs
+        # from the main ylim (i.e. they show an independent y-scale).
+        if plot_type == 'compare_means':
+            _n_trace_rows = self.display.trace_axes.shape[0]
+            # Derive compare variable name from compare_subsets keys for default xlabel.
+            _cs_keys = list(dict.fromkeys(
+                k for cs in compare_subsets for k in cs.keys()))
+            _compare_var_name = ', '.join(_cs_keys)
+            _main_xlabel  = compare_xlabel        if compare_xlabel        is not None else _compare_var_name
+            _right_xlabel = right_margin_xlabel   if right_margin_xlabel   is not None else col_var
+            _bottom_xlabel= bottom_margin_xlabel  if bottom_margin_xlabel  is not None else row_var
+            # Spine y-position: original data minimum (inside expanded ylim buffer).
+            _cm_orig_spine_y = (min(_cm_original_ylim)
+                                if _cm_original_ylim is not None else None)
+            # --- Main grid axes ---
+            for _ri, _row in enumerate(self.display.trace_axes):
+                for _ci, _tax in enumerate(_row):
+                    while isinstance(_tax, np.ndarray):
+                        _tax = _tax[0]
+                    _is_left = (_ci == 0)
+                    # Set xticks BEFORE despine so trim clips to [0, 1] correctly.
+                    _tax.set_xticks([0, 1])
+                    # sbn.despine: left=True hides left spine, left=False keeps it.
+                    sbn.despine(ax=_tax, trim=True, left=not _is_left)
+                    # Position bottom spine at original data minimum.
+                    _tax.spines['bottom'].set_visible(True)
+                    if _cm_orig_spine_y is not None:
+                        _tax.spines['bottom'].set_position(('data', _cm_orig_spine_y))
+                    else:
+                        _tax.spines['bottom'].set_position(('outward', _CM_SPINE_PTS))
+                    labelbottom = (_ri == _n_trace_rows - 1)
+                    _tax.tick_params(axis='x', which='both', bottom=True,
+                                     labelbottom=labelbottom, pad=_CM_TICK_PAD)
+                    if labelbottom and _main_xlabel:
+                        _tax.set_xlabel(_main_xlabel)
+            # Show left spine on margin axes only when they have a different scale.
+            _rm_has_own_scale = (right_margin_ylim is not None
+                                 or right_margin_yticks is not None)
+            _bm_has_own_scale = (bottom_margin_ylim is not None
+                                 or bottom_margin_yticks is not None)
+            # Ylabel for margin plots (difference-of-differences or difference-of-means).
+            _margin_ylabel = (r'$\Delta(\Delta)$' if margin_mode == 'diff_of_diffs'
+                              else r'$\Delta$')
+            # --- Right-margin axes ---
+            if _has_right:
+                _right_nonempty = [a for a in self.display.right_col if a is not None]
+                for _rax in self.display.right_col:
+                    if _rax is not None:
+                        _is_bottom_right = (_rax is _right_nonempty[-1])
+                        # Set ticks BEFORE despine so trim clips correctly.
+                        _rax.set_xticks([0, 1])
+                        if right_margin_yticks is not None:
+                            _rm_yt, _rm_ytl = right_margin_yticks
+                            _rax.set_yticks(_rm_yt)
+                            _rax.set_yticklabels([str(v) for v in _rm_ytl])
+                        sbn.despine(ax=_rax, trim=True, left=not _rm_has_own_scale)
+                        # sbn.despine(trim=True) internally filters yticks to those
+                        # within get_ylim(), which may exclude right_margin_yticks
+                        # when ylim comes from the main panels.  Re-apply now.
+                        if right_margin_yticks is not None:
+                            _rax.set_yticks(_rm_yt)
+                            _rax.set_yticklabels([str(v) for v in _rm_ytl])
+                            _rax.spines['left'].set_bounds(
+                                min(_rm_yt), max(_rm_yt))
+                        # format() called _hide_spine('left') on non-leftmost axes,
+                        # setting tick_params(left=False, labelleft=False). Re-enable
+                        # y-ticks now that the left spine has been restored by despine.
+                        if _rm_has_own_scale:
+                            _rax.tick_params(axis='y', which='both',
+                                             left=True, labelleft=True)
+                            _rax.set_ylabel(_margin_ylabel)
+                        # Re-set xticks in case despine filtered them.
+                        _rax.set_xticks([0, 1])
+                        _rax.spines['bottom'].set_visible(True)
+                        _rm_spine_y = (min(right_margin_ylim)
+                                       if right_margin_ylim is not None else None)
+                        if _rm_spine_y is not None:
+                            _rax.spines['bottom'].set_position(('data', _rm_spine_y))
+                        else:
+                            _rax.spines['bottom'].set_position(('outward', _CM_SPINE_PTS))
+                        # X-tick labels and xlabel: only on the bottom-most right-margin
+                        # axis (all share the same x-axis structure, no need to repeat).
+                        _rax.set_xticklabels([str(v) for v in list(col_vals)[:2]])
+                        _rax.tick_params(axis='x', which='both', bottom=True,
+                                         labelbottom=_is_bottom_right, pad=_CM_TICK_PAD)
+                        if _is_bottom_right and _right_xlabel:
+                            _rax.set_xlabel(_right_xlabel)
+            # --- Bottom-margin axes ---
+            if _has_bottom:
+                for _bi, _bax in enumerate(self.display.bottom_row):
+                    if _bax is not None:
+                        _bm_is_left = (_bi == 0)
+                        # Set ticks BEFORE despine so trim clips correctly.
+                        _bax.set_xticks([0, 1])
+                        if bottom_margin_yticks is not None:
+                            _bm_yt, _bm_ytl = bottom_margin_yticks
+                            _bax.set_yticks(_bm_yt)
+                            _bax.set_yticklabels([str(v) for v in _bm_ytl])
+                        # Left spine: only on first bottom-margin subplot (they
+                        # share the same y-axis, so later ones need no spine).
+                        _show_bm_left = _bm_is_left and _bm_has_own_scale
+                        sbn.despine(ax=_bax, trim=True, left=not _show_bm_left)
+                        # Re-apply yticks after despine for the same reason as
+                        # the right margin: seaborn may have filtered them.
+                        if bottom_margin_yticks is not None:
+                            _bax.set_yticks(_bm_yt)
+                            _bax.set_yticklabels([str(v) for v in _bm_ytl])
+                            _bax.spines['left'].set_bounds(
+                                min(_bm_yt), max(_bm_yt))
+                        # For the first bottom-margin axis, re-enable ytick visibility
+                        # (format() may have hidden them) and set the ylabel.
+                        if _bm_is_left and _bm_has_own_scale:
+                            _bax.tick_params(axis='y', which='both',
+                                             left=True, labelleft=True)
+                            _bax.set_ylabel(_margin_ylabel)
+                        # Re-set xticks in case despine filtered them.
+                        _bax.set_xticks([0, 1])
+                        _bax.spines['bottom'].set_visible(True)
+                        _bm_spine_y = (min(bottom_margin_ylim)
+                                       if bottom_margin_ylim is not None else None)
+                        if _bm_spine_y is not None:
+                            _bax.spines['bottom'].set_position(('data', _bm_spine_y))
+                        else:
+                            _bax.spines['bottom'].set_position(('outward', _CM_SPINE_PTS))
+                        # X-tick labels: row variable values
+                        _bax.set_xticklabels([str(v) for v in list(row_vals)[:2]])
+                        _bax.tick_params(axis='x', which='both', bottom=True,
+                                         labelbottom=True, pad=_CM_TICK_PAD)
+                        if _bottom_xlabel:
+                            _bax.set_xlabel(_bottom_xlabel)
+            # Brackets are now inside axis bounds, so less hspace is needed.
+            _sh = getattr(self.display, '_subplot_height', 2.0)
+            _hspace = 0.8 / max(_sh, 0.5)
+            self.display._hspace = _hspace
+            self.display.fig.subplots_adjust(hspace=_hspace)
+            # When right-margin axes carry a ylabel, shift only those axes
+            # rightward so the label doesn't overlap the adjacent main column.
+            # This avoids touching wspace (which would affect all columns).
+            if _has_right and _rm_has_own_scale:
+                self.display._right_col_pad_pts = 40
+            self.display._apply_right_col_pad()
 
         # For trajectory2d, replace the Cartesian spines with a polar ring
         # on every trace axis and every margin axis.
@@ -3986,6 +4964,15 @@ class TrackingExperiment():
                     if _bax is not None:
                         _add_polar_ring(_bax, has_circ_hist=bool(_circ_hist),
                                         show_labels=False)
+
+        # ---------------------------------------------------------------- #
+        # Return                                                            #
+        # ---------------------------------------------------------------- #
+        if return_stats:
+            import pandas as pd
+            _stats_df = pd.DataFrame(_stats_rows) if _stats_rows else None
+            return (self.display, _stats_df)
+        return self.display
 
     def plot_saccades(self, col_var, row_var, output_var='camera_heading', time_var='time', start=0, 
                       stop=.5, row_cmap=None, col_cmap=None, 
@@ -4725,6 +5712,13 @@ class SummaryDisplay():
                 fig_h = n_data_rows * sh + (bottom_margin_ratio * sh if bottom_margin else 0)
                 figsize = (fig_w, fig_h)
             self.fig = plt.figure(figsize=figsize, **fig_kwargs)
+        # Store subplot height so callers can compute hspace proportionally.
+        if subplot_size is not None:
+            self._subplot_height = float(subplot_size[1])
+        elif figsize is not None and n_data_rows > 0:
+            self._subplot_height = float(figsize[1]) / n_data_rows
+        else:
+            self._subplot_height = 2.0
 
         if isinstance(self.fig, plt.Figure):
             # make it a subfigure
@@ -4791,6 +5785,9 @@ class SummaryDisplay():
         self._col_label_artists = None
         # let's add a re-entry guard to the update function
         self._updating = False
+        self._bottom_scale = 1.0  # multiplier for bottom_bound in label_margins
+        self._hspace = None            # optional hspace override for subplots_adjust
+        self._right_col_pad_pts = 0   # pts to shift right-margin axes right (ylabel clearance)
 
     def _get_fig_size_inches(self):
         """Robustly compute size in inches for Figure or SubFigure."""
@@ -4916,8 +5913,29 @@ class SummaryDisplay():
         val_top = float(np.min(val_top_list)) if val_top_list else 0.0
         return (val_top + xlabel_bottom) * 0.5
 
-    def label_margins(self, row_vals=None, row_label=None, col_vals=None, col_label=None):
+    def _apply_right_col_pad(self):
+        """Shift right-margin axes rightward by _right_col_pad_pts points.
+
+        Called after every subplots_adjust so that the automatic layout reset
+        does not undo the shift.  Only the right-margin column is moved;
+        the main-grid columns are unaffected.
+        """
+        if not self._right_col_pad_pts or not self.right_margin:
+            return
+        fig_w, _ = self._get_fig_size_inches()
+        if fig_w <= 0:
+            return
+        pad_frac = self._right_col_pad_pts / (fig_w * 72.0)
+        for ax in self.right_col:
+            if ax is not None:
+                pos = ax.get_position()
+                ax.set_position([pos.x0 + pad_frac, pos.y0,
+                                 pos.width, pos.height])
+
+    def label_margins(self, row_vals=None, row_label=None, col_vals=None, col_label=None,
+                      bottom_scale=1.0):
         """Add values and a label to indicate differences across rows/cols using actual label bboxes."""
+        self._bottom_scale = bottom_scale
         left_col = self.trace_axes[:, 0]
         bottom_row = self.axes[-1]
         if self.right_margin:
@@ -4938,13 +5956,17 @@ class SummaryDisplay():
         if labelsize in labelsize_conv:
             labelsize = labelsize_conv[labelsize]
         if row_label is not None:
-            self.left_bound = labelsize / (8. * fig_width)
+            self.left_bound = 1.0 / fig_width   # fixed 1-inch left margin
             self.adjusted_left = True
         if col_label is not None:
-            self.bottom_bound = .72 * labelsize / (8. * fig_height)
+            self.bottom_bound = 1.25 * self._bottom_scale / fig_height  # fixed 1.25-inch bottom
             self.adjusted_bottom = True
         if self.adjusted_left or self.adjusted_bottom:
-            self.fig.subplots_adjust(left=self.left_bound, bottom=self.bottom_bound)
+            _adj_kw = {}
+            if self._hspace is not None:
+                _adj_kw['hspace'] = self._hspace
+            self.fig.subplots_adjust(left=self.left_bound, bottom=self.bottom_bound, **_adj_kw)
+            self._apply_right_col_pad()
 
         # ------------------------------------------------------------------ #
         # Row labels: separate Text artists, one per row, placed at x=0       #
@@ -5030,15 +6052,19 @@ class SummaryDisplay():
             xmaxs = float(np.max(x_c[:, 0])) if len(x_c) else 0.8
 
             label = col_label.replace("_", " ")
-            txt_y = .1 / fig_height
+            # Pack col labels tightly just below the xlabel of the bottom row.
+            # val_y: centre of column-value texts, 2 font-heights below the xlabel;
+            # txt_y: bottom of the column-variable label, 2 font-heights below val_y.
+            label_h_norm = labelsize / (fig_height * 72.0)
+            xlabel_bottom_min = float(np.min(x_b[:, 1])) if len(x_b) else self.bottom_bound
+            val_y = max(xlabel_bottom_min - 2.0 * label_h_norm, 3.0 * label_h_norm)
+            txt_y = max(val_y - 2.0 * label_h_norm, 0.8 * label_h_norm)
             col_text = self.fig.text(x_center, txt_y, label,
                                      va='bottom', ha='center',
                                      transform=coord_trans, fontsize=labelsize)
 
             col_val_texts = []
             col_iter = col_vals if col_vals is not None else []
-            xlabel_bottom_min = float(np.min(x_b[:, 1])) if len(x_b) else self.bottom_bound
-            val_y = xlabel_bottom_min * 0.5  # midpoint between figure bottom and xlabel
             for ax, val, xc in zip(bottom_row, col_iter,
                                    x_c[:, 0] if len(x_c) else [x_center]):
                 while isinstance(ax, np.ndarray):
@@ -5105,11 +6131,15 @@ class SummaryDisplay():
             if labelsize in labelsize_conv:
                 labelsize = labelsize_conv[labelsize]
             if self.adjusted_left:
-                self.left_bound = float(labelsize) / (8. * fig_width)
+                self.left_bound = 1.0 / fig_width   # fixed 1-inch left margin
             if self.adjusted_bottom:
-                self.bottom_bound = 0.72 * float(labelsize) / (8. * fig_height)
+                self.bottom_bound = 1.25 * self._bottom_scale / fig_height  # fixed 1.25-inch bottom
             if self.adjusted_left or self.adjusted_bottom:
-                self.fig.subplots_adjust(left=self.left_bound, bottom=self.bottom_bound)
+                _adj_kw = {}
+                if self._hspace is not None:
+                    _adj_kw['hspace'] = self._hspace
+                self.fig.subplots_adjust(left=self.left_bound, bottom=self.bottom_bound, **_adj_kw)
+                self._apply_right_col_pad()
             coord_trans = self._get_coord_transform()
 
             # Row updates
@@ -5149,13 +6179,14 @@ class SummaryDisplay():
                 x_center = float(np.mean(x_c[:, 0])) if len(x_c) else 0.5
                 xmins = float(np.min(x_c[:, 0])) if len(x_c) else 0.2
                 xmaxs = float(np.max(x_c[:, 0])) if len(x_c) else 0.8
-                txt_y = .1 / fig_height
+                label_h_norm = float(labelsize) / (fig_height * 72.0)
+                xlabel_bottom_min = float(np.min(x_b[:, 1])) if len(x_b) else self.bottom_bound
+                val_y = max(xlabel_bottom_min - 2.0 * label_h_norm, 3.0 * label_h_norm)
+                txt_y = max(val_y - 2.0 * label_h_norm, 0.8 * label_h_norm)
                 self._col_label_artists['text'].set_position((x_center, txt_y))
                 self._col_label_artists['text'].set_transform(coord_trans)
 
                 val_texts = self._col_label_artists.get('val_texts', [])
-                xlabel_bottom_min = float(np.min(x_b[:, 1])) if len(x_b) else self.bottom_bound
-                val_y = xlabel_bottom_min * 0.5
                 for i, (t, xc) in enumerate(zip(val_texts,
                                                   x_c[:, 0] if len(x_c) else [x_center])):
                     t.set_position((float(xc), val_y))
@@ -7547,17 +8578,19 @@ def sigAsterisk(p):
     return ret
 
 def plot_diff_brackets(label, x1, x2, y1, y2, y_label, col='k',
-                       vert=False, ax=None, lw=1, size='medium'):
+                       vert=False, ax=None, lw=None, size='medium'):
     if ax is None:
         ax = plt.gca()
+    if lw is None:
+        lw = ax.spines['bottom'].get_linewidth()
     if vert:
-        ax.plot([y1, y_label, y_label, y2], [x1, x1, x2, x2],
-                color=col, clip_on=False)
+        ax.plot([y_label, y_label], [x1, x2],
+                color=col, clip_on=False, lw=lw)
         ax.text(y_label, (x1+x2)*.5, label, ha='center', va='bottom',
                  color=col, rotation='vertical', size=size)
     else:
-        ax.plot([x1, x1, x2, x2], [y1, y_label, y_label, y2],
-                color=col, clip_on=False)
+        ax.plot([x1, x2], [y_label, y_label],
+                color=col, clip_on=False, lw=lw)
         ax.text((x1+x2)*.5, y_label, label, ha='center', va='bottom',
                  color=col, rotation='horizontal', size=size)
 
